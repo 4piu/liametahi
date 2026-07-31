@@ -449,16 +449,16 @@ def test_sender_match_regex_literal_is_compiled() -> None:
 
 
 def test_regex_literal_without_flags_is_case_sensitive() -> None:
-    tree = parse_condition_tree({"subject-match": "/urgent/"})
-    assert isinstance(tree, rules.SubjectMatch)
+    tree = parse_condition_tree({"subject-contains": "/urgent/"})
+    assert isinstance(tree, rules.SubjectContains)
     assert isinstance(tree.pattern, rules.RegexPattern)
     assert tree.pattern.regex.search("Urgent: reply needed") is None
     assert tree.pattern.regex.search("this is urgent")
 
 
 def test_regex_literal_g_flag_is_a_documented_no_op() -> None:
-    tree = parse_condition_tree({"subject-match": "/urgent/g"})
-    assert isinstance(tree, rules.SubjectMatch)
+    tree = parse_condition_tree({"subject-contains": "/urgent/g"})
+    assert isinstance(tree, rules.SubjectContains)
     assert isinstance(tree.pattern, rules.RegexPattern)
     assert tree.pattern.regex.search("this is urgent")
 
@@ -476,8 +476,8 @@ def test_regex_literal_unknown_flag_rejected() -> None:
 def test_value_that_is_just_a_slash_stays_literal() -> None:
     """A single `/` cannot supply both delimiters, so it is not
     misparsed as an (invalid) empty regex."""
-    tree = parse_condition_tree({"subject-match": "/"})
-    assert isinstance(tree, rules.SubjectMatch)
+    tree = parse_condition_tree({"subject-contains": "/"})
+    assert isinstance(tree, rules.SubjectContains)
     assert isinstance(tree.pattern, rules.LiteralPattern)
     assert tree.pattern.text == "/"
 

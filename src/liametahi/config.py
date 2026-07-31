@@ -153,7 +153,7 @@ _REGEX_NOOP_FLAGS = frozenset({"g"})
 
 
 def _parse_match_pattern(key: str, value: object) -> rules.MatchPattern:
-    """A `sender-match`/`recipient-match`/`subject-match`/`list-id-contains`
+    """A `sender-match`/`recipient-match`/`subject-contains`/`list-id-contains`
     value (spec §7.1): either a plain glob/substring (the default, matched
     case-insensitively), or a `/pattern/flags` regex literal, compiled
     once here so a malformed pattern is a config-load error, never a
@@ -212,8 +212,8 @@ def _parse_atom(key: str, value: object) -> rules.Atom:
         return rules.SenderMatch(pattern=_parse_match_pattern(key, value))
     if key == "recipient-match":
         return rules.RecipientMatch(pattern=_parse_match_pattern(key, value))
-    if key == "subject-match":
-        return rules.SubjectMatch(pattern=_parse_match_pattern(key, value))
+    if key == "subject-contains":
+        return rules.SubjectContains(pattern=_parse_match_pattern(key, value))
     if key == "list-id-contains":
         return rules.ListIdContains(pattern=_parse_match_pattern(key, value))
     if key == "has-header":
@@ -227,7 +227,7 @@ def _parse_atom(key: str, value: object) -> rules.Atom:
     raise ConfigError(
         f"unknown condition {key!r}; expected one of all/any/not or an atom "
         "(older-than, newer-than, sender-match, recipient-match, "
-        "subject-match, list-id-contains, has-header, has-flag, in-mailbox, "
+        "subject-contains, list-id-contains, has-header, has-flag, in-mailbox, "
         "larger-than, llm)"
     )
 

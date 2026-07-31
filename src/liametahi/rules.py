@@ -68,7 +68,7 @@ class RegexPattern:
     regex: re.Pattern[str]
 
 
-#: Which of the two forms a `sender-match`/`recipient-match`/`subject-match`/
+#: Which of the two forms a `sender-match`/`recipient-match`/`subject-contains`/
 #: `list-id-contains` value takes; `config.py` decides which at parse time.
 MatchPattern = LiteralPattern | RegexPattern
 
@@ -99,7 +99,7 @@ class RecipientMatch:
 
 
 @dataclass(frozen=True, slots=True)
-class SubjectMatch:
+class SubjectContains:
     pattern: MatchPattern
 
 
@@ -138,7 +138,7 @@ Atom = (
     | NewerThan
     | SenderMatch
     | RecipientMatch
-    | SubjectMatch
+    | SubjectContains
     | ListIdContains
     | HasHeader
     | HasFlag
@@ -186,7 +186,7 @@ def _eval_atom(atom: Atom, candidate: Candidate, *, now: datetime) -> Tri:
             if _pattern_matches(atom.pattern, recipient, mode="glob"):
                 return Tri.TRUE
         return Tri.FALSE
-    if isinstance(atom, SubjectMatch):
+    if isinstance(atom, SubjectContains):
         if candidate.subject is None:
             return Tri.FALSE
         matched = _pattern_matches(atom.pattern, candidate.subject, mode="substring")

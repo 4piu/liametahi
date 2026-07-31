@@ -207,26 +207,40 @@ namespaced id (`vendor/model`). OpenRouter also accepts optional
 
 ### Rule conditions
 
-| Condition | Argument | Notes |
+| Condition | Plain-form default | Notes |
 | --- | --- | --- |
-| `older-than` / `newer-than` | `30d`, `12h` | against `INTERNALDATE` |
-| `sender-match` | glob or `/regex/flags` | `From` address only |
-| `recipient-match` | glob or `/regex/flags` | any of `To`/`Cc`/`Delivered-To`/`X-Original-To` |
-| `subject-match` | substring or `/regex/flags` | not a glob in its plain form |
-| `list-id-contains` | substring or `/regex/flags` | against the `List-Id` identifier |
+| `older-than` / `newer-than` | duration (`30d`, `12h`) | against `INTERNALDATE` |
+| `sender-match` | **glob** (`*`, `?`, `[seq]`) | `From` address only, whole-address match |
+| `recipient-match` | **glob** | true if **any** of `To`/`Cc`/`Delivered-To`/`X-Original-To` matches |
+| `subject-contains` | **substring** | true if the text appears anywhere in the subject |
+| `list-id-contains` | **substring** | against the `List-Id` identifier |
 | `has-header` | header name | present and non-empty |
 | `has-flag` | IMAP flag/keyword | exact match |
 | `in-mailbox` | mailbox name | case-sensitive except `INBOX` |
-| `larger-than` | `500k`, `2M` | against `RFC822.SIZE` |
+| `larger-than` | size (`500k`, `2M`) | against `RFC822.SIZE` |
 | `llm` | free-text description | the only condition the model ever sees |
 
-Combine with `all` / `any` / `not`, nesting up to 3 deep. A regex value both
-starts and ends with `/`, e.g. `sender-match: /.+@gmail\.com/i` — supported
-flags are `i`/`m`/`s`/`g`. Regex is compiled at config-load time (a bad
-pattern fails `config check`, not a run) and is **case-sensitive by default**,
-unlike the plain glob/substring form. These patterns run against
-sender-controlled input; avoid nested quantifiers (`(a+)+`) that can hang on
-an adversarial value.
+`-match` conditions default to **glob**: without a wildcard, the value must
+equal the whole field (`sender-match: bank.example` matches only that exact
+address, not "contains bank.example" — write `*bank.example*` for that).
+`-contains` conditions default to **substring**: the value is checked
+anywhere in the field, no wildcard syntax, always effectively "contains."
+Both accept a `/regex/flags` literal as a third option — combine with
+`all`/`any`/`not`, nesting up to 3 deep. A regex value both starts and ends
+with `/`, e.g. `sender-match: /.+@gmail\.com/i` — supported flags are
+`i`/`m`/`s`/`g`. Regex is compiled at config-load time (a bad pattern fails
+`config check`, not a run) and is **case-sensitive by default**, unlike the
+plain glob/substring form. These patterns run against sender-controlled
+input; avoid nested quantifiers (`(a+)+`) that can hang on an adversarial
+value.
+
+`recipient-match` is a union test across every recipient the message names
+(`To`, `Cc`, `Delivered-To`, `X-Original-To`, deduplicated, display names
+stripped) — it's true the moment **one** of them matches, so it works the
+same whether a message has one recipient or fifty; there's no way to
+require *every* recipient to match. This list is never capped (a separate,
+much smaller cap only applies to what's shown to the LLM classifier — it
+never affects a deterministic condition like this one).
 
 At most one `llm` atom per rule, and it may not appear under `not` — the
 model answers "does X apply," not an arbitrary boolean expression.

@@ -30,7 +30,7 @@ from liametahi.rules import (
     RecipientMatch,
     RegexPattern,
     SenderMatch,
-    SubjectMatch,
+    SubjectContains,
     Tri,
     evaluate,
     is_protected,
@@ -183,7 +183,7 @@ def test_evaluate_never_raises_on_well_typed_tree() -> None:
         AnyNode(
             (
                 SenderMatch(LiteralPattern("*@x.com")),
-                NotNode(SubjectMatch(LiteralPattern("y"))),
+                NotNode(SubjectContains(LiteralPattern("y"))),
             )
         ),
         NotNode(HasHeader("x-foo")),
@@ -247,25 +247,27 @@ def test_recipient_match_checks_union_true_if_any_matches() -> None:
     )
 
 
-def test_subject_match_is_substring_not_glob_case_insensitive() -> None:
+def test_subject_contains_is_substring_not_glob_case_insensitive() -> None:
     candidate = make_candidate(subject="Your Weekly Digest is here")
     assert (
-        evaluate(SubjectMatch(LiteralPattern("weekly digest")), candidate, now=NOW)
+        evaluate(SubjectContains(LiteralPattern("weekly digest")), candidate, now=NOW)
         == Tri.TRUE
     )
     assert (
-        evaluate(SubjectMatch(LiteralPattern("*weekly*")), candidate, now=NOW)
+        evaluate(SubjectContains(LiteralPattern("*weekly*")), candidate, now=NOW)
         == Tri.FALSE
     )  # literal, not glob
     assert (
-        evaluate(SubjectMatch(LiteralPattern("monthly")), candidate, now=NOW)
+        evaluate(SubjectContains(LiteralPattern("monthly")), candidate, now=NOW)
         == Tri.FALSE
     )
 
 
-def test_subject_match_false_when_subject_absent() -> None:
+def test_subject_contains_false_when_subject_absent() -> None:
     candidate = make_candidate(subject=None)
-    assert evaluate(SubjectMatch(LiteralPattern("x")), candidate, now=NOW) == Tri.FALSE
+    assert (
+        evaluate(SubjectContains(LiteralPattern("x")), candidate, now=NOW) == Tri.FALSE
+    )
 
 
 def test_list_id_contains_matches_identifier_only() -> None:
@@ -310,18 +312,20 @@ def test_sender_match_regex_is_case_sensitive_by_default() -> None:
     )
 
 
-def test_subject_match_regex_matches_anywhere_in_string() -> None:
+def test_subject_contains_regex_matches_anywhere_in_string() -> None:
     candidate = make_candidate(subject="Your Weekly Digest is here")
     assert (
         evaluate(
-            SubjectMatch(RegexPattern(re.compile(r"week\w+ digest", re.IGNORECASE))),
+            SubjectContains(RegexPattern(re.compile(r"week\w+ digest", re.IGNORECASE))),
             candidate,
             now=NOW,
         )
         == Tri.TRUE
     )
     assert (
-        evaluate(SubjectMatch(RegexPattern(re.compile(r"^Digest"))), candidate, now=NOW)
+        evaluate(
+            SubjectContains(RegexPattern(re.compile(r"^Digest"))), candidate, now=NOW
+        )
         == Tri.FALSE
     )
 
