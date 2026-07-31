@@ -27,6 +27,7 @@ from liametahi.rules import (
     NewerThan,
     NotNode,
     OlderThan,
+    RecipientCount,
     RecipientMatch,
     RegexPattern,
     SenderMatch,
@@ -287,6 +288,37 @@ def test_list_id_contains_false_when_header_absent() -> None:
     assert (
         evaluate(ListIdContains(LiteralPattern("x")), candidate, now=NOW) == Tri.FALSE
     )
+
+
+@pytest.mark.parametrize(
+    "op,value,expected",
+    [
+        (">", 3, Tri.TRUE),
+        (">", 5, Tri.FALSE),
+        (">=", 5, Tri.TRUE),
+        (">=", 6, Tri.FALSE),
+        ("<", 6, Tri.TRUE),
+        ("<", 5, Tri.FALSE),
+        ("<=", 5, Tri.TRUE),
+        ("<=", 4, Tri.FALSE),
+        ("==", 5, Tri.TRUE),
+        ("==", 4, Tri.FALSE),
+        ("!=", 4, Tri.TRUE),
+        ("!=", 5, Tri.FALSE),
+    ],
+)
+def test_recipient_count_compares_deduplicated_union_size(
+    op: rules.ComparisonOp, value: int, expected: Tri
+) -> None:
+    candidate = make_candidate(
+        recipients=("a@x.com", "b@x.com", "c@x.com", "d@x.com", "e@x.com")
+    )
+    assert evaluate(RecipientCount(op=op, value=value), candidate, now=NOW) == expected
+
+
+def test_recipient_count_zero_when_no_recipients() -> None:
+    candidate = make_candidate(recipients=())
+    assert evaluate(RecipientCount(op="==", value=0), candidate, now=NOW) == Tri.TRUE
 
 
 # --- Regex-literal form (`/pattern/flags`) ---------------------------------

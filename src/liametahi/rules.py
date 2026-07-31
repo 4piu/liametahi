@@ -9,8 +9,9 @@ and `evaluate` must never raise on a well-typed tree.
 """
 
 import fnmatch
+import operator
 import re
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
@@ -128,6 +129,25 @@ class LargerThan:
     size_bytes: int
 
 
+#: `recipient-count`'s comparison operators (spec §7.1; contracts §3).
+ComparisonOp = Literal["==", "!=", ">=", "<=", ">", "<"]
+
+_COMPARATORS: dict[ComparisonOp, Callable[[int, int], bool]] = {
+    "==": operator.eq,
+    "!=": operator.ne,
+    ">=": operator.ge,
+    "<=": operator.le,
+    ">": operator.gt,
+    "<": operator.lt,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class RecipientCount:
+    op: ComparisonOp
+    value: int
+
+
 @dataclass(frozen=True, slots=True)
 class LlmCondition:
     description: str
@@ -144,6 +164,7 @@ Atom = (
     | HasFlag
     | InMailbox
     | LargerThan
+    | RecipientCount
     | LlmCondition
 )
 
@@ -204,6 +225,10 @@ def _eval_atom(atom: Atom, candidate: Candidate, *, now: datetime) -> Tri:
         return _eval_in_mailbox(atom, candidate)
     if isinstance(atom, LargerThan):
         return Tri.TRUE if candidate.rfc822_size > atom.size_bytes else Tri.FALSE
+    if isinstance(atom, RecipientCount):
+        comparator = _COMPARATORS[atom.op]
+        matched = comparator(len(candidate.recipients), atom.value)
+        return Tri.TRUE if matched else Tri.FALSE
     if isinstance(atom, LlmCondition):
         return Tri.UNKNOWN
     _assert_never(atom)

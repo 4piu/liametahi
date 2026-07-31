@@ -27,7 +27,7 @@ import re
 import stat
 from datetime import timedelta
 from pathlib import Path
-from typing import Literal, Self
+from typing import Literal, Self, cast
 
 import platformdirs
 import yaml
@@ -59,6 +59,11 @@ class ConfigFilePermissionError(ConfigError):
 
 _DURATION_RE = re.compile(r"^(\d+)([smhdw])$")
 _SIZE_RE = re.compile(r"^(\d+)([kKmMgG]?)[bB]?$")
+# Two-character operators must precede their one-character prefixes in the
+# alternation (contracts §3): regex alternation picks the first alternative
+# that matches at a position, not the longest, so ">" before ">=" would
+# swallow the ">" and leave a stray "=" that fails the trailing \d+ anchor.
+_COMPARISON_RE = re.compile(r"^(==|!=|>=|<=|>|<)(\d+)$")
 # spec §7.3: "no spaces, no `(){%*"\]`"
 _LABEL_FORBIDDEN_RE = re.compile(r'[\s(){%*"\\\]]')
 
@@ -97,6 +102,19 @@ def _parse_size(value: str) -> int:
     amount = int(match.group(1))
     multiplier = _SIZE_UNIT_MULTIPLIER[match.group(2)]
     return amount * multiplier
+
+
+def _parse_comparison(key: str, value: str) -> tuple[rules.ComparisonOp, int]:
+    match = _COMPARISON_RE.match(value)
+    if not match:
+        raise ConfigError(
+            f"condition {key!r} has an invalid comparison {value!r}: expected "
+            "one operator from ==, !=, >=, <=, >, < immediately followed by a "
+            "non-negative integer, e.g. '>10' or '<=3'"
+        )
+    # _COMPARISON_RE's first group is one of exactly these six alternatives.
+    op = cast(rules.ComparisonOp, match.group(1))
+    return op, int(match.group(2))
 
 
 #: Hosts for which `tls_insecure_skip_verify` is permitted (spec §12).
@@ -224,11 +242,14 @@ def _parse_atom(key: str, value: object) -> rules.Atom:
         return rules.InMailbox(mailbox=_require_str(key, value))
     if key == "larger-than":
         return rules.LargerThan(size_bytes=_parse_size(_require_str(key, value)))
+    if key == "recipient-count":
+        op, count = _parse_comparison(key, _require_str(key, value))
+        return rules.RecipientCount(op=op, value=count)
     raise ConfigError(
         f"unknown condition {key!r}; expected one of all/any/not or an atom "
         "(older-than, newer-than, sender-match, recipient-match, "
         "subject-contains, list-id-contains, has-header, has-flag, in-mailbox, "
-        "larger-than, llm)"
+        "larger-than, recipient-count, llm)"
     )
 
 

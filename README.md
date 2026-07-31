@@ -218,6 +218,7 @@ namespaced id (`vendor/model`). OpenRouter also accepts optional
 | `has-flag` | IMAP flag/keyword | exact match |
 | `in-mailbox` | mailbox name | case-sensitive except `INBOX` |
 | `larger-than` | size (`500k`, `2M`) | against `RFC822.SIZE` |
+| `recipient-count` | comparison (`>10`, `<=3`, `==1`) | against the same deduplicated union `recipient-match` uses |
 | `llm` | free-text description | the only condition the model ever sees |
 
 `-match` conditions default to **glob**: without a wildcard, the value must

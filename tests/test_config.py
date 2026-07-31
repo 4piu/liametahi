@@ -433,6 +433,32 @@ def test_invalid_sizes_rejected(value: str) -> None:
         parse_condition_tree({"larger-than": value})
 
 
+@pytest.mark.parametrize(
+    "value,op,count",
+    [
+        (">10", ">", 10),
+        (">=5", ">=", 5),
+        ("<3", "<", 3),
+        ("<=3", "<=", 3),
+        ("==1", "==", 1),
+        ("!=0", "!=", 0),
+    ],
+)
+def test_valid_recipient_count_comparisons(value: str, op: str, count: int) -> None:
+    tree = parse_condition_tree({"recipient-count": value})
+    assert isinstance(tree, rules.RecipientCount)
+    assert tree.op == op
+    assert tree.value == count
+
+
+@pytest.mark.parametrize(
+    "value", ["", "10", "=10", ">", ">-5", "> 10", ">10.5", "=>10"]
+)
+def test_invalid_recipient_count_comparisons_rejected(value: str) -> None:
+    with pytest.raises(ConfigError):
+        parse_condition_tree({"recipient-count": value})
+
+
 def test_sender_match_plain_value_is_a_literal_pattern() -> None:
     tree = parse_condition_tree({"sender-match": "*@example.org"})
     assert isinstance(tree, rules.SenderMatch)
