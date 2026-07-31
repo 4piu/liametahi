@@ -1,0 +1,641 @@
+"""IMAP mailbox adapter and the scan phase (spec §4.1, §11; contracts §5.4).
+
+`MailboxAdapter` is the read/search/fetch/move/append abstraction every
+other unit programs against; `ImapMailbox` is its `imaplib`-backed
+implementation. `scan()` is the scan-phase entry point Unit 5 sequences:
+it selects each configured source mailbox read-only, excludes already
+tracked messages, fetches metadata with `BODY.PEEK`, normalises each
+message into a `domain.Candidate`, and persists via `state.py`.
+
+Every fetch uses `BODY.PEEK` so `\\Seen` is never set by this module.
+Every mutation (`move`, `add_keyword`) uses UIDs and the RFC 6851 `MOVE`
+command; there is no COPY/STORE/EXPUNGE emulation anywhere here.
+"""
+
+import contextlib
+import imaplib
+import re
+import sqlite3
+import ssl
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from email import message_from_bytes
+from email.message import Message
+from email.utils import getaddresses, parseaddr
+from typing import Protocol
+
+from liametahi import state
+from liametahi.domain import Candidate, MessageKey, fingerprint
+from liametahi.logging import get_logger
+
+logger = get_logger(__name__)
+
+# --- Exceptions (contracts §5.4) -------------------------------------------
+
+
+class UnsupportedCapability(Exception):
+    """Raised when an action requires an IMAP capability the server does
+    not advertise (spec §7.5): `MOVE` for `move`, `PERMANENTFLAGS \\*` for
+    `add_keyword`. No COPY/STORE/EXPUNGE emulation is ever attempted --
+    that fallback is non-atomic and can expunge unrelated messages."""
+
+
+class MessageVanished(Exception):
+    """Raised by a mutating call (`move`, `add_keyword`) against a UID
+    that no longer matches any message on the server, e.g. removed by
+    another process between the scan and execute phases (spec §4.3)."""
+
+
+class ImapTransportError(Exception):
+    """A connection, authentication, or protocol-level IMAP failure that
+    is not one of the two typed exceptions above."""
+
+
+# --- Data shapes (contracts §5.4, verbatim) ---------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class MailboxStatus:
+    mailbox: str
+    uidvalidity: int
+    exists: int
+    permanent_flags: frozenset[str]
+    accepts_custom_keywords: bool  # PERMANENTFLAGS contains \*
+
+
+@dataclass(frozen=True, slots=True)
+class RawMetadata:
+    """One message as it comes off the wire, before normalisation."""
+
+    uid: int
+    internaldate: datetime  # tz-aware UTC
+    rfc822_size: int
+    flags: frozenset[str]
+    headers: Mapping[str, tuple[str, ...]]  # lowercased name -> all values
+
+
+class MailboxAdapter(Protocol):
+    def capabilities(self) -> frozenset[str]: ...
+    def select(self, mailbox: str, *, readonly: bool) -> MailboxStatus: ...
+    def search_uids(self) -> tuple[int, ...]: ...
+    def fetch_metadata(
+        self, uids: Sequence[int], headers: Sequence[str]
+    ) -> tuple[RawMetadata, ...]: ...
+    def fetch_raw(self, uid: int) -> bytes: ...
+    def move(self, uid: int, destination: str) -> None: ...
+    def add_keyword(self, uid: int, keyword: str) -> None: ...
+    def append(
+        self,
+        mailbox: str,
+        raw: bytes,
+        flags: Collection[str],
+        internaldate: datetime,
+    ) -> None: ...
+
+
+# --- imaplib response parsing helpers ---------------------------------------
+
+# One "line" of an untagged FETCH response, e.g.:
+#   1 (UID 101 INTERNALDATE "01-Jun-2026 08:00:05 +0000" RFC822.SIZE 529
+#      FLAGS (\Seen) BODY[HEADER.FIELDS (FROM SUBJECT)] {123}
+_UID_RE = re.compile(rb"\bUID (\d+)")
+_SIZE_RE = re.compile(rb"\bRFC822\.SIZE (\d+)")
+_FLAGS_RE = re.compile(rb"\bFLAGS \(([^)]*)\)")
+_INTERNALDATE_RE = re.compile(rb'\bINTERNALDATE "([^"]+)"')
+_INTERNALDATE_FORMAT = "%d-%b-%Y %H:%M:%S %z"
+
+
+def _parse_internaldate(raw: bytes) -> datetime:
+    text = raw.decode("ascii")
+    return datetime.strptime(text, _INTERNALDATE_FORMAT).astimezone(UTC)
+
+
+def _parse_fetch_line(line: bytes, literal: bytes) -> RawMetadata | None:
+    """Parse one `(line, literal)` element of an `imaplib` FETCH response
+    into a `RawMetadata`. Returns `None` if the line does not look like a
+    FETCH data item (defensive; should not happen for a well-formed
+    response to our own FETCH command)."""
+    uid_match = _UID_RE.search(line)
+    size_match = _SIZE_RE.search(line)
+    flags_match = _FLAGS_RE.search(line)
+    date_match = _INTERNALDATE_RE.search(line)
+    if uid_match is None or size_match is None or date_match is None:
+        return None
+    flags = (
+        frozenset(f.decode("ascii") for f in flags_match.group(1).split())
+        if flags_match
+        else frozenset()
+    )
+    headers = _parse_header_literal(literal)
+    return RawMetadata(
+        uid=int(uid_match.group(1)),
+        internaldate=_parse_internaldate(date_match.group(1)),
+        rfc822_size=int(size_match.group(1)),
+        flags=flags,
+        headers=headers,
+    )
+
+
+def _parse_header_literal(literal: bytes) -> Mapping[str, tuple[str, ...]]:
+    """Parse a `BODY[HEADER.FIELDS (...)]` literal into a lowercased,
+    multi-valued header mapping. `email.message_from_bytes` handles
+    folding and RFC 2047 decoding for us; only headers whose (stripped)
+    value is non-empty are included, matching the `has-header` semantics
+    of spec §7.1 ("present and non-empty")."""
+    parsed: Message = message_from_bytes(literal)
+    collected: dict[str, list[str]] = {}
+    for name, value in parsed.items():
+        decoded = str(value).strip()
+        if not decoded:
+            continue
+        collected.setdefault(name.lower(), []).append(decoded)
+    return {name: tuple(values) for name, values in collected.items()}
+
+
+def _last_bytes(values: Sequence[object]) -> bytes | None:
+    """Normalise one `imaplib.IMAP4.untagged_responses` value.
+
+    Entries are `bytes`, or a `(bytes, bytes)` tuple when the server sent
+    a literal. Only the most recent entry is meaningful, since imaplib
+    accumulates untagged responses across commands.
+    """
+    if not values:
+        return None
+    last = values[-1]
+    if isinstance(last, tuple):
+        head = last[0]
+        return head if isinstance(head, bytes) else None
+    return last if isinstance(last, bytes) else None
+
+
+def _permanent_flags_from_untagged(
+    untagged: Mapping[str, Sequence[object]],
+) -> frozenset[str]:
+    raw = _last_bytes(untagged.get("PERMANENTFLAGS", ()))
+    if raw is None:
+        return frozenset()
+    text = raw.decode("ascii", errors="replace")
+    inner = text.strip().removeprefix("(").removesuffix(")")
+    return frozenset(inner.split())
+
+
+def _uidvalidity_from_untagged(untagged: Mapping[str, Sequence[object]]) -> int:
+    raw = _last_bytes(untagged.get("UIDVALIDITY", ()))
+    if raw is None:
+        raise ImapTransportError(
+            "server did not report UIDVALIDITY on SELECT/EXAMINE (RFC 3501 "
+            "violation) -- refusing to proceed without it"
+        )
+    return int(raw)
+
+
+def _format_flags(flags: Collection[str]) -> str:
+    return "(" + " ".join(flags) + ")"
+
+
+# --- Real adapter ------------------------------------------------------------
+
+_MAX_UIDS_PER_FETCH = 200
+
+
+class ImapMailbox:
+    """`imaplib`-backed `MailboxAdapter`. Certificate-verifying TLS only:
+    the caller supplies an `ssl.SSLContext` (default
+    `ssl.create_default_context()`), never a verification-disabled one.
+    """
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int = 993,
+        username: str,
+        password: str,
+        timeout_seconds: float = 30.0,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> None:
+        context = (
+            ssl_context if ssl_context is not None else ssl.create_default_context()
+        )
+        try:
+            self._conn = imaplib.IMAP4_SSL(
+                host, port, ssl_context=context, timeout=timeout_seconds
+            )
+            self._conn.login(username, password)
+        except (TimeoutError, OSError, ssl.SSLError, imaplib.IMAP4.error) as exc:
+            raise ImapTransportError(f"could not connect/authenticate: {exc}") from exc
+        self._capabilities: frozenset[str] | None = None
+        self._selected: str | None = None
+        self._selected_permanent_flags: frozenset[str] = frozenset()
+
+    def close(self) -> None:
+        """Log out and close the underlying socket. Never raises."""
+        with contextlib.suppress(OSError, imaplib.IMAP4.error):
+            if self._selected is not None:
+                self._conn.close()
+        with contextlib.suppress(OSError, imaplib.IMAP4.error):
+            self._conn.logout()
+
+    def __enter__(self) -> ImapMailbox:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    # --- MailboxAdapter protocol --------------------------------------
+
+    def capabilities(self) -> frozenset[str]:
+        """The post-login capability set. Dovecot (and many servers)
+        advertise a reduced pre-authentication capability list, so this
+        always issues an explicit `CAPABILITY` command rather than
+        trusting `imaplib`'s cached pre-login value."""
+        if self._capabilities is None:
+            typ, data = self._conn.capability()
+            if typ != "OK" or not data or data[0] is None:
+                raise ImapTransportError("CAPABILITY command failed")
+            self._capabilities = frozenset(data[0].decode("ascii").split())
+        return self._capabilities
+
+    def select(self, mailbox: str, *, readonly: bool) -> MailboxStatus:
+        typ, data = self._conn.select(mailbox, readonly=readonly)
+        if typ != "OK":
+            first = data[0] if data else None
+            detail = first.decode("ascii", errors="replace") if first else ""
+            raise ImapTransportError(f"could not select mailbox {mailbox!r}: {detail}")
+        self._selected = mailbox
+        exists = int(data[0]) if data and data[0] is not None else 0
+        untagged = self._conn.untagged_responses
+        uidvalidity = _uidvalidity_from_untagged(untagged)
+        permanent_flags = _permanent_flags_from_untagged(untagged)
+        self._selected_permanent_flags = permanent_flags
+        return MailboxStatus(
+            mailbox=mailbox,
+            uidvalidity=uidvalidity,
+            exists=exists,
+            permanent_flags=permanent_flags,
+            accepts_custom_keywords="\\*" in permanent_flags,
+        )
+
+    def search_uids(self) -> tuple[int, ...]:
+        self._require_selected()
+        typ, data = self._conn.uid("SEARCH", "ALL")
+        if typ != "OK":
+            raise ImapTransportError("UID SEARCH failed")
+        if not data or not data[0]:
+            return ()
+        return tuple(int(u) for u in data[0].split())
+
+    def fetch_metadata(
+        self, uids: Sequence[int], headers: Sequence[str]
+    ) -> tuple[RawMetadata, ...]:
+        self._require_selected()
+        if not uids:
+            return ()
+        header_list = " ".join(sorted({h.upper() for h in headers}))
+        fetch_items = (
+            f"(UID INTERNALDATE RFC822.SIZE FLAGS "
+            f"BODY.PEEK[HEADER.FIELDS ({header_list})])"
+        )
+        results: list[RawMetadata] = []
+        uid_list = list(uids)
+        for start in range(0, len(uid_list), _MAX_UIDS_PER_FETCH):
+            chunk = uid_list[start : start + _MAX_UIDS_PER_FETCH]
+            uid_set = ",".join(str(u) for u in chunk)
+            typ, data = self._conn.uid("FETCH", uid_set, fetch_items)
+            if typ != "OK":
+                raise ImapTransportError("UID FETCH failed")
+            for item in data:
+                if not isinstance(item, tuple) or len(item) != 2:
+                    continue
+                line, literal = item
+                if line is None or literal is None:
+                    continue
+                parsed = _parse_fetch_line(line, literal)
+                if parsed is not None:
+                    results.append(parsed)
+        return tuple(results)
+
+    def fetch_raw(self, uid: int) -> bytes:
+        self._require_selected()
+        typ, data = self._conn.uid("FETCH", str(uid), "(BODY.PEEK[])")
+        if typ != "OK":
+            raise ImapTransportError("UID FETCH failed")
+        for item in data:
+            if isinstance(item, tuple) and len(item) == 2:
+                body = item[1]
+                if isinstance(body, bytes):
+                    return body
+        raise KeyError(f"no such message: uid {uid}")
+
+    def move(self, uid: int, destination: str) -> None:
+        self._require_selected()
+        if "MOVE" not in self.capabilities():
+            raise UnsupportedCapability("server does not advertise MOVE (RFC 6851)")
+        self._require_uid_exists(uid)
+        typ, data = self._conn.uid("MOVE", str(uid), destination)
+        if typ != "OK":
+            detail = data[0].decode("ascii", errors="replace") if data else ""
+            raise ImapTransportError(f"UID MOVE failed: {detail}")
+
+    def add_keyword(self, uid: int, keyword: str) -> None:
+        self._require_selected()
+        if "\\*" not in self._selected_permanent_flags:
+            raise UnsupportedCapability(
+                "selected mailbox PERMANENTFLAGS does not include \\* "
+                "(custom keywords unsupported)"
+            )
+        self._require_uid_exists(uid)
+        typ, data = self._conn.uid("STORE", str(uid), "+FLAGS", f"({keyword})")
+        if typ != "OK":
+            detail = data[0].decode("ascii", errors="replace") if data else ""
+            raise ImapTransportError(f"UID STORE failed: {detail}")
+
+    def append(
+        self,
+        mailbox: str,
+        raw: bytes,
+        flags: Collection[str],
+        internaldate: datetime,
+    ) -> None:
+        flags_str = _format_flags(flags) if flags else None
+        date_str = imaplib.Time2Internaldate(internaldate.astimezone(UTC).timestamp())
+        typ, data = self._conn.append(mailbox, flags_str, date_str, raw)
+        if typ != "OK":
+            detail = data[0].decode("ascii", errors="replace") if data else ""
+            raise ImapTransportError(f"APPEND failed: {detail}")
+
+    # --- internals ------------------------------------------------------
+
+    def _require_selected(self) -> str:
+        if self._selected is None:
+            raise RuntimeError("no mailbox selected; call select() first")
+        return self._selected
+
+    def _require_uid_exists(self, uid: int) -> None:
+        """Verify a UID still resolves to a message before a mutation.
+        IMAP silently accepts MOVE/STORE against an empty match set (no
+        error), so this explicit pre-check is what makes a vanished
+        message observable as `MessageVanished` rather than a silent
+        no-op (spec §4.3 step 4 expects the caller to detect this)."""
+        typ, data = self._conn.uid("SEARCH", "UID", str(uid))
+        if typ != "OK" or not data or not data[0]:
+            raise MessageVanished(f"uid {uid} no longer exists in the selected mailbox")
+
+
+# --- Normalisation: RawMetadata -> domain.Candidate (spec §4.1, §11) -------
+
+
+def _list_id_identifier(raw_value: str) -> str | None:
+    """Extract the RFC 2919 identifier from a List-Id header value,
+    e.g. `Mozilla announcements <announce.mozilla.org>` ->
+    `announce.mozilla.org` (spec §7.1). `None` if the value is not
+    well-formed (no angle-bracketed identifier)."""
+    match = re.search(r"<([^<>]+)>", raw_value)
+    return match.group(1) if match else None
+
+
+def _first(headers: Mapping[str, tuple[str, ...]], name: str) -> str | None:
+    values = headers.get(name)
+    return values[0] if values else None
+
+
+def _recipient_addresses(
+    headers: Mapping[str, tuple[str, ...]], names: Sequence[str]
+) -> list[str]:
+    """Addresses (not display names) from every value of every named
+    header, in encounter order, deduplicated (spec §7.1 recipient-match:
+    union of To, Cc, Delivered-To, X-Original-To)."""
+    raw_values: list[str] = []
+    for name in names:
+        raw_values.extend(headers.get(name, ()))
+    addresses: list[str] = []
+    seen: set[str] = set()
+    for _display, address in getaddresses(raw_values):
+        if not address or address in seen:
+            continue
+        seen.add(address)
+        addresses.append(address)
+    return addresses
+
+
+def normalize(
+    raw: RawMetadata, *, account_id: int, mailbox: str, uidvalidity: int
+) -> Candidate:
+    """Build a `domain.Candidate` from one adapter-fetched `RawMetadata`.
+
+    Address parsing, `List-Id` RFC 2919 extraction, and header-presence
+    filtering happen here -- `imap_adapter`'s wire-level fetch does no
+    more than unfold and RFC 2047-decode header values (contracts §5.4).
+    """
+    from_value = _first(raw.headers, "from")
+    from_display, from_address = (None, None)
+    if from_value:
+        display, address = parseaddr(from_value)
+        from_display = display or None
+        from_address = address or None
+
+    message_id = _first(raw.headers, "message-id")
+    subject = _first(raw.headers, "subject")
+
+    list_id_value = _first(raw.headers, "list-id")
+    list_id = _list_id_identifier(list_id_value) if list_id_value else None
+
+    cc_count = len(_recipient_addresses(raw.headers, ("cc",)))
+    recipients = tuple(
+        _recipient_addresses(raw.headers, ("to", "cc", "delivered-to", "x-original-to"))
+    )
+    has_list_unsubscribe = "list-unsubscribe" in raw.headers
+
+    fp = fingerprint(
+        message_id=message_id,
+        internaldate=raw.internaldate,
+        rfc822_size=raw.rfc822_size,
+        from_address=from_address,
+        subject=subject,
+    )
+
+    return Candidate(
+        key=MessageKey(
+            account_id=account_id, mailbox=mailbox, uidvalidity=uidvalidity, uid=raw.uid
+        ),
+        fingerprint=fp,
+        message_id=message_id,
+        internaldate=raw.internaldate,
+        rfc822_size=raw.rfc822_size,
+        flags=raw.flags,
+        headers_present=frozenset(raw.headers.keys()),
+        from_address=from_address,
+        from_display=from_display,
+        recipients=recipients,
+        cc_count=cc_count,
+        subject=subject,
+        list_id=list_id,
+        has_list_unsubscribe=has_list_unsubscribe,
+    )
+
+
+# --- Scan phase (spec §4.1) -------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class MailboxScanResult:
+    mailbox: str
+    uidvalidity: int
+    uidvalidity_changed: bool
+    new_candidates: int
+    reidentified_candidates: int
+
+
+@dataclass(frozen=True, slots=True)
+class ScanResult:
+    """The outcome of a scan across a task's configured source mailboxes."""
+
+    mailboxes: tuple[MailboxScanResult, ...]
+    candidates_scanned: int
+    stopped_at_cap: bool
+
+    @property
+    def any_uidvalidity_changed(self) -> bool:
+        return any(m.uidvalidity_changed for m in self.mailboxes)
+
+
+def scan(
+    adapter: MailboxAdapter,
+    conn: sqlite3.Connection,
+    *,
+    account_id: int,
+    source_mailboxes: Sequence[str],
+    fetch_headers: Sequence[str],
+    max_candidates_per_run: int,
+) -> ScanResult:
+    """Run the scan phase (spec §4.1) across every configured source
+    mailbox of one task, in order, stopping once `max_candidates_per_run`
+    candidate rows have been saved in total.
+
+    For each mailbox: `EXAMINE` (read-only), compare the observed
+    `UIDVALIDITY` against the last stored value for `(account, mailbox)`.
+
+    - **Unchanged** (or first-ever scan): already-tracked UIDs are
+      excluded locally before any fetch (IMAP `SEARCH` cannot express
+      "not in my database" -- spec §4.1 point 3), so metadata is fetched
+      only for genuinely new UIDs.
+    - **Changed**: every UID's key is new by definition (the server
+      renumbered), so metadata is fetched for the whole mailbox and each
+      candidate is re-identified by `fingerprint()` against prior rows
+      for that account/mailbox (spec §11) rather than treated as fresh.
+      A candidate row's `uidvalidity` column no longer matching the
+      current `mailbox_state.uidvalidity` for that mailbox is what marks
+      it stale -- there is no separate stale flag in the schema
+      (contracts §4 DDL is fixed).
+
+    Within each mailbox, candidates are ordered by `INTERNALDATE`
+    ascending before the cap is applied (spec §4.1 point 5), so a
+    repeated run makes deterministic forward progress.
+    """
+    mailbox_results: list[MailboxScanResult] = []
+    total_saved = 0
+    stopped_at_cap = False
+
+    for mailbox in source_mailboxes:
+        if total_saved >= max_candidates_per_run:
+            stopped_at_cap = True
+            break
+
+        status = adapter.select(mailbox, readonly=True)
+        previous_uidvalidity = state.get_mailbox_uidvalidity(
+            conn, account_id=account_id, mailbox=mailbox
+        )
+        uidvalidity_changed = (
+            previous_uidvalidity is not None
+            and previous_uidvalidity != status.uidvalidity
+        )
+        if uidvalidity_changed:
+            logger.warning(
+                "UIDVALIDITY changed for %s/%s: %s -> %s; re-identifying "
+                "existing candidates by fingerprint",
+                account_id,
+                mailbox,
+                previous_uidvalidity,
+                status.uidvalidity,
+            )
+        state.record_mailbox_uidvalidity(
+            conn, account_id=account_id, mailbox=mailbox, uidvalidity=status.uidvalidity
+        )
+
+        all_uids = adapter.search_uids()
+        if uidvalidity_changed:
+            candidate_uids = all_uids
+        else:
+            candidate_uids = tuple(
+                uid
+                for uid in all_uids
+                if state.get_candidate(
+                    conn,
+                    key=MessageKey(account_id, mailbox, status.uidvalidity, uid),
+                )
+                is None
+            )
+
+        new_count = 0
+        reidentified_count = 0
+        if candidate_uids:
+            raw_batch = adapter.fetch_metadata(candidate_uids, fetch_headers)
+            for raw in sorted(raw_batch, key=lambda r: r.internaldate):
+                if total_saved >= max_candidates_per_run:
+                    stopped_at_cap = True
+                    break
+                candidate = normalize(
+                    raw,
+                    account_id=account_id,
+                    mailbox=mailbox,
+                    uidvalidity=status.uidvalidity,
+                )
+                if uidvalidity_changed and _has_prior_identity(
+                    conn,
+                    account_id=account_id,
+                    mailbox=mailbox,
+                    uidvalidity=status.uidvalidity,
+                    fp=candidate.fingerprint,
+                ):
+                    reidentified_count += 1
+                else:
+                    new_count += 1
+                state.upsert_candidate(conn, candidate)
+                total_saved += 1
+
+        mailbox_results.append(
+            MailboxScanResult(
+                mailbox=mailbox,
+                uidvalidity=status.uidvalidity,
+                uidvalidity_changed=uidvalidity_changed,
+                new_candidates=new_count,
+                reidentified_candidates=reidentified_count,
+            )
+        )
+
+    return ScanResult(
+        mailboxes=tuple(mailbox_results),
+        candidates_scanned=total_saved,
+        stopped_at_cap=stopped_at_cap,
+    )
+
+
+def _has_prior_identity(
+    conn: sqlite3.Connection,
+    *,
+    account_id: int,
+    mailbox: str,
+    uidvalidity: int,
+    fp: str,
+) -> bool:
+    """True if a candidate row for this fingerprint already exists in
+    this mailbox under a *different* (stale) UIDVALIDITY -- i.e. this is
+    the same real message the mailbox already knew about before a
+    UIDVALIDITY change, not a genuinely new message."""
+    for _candidate_id, existing in state.find_candidates_by_fingerprint(
+        conn, account_id=account_id, fingerprint=fp
+    ):
+        if existing.key.mailbox == mailbox and existing.key.uidvalidity != uidvalidity:
+            return True
+    return False

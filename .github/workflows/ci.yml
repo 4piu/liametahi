@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    # implementation-contracts.md §8: definition of done for every unit.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install Python (per pyproject requires-python)
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: mypy --strict (src)
+        run: uv run mypy --strict src/liametahi
+
+      - name: mypy --strict (tests)
+        run: uv run mypy --strict tests
+
+      - name: pytest (unit tier; integration skipped without Docker, live never runs)
+        run: uv run pytest -q

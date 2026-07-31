@@ -1,0 +1,75 @@
+{
+  "corpus_version": 1,
+  "messages": [
+    {
+      "relative_path": "messages/7d9614583bd6133e6d12416a815d3d331948b326ecbf7c2dcf28191253679782.eml",
+      "mailbox": "INBOX",
+      "uid": 101,
+      "uidvalidity": 1000,
+      "flags": [],
+      "internaldate": "2026-06-01T08:00:05Z",
+      "sha256": "7d9614583bd6133e6d12416a815d3d331948b326ecbf7c2dcf28191253679782",
+      "byte_count": 529,
+      "name": "list_digest"
+    },
+    {
+      "relative_path": "messages/982090a92aa85c3136b36447079d24a7f4673745c9e0e43d434b38c733e215a4.eml",
+      "mailbox": "INBOX",
+      "uid": 102,
+      "uidvalidity": 1000,
+      "flags": [
+        "\\Flagged"
+      ],
+      "internaldate": "2026-06-10T14:32:10Z",
+      "sha256": "982090a92aa85c3136b36447079d24a7f4673745c9e0e43d434b38c733e215a4",
+      "byte_count": 396,
+      "name": "bank_notice"
+    },
+    {
+      "relative_path": "messages/f275f45a6ae373b01ae37312010f6ac71c9b0e1b3e8e16cbdb7aee2ad9d18bc0.eml",
+      "mailbox": "INBOX",
+      "uid": 103,
+      "uidvalidity": 1000,
+      "flags": [],
+      "internaldate": "2026-06-12T19:05:20Z",
+      "sha256": "f275f45a6ae373b01ae37312010f6ac71c9b0e1b3e8e16cbdb7aee2ad9d18bc0",
+      "byte_count": 246,
+      "name": "no_message_id"
+    },
+    {
+      "relative_path": "messages/52afbcc587cf1945bb9783ab3c3c58c80fa396bdc4593c2adc1ab90f5ec81890.eml",
+      "mailbox": "INBOX",
+      "uid": 104,
+      "uidvalidity": 1000,
+      "flags": [],
+      "internaldate": "2026-06-20T09:15:30Z",
+      "sha256": "52afbcc587cf1945bb9783ab3c3c58c80fa396bdc4593c2adc1ab90f5ec81890",
+      "byte_count": 549,
+      "name": "hostile_subject"
+    },
+    {
+      "relative_path": "messages/4339ef0e48eedc50a1d298a272b92bc3d24bd44fddcb03de6483fb76394ca7a5.eml",
+      "mailbox": "INBOX",
+      "uid": 105,
+      "uidvalidity": 1000,
+      "flags": [
+        "\\Seen"
+      ],
+      "internaldate": "2026-06-22T07:00:40Z",
+      "sha256": "4339ef0e48eedc50a1d298a272b92bc3d24bd44fddcb03de6483fb76394ca7a5",
+      "byte_count": 598,
+      "name": "multipart_html_newsletter"
+    },
+    {
+      "relative_path": "messages/cb3e80e64dbc511a98402dd2d86965209c2544564b2011be7db2d281a10587da.eml",
+      "mailbox": "INBOX",
+      "uid": 106,
+      "uidvalidity": 1000,
+      "flags": [],
+      "internaldate": "2026-06-25T11:20:50Z",
+      "sha256": "cb3e80e64dbc511a98402dd2d86965209c2544564b2011be7db2d281a10587da",
+      "byte_count": 405,
+      "name": "utf8_subject"
+    }
+  ]
+}

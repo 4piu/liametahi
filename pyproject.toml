@@ -1,0 +1,65 @@
+[project]
+name = "liametahi"
+version = "0.1.0"
+description = "A local, cron-friendly IMAP mailbox cleanup CLI using an LLM as a constrained classifier."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "anthropic>=0.120.2",
+    "httpx>=0.28.1",
+    "platformdirs>=4.11.0",
+    "pydantic>=2.13.4",
+    "pyyaml>=6.0.3",
+    "typer>=0.27.0",
+]
+
+[project.scripts]
+liametahi = "liametahi.cli:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.0",
+    "types-pyyaml>=6.0.12.20260724",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/liametahi"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/liametahi/migrations" = "liametahi/migrations"
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src/liametahi"]
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = "yaml.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires Docker on localhost",
+    "live: requires a real mailbox/model, opt-in via LIAMETAHI_LIVE=1",
+]
+addopts = "-m \"not live\""
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src/liametahi"]

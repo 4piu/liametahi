@@ -1,0 +1,33 @@
+# Configuration holds literal mailbox and model credentials (spec §12) — never commit it.
+liametahi.yaml
+liametahi.yml
+*.local.yaml
+config.yaml
+
+# Local state and backups
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+backups/
+
+# Real mail is never a test dependency and is never committed (contracts
+# §6.2). Only the hand-written synthetic corpus is; captured corpora
+# under any other tests/corpus/<name>/ are git-ignored.
+*.eml
+tests/corpus/*/
+!tests/corpus/synthetic/
+!tests/corpus/synthetic/**
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+config.dev.yaml

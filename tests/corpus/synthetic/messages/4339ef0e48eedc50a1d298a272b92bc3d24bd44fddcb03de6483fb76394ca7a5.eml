@@ -1,0 +1,20 @@
+From: Newsletter <news@shop.example>
+To: Test User <me@example.com>
+Subject: 20% off everything this weekend
+Date: Mon, 22 Jun 2026 07:00:00 +0000
+Message-ID: <newsletter-20260622@shop.example>
+List-Id: Shop Example Newsletter <newsletter.shop.example>
+Content-Type: multipart/alternative; boundary="BOUNDARY123"
+MIME-Version: 1.0
+
+--BOUNDARY123
+Content-Type: text/plain; charset=us-ascii
+
+20% off everything this weekend. Shop now!
+
+--BOUNDARY123
+Content-Type: text/html; charset=us-ascii
+
+<html><body><h1>20% off everything</h1><p>Shop now!</p></body></html>
+
+--BOUNDARY123--

@@ -1,0 +1,11 @@
+From: Example Bank <alerts@bank.example>
+To: Test User <me@example.com>
+Subject: Security alert: new sign-in to your account
+Date: Wed, 10 Jun 2026 14:32:00 +0000
+Message-ID: <bank-alert-20260610@bank.example>
+Content-Type: text/plain; charset=us-ascii
+MIME-Version: 1.0
+
+We noticed a new sign-in to your account from a new device.
+
+If this was not you, please contact us immediately.

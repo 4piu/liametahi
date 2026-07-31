@@ -1,0 +1,10 @@
+From: Émilie Dupont <emilie@example.fr>
+To: Test User <me@example.com>
+Subject: =?utf-8?b?Q2Fmw6kgbcO8bsO8IOKAlCDml6XmnKzoqp4gc2FsZSDwn46J?=
+Date: Thu, 25 Jun 2026 11:20:00 +0000
+Message-ID: <utf8-20260625@example.fr>
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+MIME-Version: 1.0
+
+Un message avec des caractères non-ASCII dans le corps aussi: éèàç 日本語.
