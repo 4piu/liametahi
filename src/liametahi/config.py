@@ -315,14 +315,26 @@ def collect_header_names(tree: ConditionTree) -> frozenset[str]:
     return frozenset()
 
 
-def _validate_actions(actions: list[str], when: ConditionTree, *, rule_id: str) -> None:
+def _validate_actions(
+    actions: list[str],
+    when: ConditionTree,
+    *,
+    rule_id: str,
+    allow_trash_without_backup: bool,
+) -> None:
     """Enforce spec §7.3/§7.4/§7.5 action-list constraints."""
     remote_mutations = 0
-    for action in actions:
+    backup_index: int | None = None
+    trash_index: int | None = None
+    for index, action in enumerate(actions):
         if action == "backup":
+            if backup_index is None:
+                backup_index = index
             continue
         if action == "trash":
             remote_mutations += 1
+            if trash_index is None:
+                trash_index = index
             continue
         if action.startswith("move_to:"):
             target = action.removeprefix("move_to:")
@@ -358,6 +370,20 @@ def _validate_actions(actions: list[str], when: ConditionTree, *, rule_id: str) 
         raise ConfigError(
             f"rule {rule_id!r}: a rule whose actions include 'trash' must "
             "contain at least one deterministic condition (spec §5.2)"
+        )
+    if (
+        trash_index is not None
+        and not allow_trash_without_backup
+        and (backup_index is None or backup_index > trash_index)
+    ):
+        raise ConfigError(
+            f"rule {rule_id!r}: 'trash' requires a preceding 'backup' in the "
+            "same action list (spec §7.4) — at runtime this rule's 'trash' "
+            "action would abort every time with no backup to satisfy it, "
+            "silently doing nothing on every match. If the account's own "
+            "trash folder is recovery enough and no local copy is wanted, "
+            "set allow_trash_without_backup: true on this rule instead of "
+            "omitting backup."
         )
 
 
@@ -481,7 +507,12 @@ class RuleConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_rule(self) -> Self:
         _validate_llm_placement(self.when, rule_id=self.id)
-        _validate_actions(self.actions, self.when, rule_id=self.id)
+        _validate_actions(
+            self.actions,
+            self.when,
+            rule_id=self.id,
+            allow_trash_without_backup=self.allow_trash_without_backup,
+        )
         return self
 
 

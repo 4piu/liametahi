@@ -49,12 +49,31 @@ def _rule(actions: list[str]) -> RuleConfig:
     )
 
 
+def _unbacked_trash_action() -> tuple[policy.ResolvedAction, ...]:
+    """A resolved 'trash' action that requires a prior backup which never
+    happened. `config.py` now rejects this shape at load time (a rule
+    can't even be written this way any more), but `execute.py` has no
+    config to consult and must still refuse to mutate independently --
+    this exercises that runtime defense-in-depth directly, bypassing
+    `RuleConfig` construction."""
+    return (
+        policy.ResolvedAction(
+            action="trash",
+            kind="trash",
+            destination="Trash",
+            requires_prior_backup=True,
+            is_remote_mutation=True,
+        ),
+    )
+
+
 def _item_and_mailbox(
     account_id: int,
     candidate_id: int,
     *,
     uid: int = 1,
     actions: list[str] | None = None,
+    resolved_actions: tuple[policy.ResolvedAction, ...] | None = None,
     capabilities: frozenset[str] = frozenset({"MOVE"}),
     accepts_custom_keywords: bool = True,
     internaldate: datetime = datetime(2026, 6, 1, tzinfo=UTC),
@@ -82,8 +101,11 @@ def _item_and_mailbox(
         from_address=None,
         subject=None,
     )
-    rule = _rule(actions or ["move_to:Archive"])
-    resolved = policy.resolve_actions(rule, trash_mailbox="Trash")
+    if resolved_actions is not None:
+        resolved = resolved_actions
+    else:
+        rule = _rule(actions or ["move_to:Archive"])
+        resolved = policy.resolve_actions(rule, trash_mailbox="Trash")
     item = execute.ExecutionItem(
         candidate_id=candidate_id,
         key=key,
@@ -419,7 +441,10 @@ def test_fail_fast_stops_remaining_items_on_failure(tmp_path: Path) -> None:
 
         candidate_id_1 = _candidate_id(conn, account_id)
         mb1, failing_item = _item_and_mailbox(
-            account_id, candidate_id_1, uid=1, actions=["trash"]
+            account_id,
+            candidate_id_1,
+            uid=1,
+            resolved_actions=_unbacked_trash_action(),
         )
         # 'trash' with no preceding backup and allow_trash_without_backup
         # unset must fail without touching the mailbox.
@@ -458,7 +483,10 @@ def test_failure_without_fail_fast_continues_to_next_item(tmp_path: Path) -> Non
 
         candidate_id_1 = _candidate_id(conn, account_id)
         mb, failing_item = _item_and_mailbox(
-            account_id, candidate_id_1, uid=1, actions=["trash"]
+            account_id,
+            candidate_id_1,
+            uid=1,
+            resolved_actions=_unbacked_trash_action(),
         )
         candidate_id_2 = state.upsert_candidate(
             conn,

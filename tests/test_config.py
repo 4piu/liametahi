@@ -271,6 +271,37 @@ def test_trash_with_deterministic_condition_allowed(tmp_path: Path) -> None:
     load_config(path)  # should not raise
 
 
+def test_trash_without_backup_rejected_unless_opted_out(tmp_path: Path) -> None:
+    """spec §7.4: 'trash' silently fails every run without a preceding
+    'backup' in the same action list, unless the rule explicitly opts
+    out via `allow_trash_without_backup` (e.g. because the account's own
+    trash folder is recovery enough). Config load must catch this, not
+    let it validate and then fail at every execution."""
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["trash"]
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError, match="allow_trash_without_backup"):
+        load_config(path)
+
+
+def test_trash_before_backup_in_action_list_rejected(tmp_path: Path) -> None:
+    """Order matters: a 'backup' listed *after* 'trash' never satisfies
+    the requirement, since actions run strictly in the written order."""
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["trash", "backup"]
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError, match="allow_trash_without_backup"):
+        load_config(path)
+
+
+def test_trash_without_backup_allowed_with_explicit_opt_out(tmp_path: Path) -> None:
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["trash"]
+    data["tasks"]["inbox-cleanup"]["rules"][0]["allow_trash_without_backup"] = True
+    path = write_config(tmp_path / "cfg.yaml", data)
+    load_config(path)  # should not raise
+
+
 def test_more_than_one_remote_mutation_rejected(tmp_path: Path) -> None:
     data = make_config_dict()
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["trash", "label:foo"]
