@@ -24,8 +24,17 @@ read, test, and audit.
 
 - **The LLM never mutates anything.** It classifies; a separate, deterministic
   phase decides what to do and does it.
-- **`backup` before `trash`, always**, unless a rule explicitly opts out. A
-  trashed message has a checksummed local `.eml` copy and can be restored.
+- **`trash` refuses to run for a message unless `backup` already succeeded
+  for that exact message, earlier in the same rule's action list, in this
+  same run** — a backup from a previous run doesn't count. If a rule
+  doesn't want a local copy at all — a mail server's own trash folder is
+  often recovery enough on its own — set `allow_trash_without_backup: true`
+  on it explicitly; `config check` rejects any rule that could never
+  satisfy the requirement (`backup` missing, or listed after `trash`), so a
+  misconfigured rule fails loudly up front instead of quietly doing nothing
+  on every real run. The check is per message: one message's backup
+  failing skips only that message's trash and leaves it untouched; every
+  other message in the run proceeds normally.
 - **Protection is opt-in and explicit.** A task with no `protect:` block
   protects nothing — there is no hidden default shielding unread or flagged
   mail. Write down what you want protected.
