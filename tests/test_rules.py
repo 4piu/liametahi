@@ -17,6 +17,8 @@ from liametahi import rules
 from liametahi.rules import (
     AllNode,
     AnyNode,
+    AuthResult,
+    HasAttachment,
     HasFlag,
     HasHeader,
     InMailbox,
@@ -393,6 +395,49 @@ def test_larger_than() -> None:
     candidate = make_candidate(rfc822_size=600 * 1024)
     assert evaluate(LargerThan(size_bytes=500 * 1024), candidate, now=NOW) == Tri.TRUE
     assert evaluate(LargerThan(size_bytes=700 * 1024), candidate, now=NOW) == Tri.FALSE
+
+
+def test_has_attachment_true_and_false() -> None:
+    with_attachment = make_candidate(has_attachment=True)
+    without_attachment = make_candidate(has_attachment=False)
+    assert evaluate(HasAttachment(), with_attachment, now=NOW) == Tri.TRUE
+    assert evaluate(HasAttachment(), without_attachment, now=NOW) == Tri.FALSE
+
+
+def _auth_result_atom(mechanism: str, result: str) -> AuthResult:
+    return AuthResult(
+        regex=re.compile(
+            rf"\b{re.escape(mechanism)}\s*=\s*{re.escape(result)}\b", re.IGNORECASE
+        )
+    )
+
+
+def test_auth_result_matching_mechanism_and_result_is_true() -> None:
+    candidate = make_candidate(
+        auth_results="mx.example.com; spf=fail smtp.mailfrom=evil.example; dkim=pass"
+    )
+    assert evaluate(_auth_result_atom("spf", "fail"), candidate, now=NOW) == Tri.TRUE
+    assert evaluate(_auth_result_atom("dkim", "pass"), candidate, now=NOW) == Tri.TRUE
+
+
+def test_auth_result_wrong_result_is_false() -> None:
+    candidate = make_candidate(auth_results="mx.example.com; spf=pass")
+    assert evaluate(_auth_result_atom("spf", "fail"), candidate, now=NOW) == Tri.FALSE
+
+
+def test_auth_result_mechanism_absent_is_false() -> None:
+    candidate = make_candidate(auth_results="mx.example.com; dkim=pass")
+    assert evaluate(_auth_result_atom("spf", "fail"), candidate, now=NOW) == Tri.FALSE
+
+
+def test_auth_result_none_header_is_false() -> None:
+    candidate = make_candidate(auth_results=None)
+    assert evaluate(_auth_result_atom("spf", "fail"), candidate, now=NOW) == Tri.FALSE
+
+
+def test_auth_result_case_insensitive_on_mechanism_and_result_tokens() -> None:
+    candidate = make_candidate(auth_results="mx.example.com; SPF=FAIL")
+    assert evaluate(_auth_result_atom("spf", "fail"), candidate, now=NOW) == Tri.TRUE
 
 
 def test_llm_atom_is_always_unknown() -> None:

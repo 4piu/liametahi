@@ -459,6 +459,68 @@ def test_invalid_recipient_count_comparisons_rejected(value: str) -> None:
         parse_condition_tree({"recipient-count": value})
 
 
+# --- has-attachment (spec §7.1; contracts §3) -----------------------------
+
+
+def test_has_attachment_true_boolean_accepted() -> None:
+    tree = parse_condition_tree({"has-attachment": True})
+    assert isinstance(tree, rules.HasAttachment)
+
+
+@pytest.mark.parametrize("value", [False, "true", 1, "True", None, "yes"])
+def test_has_attachment_rejects_anything_but_literal_true(value: object) -> None:
+    with pytest.raises(ConfigError):
+        parse_condition_tree({"has-attachment": value})
+
+
+# --- auth-result (spec §7.1; contracts §3) --------------------------------
+
+
+@pytest.mark.parametrize(
+    "value,mechanism,result",
+    [
+        ("spf=pass", "spf", "pass"),
+        ("dkim=fail", "dkim", "fail"),
+        ("dmarc=softfail", "dmarc", "softfail"),
+        ("SPF=PASS", "SPF", "PASS"),
+    ],
+)
+def test_auth_result_valid_values_accepted(
+    value: str, mechanism: str, result: str
+) -> None:
+    tree = parse_condition_tree({"auth-result": value})
+    assert isinstance(tree, rules.AuthResult)
+    assert tree.regex.search(f"host; {mechanism}={result}")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["foo=pass", "spfpass", "spf=", "=pass", "spf==pass", "spf=pass=extra", ""],
+)
+def test_auth_result_invalid_values_rejected(value: str) -> None:
+    with pytest.raises(ConfigError):
+        parse_condition_tree({"auth-result": value})
+
+
+def test_auth_result_fetch_headers_include_authentication_results(
+    tmp_path: Path,
+) -> None:
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = {
+        "all": [{"auth-result": "spf=fail"}, {"older-than": "1d"}]
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    cfg = load_config(path)
+    assert "AUTHENTICATION-RESULTS" in cfg.tasks["inbox-cleanup"].fetch_headers
+
+
+def test_auth_result_absent_fetch_headers_excludes_authentication_results(
+    tmp_path: Path,
+) -> None:
+    cfg = load_config(write_config(tmp_path / "cfg.yaml", make_config_dict()))
+    assert "AUTHENTICATION-RESULTS" not in cfg.tasks["inbox-cleanup"].fetch_headers
+
+
 def test_sender_match_plain_value_is_a_literal_pattern() -> None:
     tree = parse_condition_tree({"sender-match": "*@example.org"})
     assert isinstance(tree, rules.SenderMatch)

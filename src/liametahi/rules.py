@@ -149,6 +149,22 @@ class RecipientCount:
 
 
 @dataclass(frozen=True, slots=True)
+class HasAttachment:
+    """A presence check with a fixed `true` value, validated entirely at
+    config-parse time (spec §7.1); nothing left to carry at eval time."""
+
+
+@dataclass(frozen=True, slots=True)
+class AuthResult:
+    """`auth-result: mechanism=result` (spec §7.1). `regex` is a single
+    precompiled pattern built by `config.py` from the parsed mechanism and
+    result words (contracts §3), never re-built per candidate at eval
+    time -- mirroring `RegexPattern`'s precompile-once discipline."""
+
+    regex: re.Pattern[str]
+
+
+@dataclass(frozen=True, slots=True)
 class LlmCondition:
     description: str
 
@@ -165,6 +181,8 @@ Atom = (
     | InMailbox
     | LargerThan
     | RecipientCount
+    | HasAttachment
+    | AuthResult
     | LlmCondition
 )
 
@@ -229,6 +247,12 @@ def _eval_atom(atom: Atom, candidate: Candidate, *, now: datetime) -> Tri:
         comparator = _COMPARATORS[atom.op]
         matched = comparator(len(candidate.recipients), atom.value)
         return Tri.TRUE if matched else Tri.FALSE
+    if isinstance(atom, HasAttachment):
+        return Tri.TRUE if candidate.has_attachment else Tri.FALSE
+    if isinstance(atom, AuthResult):
+        if candidate.auth_results is None:
+            return Tri.FALSE
+        return Tri.TRUE if atom.regex.search(candidate.auth_results) else Tri.FALSE
     if isinstance(atom, LlmCondition):
         return Tri.UNKNOWN
     _assert_never(atom)

@@ -95,6 +95,8 @@ def make_candidate(
     subject: str | None = "Test subject",
     list_id: str | None = None,
     has_list_unsubscribe: bool = False,
+    has_attachment: bool = False,
+    auth_results: str | None = None,
 ) -> Candidate:
     return Candidate(
         key=MessageKey(account_id, mailbox, uidvalidity, uid),
@@ -111,6 +113,8 @@ def make_candidate(
         subject=subject,
         list_id=list_id,
         has_list_unsubscribe=has_list_unsubscribe,
+        has_attachment=has_attachment,
+        auth_results=auth_results,
     )
 
 

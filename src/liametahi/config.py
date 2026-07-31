@@ -64,6 +64,10 @@ _SIZE_RE = re.compile(r"^(\d+)([kKmMgG]?)[bB]?$")
 # that matches at a position, not the longest, so ">" before ">=" would
 # swallow the ">" and leave a stray "=" that fails the trailing \d+ anchor.
 _COMPARISON_RE = re.compile(r"^(==|!=|>=|<=|>|<)(\d+)$")
+# contracts §3: mechanism is a closed set, result word is deliberately open
+# (pass/fail/softfail/neutral/none/temperror/permerror and provider-specific
+# extensions all appear in real Authentication-Results headers).
+_AUTH_RESULT_RE = re.compile(r"^(spf|dkim|dmarc)\s*=\s*([A-Za-z_]+)$", re.IGNORECASE)
 # spec §7.3: "no spaces, no `(){%*"\]`"
 _LABEL_FORBIDDEN_RE = re.compile(r'[\s(){%*"\\\]]')
 
@@ -115,6 +119,40 @@ def _parse_comparison(key: str, value: str) -> tuple[rules.ComparisonOp, int]:
     # _COMPARISON_RE's first group is one of exactly these six alternatives.
     op = cast(rules.ComparisonOp, match.group(1))
     return op, int(match.group(2))
+
+
+def _parse_auth_result(key: str, value: object) -> rules.AuthResult:
+    """`auth-result: mechanism=result` (spec §7.1; contracts §3). The
+    mechanism is one of `spf`/`dkim`/`dmarc` (case-insensitive); the
+    result word is open vocabulary. Compiled once here into a single
+    precomputed `re.Pattern`, never re-built per candidate at eval time."""
+    text = _require_str(key, value)
+    match = _AUTH_RESULT_RE.match(text)
+    if not match:
+        raise ConfigError(
+            f"condition {key!r} has an invalid value {text!r}: expected "
+            "'mechanism=result' where mechanism is one of spf, dkim, dmarc, "
+            "e.g. 'spf=fail'"
+        )
+    mechanism, result = match.group(1), match.group(2)
+    pattern = re.compile(
+        rf"\b{re.escape(mechanism)}\s*=\s*{re.escape(result)}\b", re.IGNORECASE
+    )
+    return rules.AuthResult(regex=pattern)
+
+
+def _parse_has_attachment(key: str, value: object) -> rules.HasAttachment:
+    """`has-attachment: true` (spec §7.1): only the literal YAML boolean
+    `True` is accepted -- anything else, including `False` or the string
+    `"true"`, is a config error. Negate with `not: {has-attachment: true}`
+    rather than inventing a second spelling for the same fact."""
+    if value is not True:
+        raise ConfigError(
+            f"condition {key!r} requires the literal YAML boolean 'true' "
+            f"(got {value!r}); negate with 'not: {{has-attachment: true}}' "
+            "instead of a second spelling for the same fact"
+        )
+    return rules.HasAttachment()
 
 
 #: Hosts for which `tls_insecure_skip_verify` is permitted (spec §12).
@@ -245,11 +283,15 @@ def _parse_atom(key: str, value: object) -> rules.Atom:
     if key == "recipient-count":
         op, count = _parse_comparison(key, _require_str(key, value))
         return rules.RecipientCount(op=op, value=count)
+    if key == "has-attachment":
+        return _parse_has_attachment(key, value)
+    if key == "auth-result":
+        return _parse_auth_result(key, value)
     raise ConfigError(
         f"unknown condition {key!r}; expected one of all/any/not or an atom "
         "(older-than, newer-than, sender-match, recipient-match, "
         "subject-contains, list-id-contains, has-header, has-flag, in-mailbox, "
-        "larger-than, recipient-count, llm)"
+        "larger-than, recipient-count, has-attachment, auth-result, llm)"
     )
 
 
@@ -323,7 +365,11 @@ def has_deterministic_atom(tree: ConditionTree) -> bool:
 
 
 def collect_header_names(tree: ConditionTree) -> frozenset[str]:
-    """Collect every header name referenced by a `has-header` atom."""
+    """Collect every header name referenced by a `has-header` atom, plus
+    `authentication-results` whenever an `auth-result` atom appears --
+    this is what makes `TaskConfig.fetch_headers` actually fetch
+    `Authentication-Results` for a task that uses `auth-result` anywhere
+    in its rules, without fetching it unconditionally for every task."""
     if isinstance(tree, rules.AllNode | rules.AnyNode):
         names: set[str] = set()
         for child in tree.children:
@@ -333,6 +379,8 @@ def collect_header_names(tree: ConditionTree) -> frozenset[str]:
         return collect_header_names(tree.child)
     if isinstance(tree, rules.HasHeader):
         return frozenset({tree.name})
+    if isinstance(tree, rules.AuthResult):
+        return frozenset({"authentication-results"})
     return frozenset()
 
 

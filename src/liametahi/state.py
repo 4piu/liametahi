@@ -209,8 +209,8 @@ def upsert_candidate(conn: sqlite3.Connection, candidate: Candidate) -> int:
             account_id, mailbox, uidvalidity, uid, fingerprint, message_id,
             internaldate, rfc822_size, flags, headers_present, from_address,
             from_display, recipients, cc_count, subject, list_id,
-            has_list_unsubscribe, first_seen_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            has_list_unsubscribe, has_attachment, auth_results, first_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (account_id, mailbox, uidvalidity, uid) DO UPDATE SET
             fingerprint = excluded.fingerprint,
             message_id = excluded.message_id,
@@ -224,7 +224,9 @@ def upsert_candidate(conn: sqlite3.Connection, candidate: Candidate) -> int:
             cc_count = excluded.cc_count,
             subject = excluded.subject,
             list_id = excluded.list_id,
-            has_list_unsubscribe = excluded.has_list_unsubscribe
+            has_list_unsubscribe = excluded.has_list_unsubscribe,
+            has_attachment = excluded.has_attachment,
+            auth_results = excluded.auth_results
         """,
         (
             key.account_id,
@@ -244,6 +246,8 @@ def upsert_candidate(conn: sqlite3.Connection, candidate: Candidate) -> int:
             candidate.subject,
             candidate.list_id,
             int(candidate.has_list_unsubscribe),
+            int(candidate.has_attachment),
+            candidate.auth_results,
             _iso_now(),
         ),
     )
@@ -276,6 +280,8 @@ def _row_to_candidate(row: sqlite3.Row) -> Candidate:
         subject=row["subject"],
         list_id=row["list_id"],
         has_list_unsubscribe=bool(row["has_list_unsubscribe"]),
+        has_attachment=bool(row["has_attachment"]),
+        auth_results=row["auth_results"],
     )
 
 
@@ -311,7 +317,8 @@ def prune_candidate_content(conn: sqlite3.Connection, *, before: str) -> int:
         """
         UPDATE candidates SET
             from_address = NULL, from_display = NULL, recipients = NULL,
-            subject = NULL, list_id = NULL, content_pruned_at = ?
+            subject = NULL, list_id = NULL, auth_results = NULL,
+            content_pruned_at = ?
         WHERE first_seen_at < ? AND content_pruned_at IS NULL
         """,
         (_iso_now(), before),

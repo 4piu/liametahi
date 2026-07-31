@@ -61,6 +61,20 @@ def _header_values(msg: Message, name: str) -> tuple[str, ...]:
     return tuple(str(v).strip() for v in msg.get_all(name, []) if str(v).strip())
 
 
+def _has_attachment(msg: Message) -> bool:
+    """A simpler, stdlib-based equivalent of the real adapter's
+    BODYSTRUCTURE-parsing heuristic (spec §7.1): this fake already has
+    the full parsed message in hand, so it walks every part directly
+    rather than replicating wire-level parsing. True if any part is
+    marked `Content-Disposition: attachment` or carries a filename."""
+    for part in msg.walk():
+        if part.get_content_disposition() == "attachment":
+            return True
+        if part.get_filename() is not None:
+            return True
+    return False
+
+
 class FakeMailbox:
     """An in-memory mailbox implementing the `MailboxAdapter`-shaped
     protocol over a small in-memory message store.
@@ -209,6 +223,7 @@ class FakeMailbox:
                     rfc822_size=len(msg.raw),
                     flags=frozenset(msg.flags),
                     headers=present,
+                    has_attachment=_has_attachment(parsed),
                 )
             )
         # \Seen is never touched by a metadata fetch (spec §4.1, §12).

@@ -45,6 +45,8 @@ class Candidate:
     subject: str | None
     list_id: str | None
     has_list_unsubscribe: bool
+    has_attachment: bool
+    auth_results: str | None  # topmost Authentication-Results value only
 
 
 def fingerprint(

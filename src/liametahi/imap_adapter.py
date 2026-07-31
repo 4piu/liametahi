@@ -73,6 +73,7 @@ class RawMetadata:
     rfc822_size: int
     flags: frozenset[str]
     headers: Mapping[str, tuple[str, ...]]  # lowercased name -> all values
+    has_attachment: bool  # derived from BODYSTRUCTURE (spec §7.1)
 
 
 class MailboxAdapter(Protocol):
@@ -111,6 +112,209 @@ def _parse_internaldate(raw: bytes) -> datetime:
     return datetime.strptime(text, _INTERNALDATE_FORMAT).astimezone(UTC)
 
 
+# --- BODYSTRUCTURE parsing and the has-attachment heuristic (spec §7.1) ----
+#
+# `BODYSTRUCTURE`'s value appears inline in the FETCH response's non-literal
+# `line` bytes (not as a separate literal), so this is a small,
+# self-contained recursive-descent parser for RFC 3501 §7.4.2's
+# parenthesized-list grammar: `(`, `)`, a double-quoted string (with `\"`
+# and `\\` escapes), `NIL`, a bare number, or any other bare atom. It
+# deliberately does not support the one grammar construct a `{n}` literal
+# marker would require -- a `_BodystructureParseError` there (or on any
+# other malformed input) is always caught by the sole caller,
+# `_bodystructure_has_attachment`, and converted to `has_attachment=False`:
+# a scan must never fail because one message's structure was unusual.
+
+
+class _BodystructureParseError(Exception):
+    """Internal signal only -- never escapes this module. Raised on an
+    unbalanced parenthesization or an unsupported `{n}` literal marker."""
+
+
+_ATTACHMENT_MARKER_TOKENS = frozenset({"ATTACHMENT", "NAME", "FILENAME"})
+_BODYSTRUCTURE_MARKER = b"BODYSTRUCTURE "
+_ATOM_STOP_BYTES = (b"(", b")", b" ", b"\t", b"\r", b"\n")
+
+
+class _Cursor:
+    """A mutable position into a `bytes` buffer, shared by every parsing
+    function below so each can advance it in place."""
+
+    __slots__ = ("data", "pos")
+
+    def __init__(self, data: bytes, pos: int = 0) -> None:
+        self.data = data
+        self.pos = pos
+
+    def peek(self) -> bytes:
+        """The byte at the current position, or `b""` at end of data."""
+        return self.data[self.pos : self.pos + 1]
+
+
+def _skip_ws(cursor: _Cursor) -> None:
+    while cursor.pos < len(cursor.data) and cursor.peek().isspace():
+        cursor.pos += 1
+
+
+def _parse_quoted_string(cursor: _Cursor) -> str:
+    """`cursor` is positioned at the opening `"`."""
+    cursor.pos += 1
+    data = cursor.data
+    chars: list[str] = []
+    while True:
+        if cursor.pos >= len(data):
+            raise _BodystructureParseError("unterminated quoted string")
+        ch = cursor.peek()
+        if ch == b"\\":
+            cursor.pos += 1
+            if cursor.pos >= len(data):
+                raise _BodystructureParseError("unterminated escape")
+            chars.append(cursor.peek().decode("ascii", errors="replace"))
+            cursor.pos += 1
+            continue
+        if ch == b'"':
+            cursor.pos += 1
+            return "".join(chars)
+        chars.append(ch.decode("ascii", errors="replace"))
+        cursor.pos += 1
+
+
+def _parse_atom_token(cursor: _Cursor) -> str:
+    """A bare `NIL`, number, or other unquoted atom -- any non-empty run
+    of bytes not starting a nested structure or ending the enclosing
+    list."""
+    start = cursor.pos
+    data = cursor.data
+    while (
+        cursor.pos < len(data)
+        and data[cursor.pos : cursor.pos + 1] not in _ATOM_STOP_BYTES
+    ):
+        cursor.pos += 1
+    if cursor.pos == start:
+        raise _BodystructureParseError(f"unexpected byte at position {start}")
+    return data[start : cursor.pos].decode("ascii", errors="replace")
+
+
+def _parse_scalar(cursor: _Cursor) -> str:
+    ch = cursor.peek()
+    if ch == b'"':
+        return _parse_quoted_string(cursor)
+    if ch == b"{":
+        # The one grammar construct this simple parser deliberately does
+        # not support (spec §7.1) -- an IMAP literal-length marker.
+        raise _BodystructureParseError("literal marker '{' is not supported")
+    return _parse_atom_token(cursor)
+
+
+def _parse_list(cursor: _Cursor) -> list[object]:
+    """`cursor` is positioned at the opening `(`. Recurses on a nested
+    `(`, appends a parsed scalar otherwise, and returns once it consumes
+    the matching `)`."""
+    cursor.pos += 1
+    items: list[object] = []
+    while True:
+        _skip_ws(cursor)
+        if cursor.pos >= len(cursor.data):
+            raise _BodystructureParseError("unbalanced parentheses")
+        ch = cursor.peek()
+        if ch == b")":
+            cursor.pos += 1
+            return items
+        if ch == b"(":
+            items.append(_parse_list(cursor))
+            continue
+        items.append(_parse_scalar(cursor))
+
+
+def _flatten_bodystructure_tokens(value: object) -> list[str]:
+    """Depth-first flatten of a parsed `BODYSTRUCTURE` list into every
+    string/atom leaf token (spec §7.1); numbers and `NIL` are harmless to
+    include since they never match the marker vocabulary below."""
+    if isinstance(value, list):
+        tokens: list[str] = []
+        for item in value:
+            tokens.extend(_flatten_bodystructure_tokens(item))
+        return tokens
+    if isinstance(value, str):
+        return [value]
+    return []  # pragma: no cover - parser only ever yields list[str|list]
+
+
+def _find_bodystructure_value_start(line: bytes) -> int | None:
+    """Locate where `BODYSTRUCTURE `'s value begins in `line`, but only
+    when `BODYSTRUCTURE` names a top-level FETCH data item -- not when
+    that literal token happens to appear as a keyword *value* nested
+    inside another data item. This matters concretely: `label:<keyword>`
+    (spec §7.3) has no reason to forbid the keyword `BODYSTRUCTURE`, so a
+    message can legitimately carry an IMAP keyword flag with that exact
+    name, and our own FETCH command always requests `FLAGS` before
+    `BODYSTRUCTURE`. A naive `bytes.find` on the whole line would then
+    match the flag *name* sitting inside `FLAGS (...)` -- which is not
+    followed by `(...)` -- and this function's caller would see a
+    non-`(` next byte and (correctly, given that wrong starting point)
+    report no attachment, permanently, for a message that may have a real
+    one. This scans the line tracking parenthesis depth (skipping the
+    contents of double-quoted strings, so a literal `(`/`)` inside e.g. a
+    quoted value is never miscounted) and only accepts a match at depth
+    1 -- one level inside the response's own outer `(...)` wrapper,
+    exactly where every real top-level data-item name sits, and where a
+    value nested inside `FLAGS (...)` (depth 2) can never be mistaken for
+    it."""
+    depth = 0
+    in_quotes = False
+    i = 0
+    n = len(line)
+    marker_len = len(_BODYSTRUCTURE_MARKER)
+    while i < n:
+        ch = line[i : i + 1]
+        if in_quotes:
+            if ch == b"\\":
+                i += 2
+                continue
+            if ch == b'"':
+                in_quotes = False
+            i += 1
+            continue
+        if ch == b'"':
+            in_quotes = True
+            i += 1
+            continue
+        if ch == b"(":
+            depth += 1
+            i += 1
+            continue
+        if ch == b")":
+            depth -= 1
+            i += 1
+            continue
+        if depth == 1 and line[i : i + marker_len] == _BODYSTRUCTURE_MARKER:
+            preceded_ok = i == 0 or line[i - 1 : i] in (b" ", b"(")
+            if preceded_ok:
+                return i + marker_len
+        i += 1
+    return None
+
+
+def _bodystructure_has_attachment(line: bytes) -> bool:
+    """The flatten-and-scan attachment heuristic (spec §7.1): true if any
+    token in the parsed `BODYSTRUCTURE` case-insensitively equals
+    `ATTACHMENT`, `NAME`, or `FILENAME`. `False` if `BODYSTRUCTURE ` is
+    absent from `line`, or parsing fails for any reason -- never raises."""
+    start = _find_bodystructure_value_start(line)
+    if start is None:
+        return False
+    cursor = _Cursor(line, start)
+    _skip_ws(cursor)
+    if cursor.pos >= len(cursor.data) or cursor.peek() != b"(":
+        return False
+    try:
+        parsed = _parse_list(cursor)
+    except _BodystructureParseError:
+        return False
+    tokens = _flatten_bodystructure_tokens(parsed)
+    return any(token.upper() in _ATTACHMENT_MARKER_TOKENS for token in tokens)
+
+
 def _parse_fetch_line(line: bytes, literal: bytes) -> RawMetadata | None:
     """Parse one `(line, literal)` element of an `imaplib` FETCH response
     into a `RawMetadata`. Returns `None` if the line does not look like a
@@ -128,12 +332,14 @@ def _parse_fetch_line(line: bytes, literal: bytes) -> RawMetadata | None:
         else frozenset()
     )
     headers = _parse_header_literal(literal)
+    has_attachment = _bodystructure_has_attachment(line)
     return RawMetadata(
         uid=int(uid_match.group(1)),
         internaldate=_parse_internaldate(date_match.group(1)),
         rfc822_size=int(size_match.group(1)),
         flags=flags,
         headers=headers,
+        has_attachment=has_attachment,
     )
 
 
@@ -294,7 +500,7 @@ class ImapMailbox:
             return ()
         header_list = " ".join(sorted({h.upper() for h in headers}))
         fetch_items = (
-            f"(UID INTERNALDATE RFC822.SIZE FLAGS "
+            f"(UID INTERNALDATE RFC822.SIZE FLAGS BODYSTRUCTURE "
             f"BODY.PEEK[HEADER.FIELDS ({header_list})])"
         )
         results: list[RawMetadata] = []
@@ -472,6 +678,8 @@ def normalize(
         subject=subject,
         list_id=list_id,
         has_list_unsubscribe=has_list_unsubscribe,
+        has_attachment=raw.has_attachment,
+        auth_results=_first(raw.headers, "authentication-results"),
     )
 
 

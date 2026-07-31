@@ -42,6 +42,8 @@ CREATE TABLE candidates (
   subject              TEXT,               -- prunable
   list_id              TEXT,               -- prunable
   has_list_unsubscribe INTEGER NOT NULL DEFAULT 0,
+  has_attachment       INTEGER NOT NULL DEFAULT 0,
+  auth_results         TEXT,               -- prunable; topmost header value only
   first_seen_at        TEXT    NOT NULL,
   content_pruned_at    TEXT,
   UNIQUE (account_id, mailbox, uidvalidity, uid)

@@ -219,6 +219,8 @@ namespaced id (`vendor/model`). OpenRouter also accepts optional
 | `in-mailbox` | mailbox name | case-sensitive except `INBOX` |
 | `larger-than` | size (`500k`, `2M`) | against `RFC822.SIZE` |
 | `recipient-count` | comparison (`>10`, `<=3`, `==1`) | against the same deduplicated union `recipient-match` uses |
+| `has-attachment` | `true` | see below |
+| `auth-result` | `mechanism=result` (`spf=fail`) | see below; mechanism is `spf`, `dkim`, or `dmarc` |
 | `llm` | free-text description | the only condition the model ever sees |
 
 `-match` conditions default to **glob**: without a wildcard, the value must
@@ -234,6 +236,24 @@ with `/`, e.g. `sender-match: /.+@gmail\.com/i` — supported flags are
 plain glob/substring form. These patterns run against sender-controlled
 input; avoid nested quantifiers (`(a+)+`) that can hang on an adversarial
 value.
+
+`has-attachment: true` is derived from the IMAP `BODYSTRUCTURE` response
+(parsed once during scan, not at rule-eval time). It's a heuristic, not a
+MIME-spec guarantee: any part carrying a `NAME`/`FILENAME` parameter or an
+`attachment` disposition counts, which means an inline image embedded in an
+HTML signature can register as an "attachment" even though no mail client
+would show it as one to a user. `not: {has-attachment: true}` is how you
+express "no attachment" — `has-attachment: false` is rejected outright
+rather than accepted as a confusing second spelling of the same thing.
+
+`auth-result` reads the `Authentication-Results` header and checks for
+`mechanism=result` (case-insensitive), e.g. `auth-result: dmarc=fail`. A
+message can carry more than one such header — one per hop that performed
+its own checks — so **only the topmost (first-encountered) one is ever
+consulted**, since that's the one added last, by the hop closest to you
+(ordinarily your own provider). This is a positional heuristic, not a
+cryptographic guarantee: it doesn't verify that header actually came from
+your provider, which would need correlating the `Received` chain too.
 
 `recipient-match` is a union test across every recipient the message names
 (`To`, `Cc`, `Delivered-To`, `X-Original-To`, deduplicated, display names
