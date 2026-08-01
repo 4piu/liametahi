@@ -550,9 +550,14 @@ class AccountConfig(BaseModel):
 
 
 class ContentEscalationConfig(BaseModel):
+    """No separate on/off switch here (spec §5.1): a rule's own
+    `allow_content_escalation` is already the opt-in, and a second gate
+    at the model level would only mean two places to enable the same
+    thing before it does anything, with no clear story for what one
+    enabled and the other disabled means."""
+
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = False
     format: Literal["plain_text_excerpt"] = "plain_text_excerpt"
     max_chars: int = Field(default=2000, gt=0)
     max_messages_per_run: int = Field(default=20, gt=0)

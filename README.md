@@ -196,7 +196,9 @@ default.
 | `batch_size` | Candidates per classification call, range 1–25 | `10` |
 | `timeout_seconds` | Per-request HTTP timeout | `45` |
 | `max_retries` | Transport-error retries — never a rejected response | `2` |
-| `content_escalation.enabled` | Let an unsure `llm` verdict trigger the bounded body-excerpt second pass — see [Content escalation](#content-escalation) | `false` |
+| `content_escalation.format` | Excerpt format offered on escalation | `plain_text_excerpt` |
+| `content_escalation.max_chars` | Excerpt length cap | `2000` |
+| `content_escalation.max_messages_per_run` | Caps how many candidates get an excerpt fetch in one run — see [Content escalation](#content-escalation) | `20` |
 
 An OpenRouter endpoint is `provider: openai_compatible` with
 `base_url: https://openrouter.ai/api/v1/chat/completions` and `model` set to

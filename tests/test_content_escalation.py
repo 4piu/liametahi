@@ -1,0 +1,93 @@
+"""Tests for `runner._run_content_escalation` (spec §4.2 step 7, §5.1).
+
+There is deliberately no model-level `content_escalation.enabled` switch
+alongside a rule's own `allow_content_escalation` -- the rule opting in is
+already the enable signal, so escalation must fire on that alone.
+"""
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+from liametahi import runner as runner_mod
+from liametahi.config import load_config
+from tests.conftest import make_config_dict, write_config
+from tests.fakes.fake_classifier import FakeClassifier, outcome_with_matches
+from tests.fakes.fake_mailbox import FakeMailbox, _StoredMessage
+
+MESSAGE_ID = "<msg1@example.com>"
+
+
+def _config_with_state(tmp_path: Path) -> Path:
+    data = make_config_dict()
+    data["settings"] = {
+        "log_level": "info",
+        "state_db": str(tmp_path / "state.sqlite3"),
+        "backup_dir": str(tmp_path / "backups"),
+        "task_lock_dir": str(tmp_path / "locks"),
+    }
+    data["tasks"]["inbox-cleanup"]["rules"][0] = {
+        "id": "maybe-archive",
+        "priority": 0,
+        "when": [{"llm": "should this be archived?"}],
+        "allow_content_escalation": True,
+        "actions": ["move_to:Archive"],
+    }
+    return write_config(tmp_path / "cfg.yaml", data)
+
+
+def _mailbox() -> FakeMailbox:
+    raw = (
+        "From: sender@example.com\r\n"
+        "To: me@example.com\r\n"
+        "Subject: Weekly Digest\r\n"
+        f"Message-Id: {MESSAGE_ID}\r\n"
+        "Date: Mon, 1 Jun 2026 08:00:00 +0000\r\n"
+        "\r\n"
+        "body text\r\n"
+    ).encode()
+    return FakeMailbox(
+        messages=[
+            _StoredMessage(
+                uid=1,
+                raw=raw,
+                flags=set(),
+                internaldate=datetime(2026, 6, 1, tzinfo=UTC),
+                mailbox="INBOX",
+            )
+        ],
+        uidvalidity={"INBOX": 1000, "Archive": 1000},
+    )
+
+
+def test_rule_opt_in_alone_triggers_escalation(tmp_path: Path) -> None:
+    """A rule's `allow_content_escalation: true` is sufficient by itself:
+    no model-level field needs to be set for the excerpt re-classify pass
+    to run when the model reports it's unsure."""
+    path = _config_with_state(tmp_path)
+    cfg = load_config(path)
+
+    clf = FakeClassifier(
+        [
+            outcome_with_matches(
+                matches_by_payload={"c1": []}, needs_content={"c1": True}
+            ),
+            outcome_with_matches(matches_by_payload={"c1": ["maybe-archive"]}),
+        ]
+    )
+
+    outcome = runner_mod.run_task(
+        config=cfg,
+        config_path=path,
+        task_name="inbox-cleanup",
+        dry_run=True,
+        fail_fast=False,
+        reevaluate=False,
+        wait_seconds=0.0,
+        mailbox_factory=lambda account_cfg: _mailbox(),
+        classifier_factory=lambda model_cfg: clf,
+    )
+
+    assert clf.call_count == 2, "the escalated (excerpt) call never happened"
+    assert outcome.report_data is not None
+    winning_rules = [item.winning_rule for item in outcome.report_data.items]
+    assert "maybe-archive" in winning_rules

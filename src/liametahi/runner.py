@@ -734,14 +734,16 @@ def _drop_unsupported_for_dry_run(
 # (never accepts, never caches) any response whose `needs_content` flag
 # is set (see its module docstring); it records `needs_content` on the
 # `classifications` row so this module -- which *does* have mailbox
-# access -- can find and re-drive exactly those candidates. Honours all
-# three switches named in the work-unit brief, in this precedence:
-#   1. `model.content_escalation.enabled` -- a hard global gate.
-#   2. Per rule `allow_content_escalation` -- only rules that opt in are
-#      re-offered; if none of a candidate's originally-offered rules opt
-#      in, escalation is unavailable for it (spec §5.3's "if escalation
-#      is unavailable for any reason, the item is treated as unknown").
-#   3. `model.content_escalation.max_messages_per_run` -- caps how many
+# access -- can find and re-drive exactly those candidates. Honours both
+# switches named in the work-unit brief, in this precedence:
+#   1. Per rule `allow_content_escalation` -- the only opt-in; only rules
+#      that set it are re-offered, and if none of a candidate's
+#      originally-offered rules opt in, escalation is unavailable for it
+#      (spec §5.3's "if escalation is unavailable for any reason, the
+#      item is treated as unknown"). There is deliberately no separate
+#      model-level on/off switch alongside this one (spec §5.1) -- a rule
+#      opting in is already the enable signal.
+#   2. `model.content_escalation.max_messages_per_run` -- caps how many
 #      candidates get an excerpt fetch in this run at all, applied in
 #      the same oldest-first order candidates are otherwise processed.
 
@@ -760,9 +762,6 @@ def _run_content_escalation(
     candidates_by_id: dict[int, Candidate],
     results_by_id: dict[int, evaluate.CandidateResult],
 ) -> None:
-    if not model_cfg.content_escalation.enabled:
-        return
-
     rows = conn.execute(
         "SELECT candidate_id, offered_rules FROM classifications "
         "WHERE run_id = ? AND needs_content = 1 AND valid = 1",
