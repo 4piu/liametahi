@@ -1,118 +1,55 @@
 # Liametahi
 
-A local, cron-friendly CLI that cleans up an IMAP mailbox using an LLM as a
-**constrained classifier**, never as the thing that touches your mail.
+A local, cron-friendly CLI that cleans up an IMAP mailbox. You describe the
+mail you want gone in plain language; an LLM answers **yes / no / unsure**
+for each rule against each message, and deterministic code does everything
+else.
 
-The model only ever answers one question, per rule, per message: *does this
-rule's description apply — yes, no, or unsure?* Every mailbox mutation
-(backup, trash, move, label) is performed by deterministic application code
-that never reads the model's free-text output, only its yes/no/unsure
-verdict against rules **you** wrote. Every destructive action is backed up
-first and is restorable.
+```yaml
+- id: old-digest
+  when:
+    - older-than: 30d
+    - llm: A newsletter or digest with nothing time-sensitive left in it.
+  actions: [backup, trash]
+```
 
-## Why
+The model never touches your mail. It cannot invent an action, name a rule
+you did not write, or return anything outside the closed list it was offered
+for that one message — it only classifies, and a separate phase decides what
+to do and does it. Every destructive action is backed up first and is
+restorable.
 
-Inboxes accumulate years of automated notifications, receipts, and digests
-that are individually low-value but collectively make search and triage
-worse. Deleting them by hand is tedious; deleting them with a rigid filter
-misses anything that doesn't match a fixed pattern. Liametahi lets you
-describe *what kind of mail* is safe to discard in plain language, while
-keeping every irreversible decision behind deterministic guardrails you can
-read, test, and audit.
-
-## Safety model
-
-- **The LLM never mutates anything.** It classifies; a separate, deterministic
-  phase decides what to do and does it.
-- **`trash` refuses to run for a message unless `backup` already succeeded
-  for that exact message, earlier in the same rule's action list, in this
-  same run** — a backup from a previous run doesn't count. If a rule
-  doesn't want a local copy at all — a mail server's own trash folder is
-  often recovery enough on its own — set `allow_trash_without_backup: true`
-  on it explicitly; `config check` rejects any rule that could never
-  satisfy the requirement (`backup` missing, or listed after `trash`), so a
-  misconfigured rule fails loudly up front instead of quietly doing nothing
-  on every real run. The check is per message: one message's backup
-  failing skips only that message's trash and leaves it untouched; every
-  other message in the run proceeds normally.
-- **Protection is opt-in and explicit.** A task with no `protect:` block
-  protects nothing — there is no hidden default shielding unread or flagged
-  mail. Write down what you want protected.
-- **A rule that can `trash` mail must carry at least one deterministic
-  condition.** An LLM verdict alone can never be destructive.
-- **`--dry-run` runs the full pipeline** (scan, classify, decide) and prints
-  exactly what *would* happen, without touching the mailbox.
-- **Nothing runs twice by accident.** A run claims each message atomically;
-  a crash mid-run is reconciled cleanly on the next invocation; a second
-  concurrent invocation of the same task fails fast (exit `5`) rather than
-  racing.
-- **Flag-based protection stays honest even though Liametahi isn't assumed
-  to be the mailbox's only writer.** Every scan also refreshes stored flags
-  for messages it already knows about (one batched fetch per mailbox, not
-  per message), and, independently, the moment before any mutation actually
-  runs, `protect.flags`/`protect.unread` are re-checked against freshly
-  re-fetched flags — so flagging a message important from your phone after
-  Liametahi already scanned it still stops it from being trashed.
-- **A message is never re-actioned once it's truly gone.** A tracked message
-  that was actually moved (`trash`/`move_to`) or confirmed gone from the
-  server is retired and excluded from every later run — it doesn't keep
-  coming back to burn a claim-and-re-verify round trip forever. A completed
-  `label` never retires it, since the message is still there and may match
-  something else later.
-- **Restoring a trashed message is respected, not silently undone.** The
-  decision cache is keyed to survive a message being moved (so a failed
-  trash can retry cheaply on the next run), but that also means it survives
-  a *restore*. If a message's fingerprint already has a completed
-  trash/move from an earlier run, Liametahi quietly skips it instead of
-  re-trashing it — with no model call either way — and retires it, so the
-  decision is made once and never revisited. `--reevaluate` does not
-  override this (see [Re-running and the decision
-  cache](#re-running-and-the-decision-cache)).
-
-## Requirements
-
-- Python ≥ 3.14
-- [`uv`](https://docs.astral.sh/uv/) for dependency management and running
-  the tool
-- An IMAP account (Gmail, or any IMAP server)
-- An LLM endpoint: an OpenAI-compatible endpoint (including a local
-  [llama.cpp](https://github.com/ggml-org/llama.cpp) server), Anthropic, or
-  OpenRouter
+That matters because the alternative approaches both fail: deleting years of
+accumulated notifications by hand is tedious, and a rigid filter misses
+everything that does not match a pattern you thought of in advance.
 
 ## Install
+
+Needs Python ≥ 3.14, [`uv`](https://docs.astral.sh/uv/), an IMAP account, and
+an LLM endpoint — an OpenAI-compatible one (including a local
+[llama.cpp](https://github.com/ggml-org/llama.cpp) server), Anthropic, or
+OpenRouter.
 
 ```sh
 uv sync
 uv run liametahi --help
 ```
 
-`uv sync` also installs the dev dependencies (pytest, ruff, mypy) needed to
-run the test suite below.
-
 ## Quickstart
 
-Liametahi reads a single YAML config file. By default it looks for:
+Liametahi reads a single YAML config file, by default from
+`~/.config/liametahi/config.yaml` (`~/Library/Application Support/liametahi/`
+on macOS, `%LOCALAPPDATA%\liametahi\` on Windows). Override with
+`--config PATH` or `$LIAMETAHI_CONFIG`.
 
-| Platform | Default path |
-| --- | --- |
-| Linux | `~/.config/liametahi/config.yaml` |
-| macOS | `~/Library/Application Support/liametahi/config.yaml` |
-| Windows | `%LOCALAPPDATA%\liametahi\config.yaml` |
-
-Override with `--config PATH` or `$LIAMETAHI_CONFIG`.
-
-**The config file holds literal credentials** (spec-mandated design: no
-secondary secret store) and must be owned and readable only by you —
-`liametahi config check` refuses a world- or group-readable file.
+**The file holds literal credentials** and must be readable only by you —
+`config check` refuses a world- or group-readable file.
 
 ```sh
-mkdir -p ~/.config/liametahi
-chmod 700 ~/.config/liametahi
+mkdir -p ~/.config/liametahi && chmod 700 ~/.config/liametahi
 $EDITOR ~/.config/liametahi/config.yaml
 chmod 600 ~/.config/liametahi/config.yaml
 ```
-
-A minimal config:
 
 ```yaml
 version: 1
@@ -174,11 +111,33 @@ uv run liametahi run inbox-cleanup
 uv run liametahi report --list
 uv run liametahi report            # the newest run
 
-# Undo a trash by restoring from its backup.
-uv run liametahi restore 4w8wbbs3fs --mailbox INBOX
-# ...or just enough leading characters to be unambiguous:
+# Undo a trash by restoring from its backup (any unambiguous id prefix).
 uv run liametahi restore 4w8w --mailbox INBOX
 ```
+
+## Safety model
+
+- **The LLM never mutates anything.** It classifies; deterministic code
+  decides and acts.
+- **`trash` requires a successful `backup` first** — same message, same run,
+  earlier in the same action list — unless the rule opts out with
+  `allow_trash_without_backup: true`.
+- **A rule that can `trash` must carry a deterministic condition.** An LLM
+  verdict alone is never destructive.
+- **Protection is opt-in.** No `protect:` block means nothing is protected;
+  there are no hidden defaults shielding unread or flagged mail.
+- **Protection is re-checked against freshly fetched flags** immediately
+  before any mutation, so flagging a message from your phone after a scan
+  still stops it being trashed.
+- **`--dry-run` runs the whole pipeline** and prints exactly what would
+  happen, touching nothing.
+- **Nothing runs twice by accident.** Each message is claimed atomically, a
+  crash is reconciled on the next run, and a second concurrent run of the
+  same task exits `5` rather than racing.
+- **A message you restore from trash is never silently re-trashed.**
+
+Each of these is expanded, with the reasoning, in
+[docs/internals.md](docs/internals.md).
 
 ## Configuration reference
 
@@ -377,51 +336,6 @@ once: later runs reuse the answer without re-fetching the body or re-asking.
 If the model is *still* unsure even with the excerpt, nothing is cached —
 that is a deferral, not a decision — so it will be retried.
 
-### Watching a run
-
-At a terminal, `run` draws a live status line on stderr showing the current
-phase, how many mails through it is, and elapsed time:
-
-```
-⠙ classifying 20/57 mails [########----------------] 130.2s
-```
-
-Every phase counts the same unit — mails — so two bars in one run can never
-be counting different things behind identical-looking numbers. Every slow phase is counted:
-fetching new mail and refreshing flags during the scan, classification,
-body-excerpt escalation, and execution. Escalation is the slowest per
-message, since each one costs its own un-batched model call.
-
-It is **strictly interactive**: when stderr is not a terminal — cron, CI,
-redirected output — nothing is drawn and the output is byte-for-byte what it
-would have been. Phase boundaries are also logged at `info`, so a cron log
-still records what happened, just without the animation.
-
-### Re-running and the decision cache
-
-A rule's model decision — match or non-match — is cached per message and
-reused on later runs, so an hourly cron job never re-classifies the same
-already-decided mail. This is also what makes a failed action retry cheaply:
-if a message matched a `trash` rule but the actual mailbox move failed (a
-misconfigured `trash_mailbox`, a capability the server doesn't advertise),
-the message stays put and is picked up again next run — the cached match is
-reused straight into policy/execution, not re-sent to the model. `--reevaluate`
-bypasses the cache entirely and forces a fresh pass.
-
-The cache is keyed to survive a message moving, which is exactly what makes
-it survive a *restore* too: if you move a trashed message back to a source
-mailbox, it re-scans under a new UID and can hit the same cached "yes".
-Liametahi checks for this — a message whose fingerprint already has a
-completed trash/move from a previous run is skipped, never silently
-re-trashed. The skip is recorded as a quiet `restored` result item (visible
-with `report --verbose`, absent from default output) and retires the
-message, so it is skipped once and then dropped from
-consideration entirely rather than re-reported on every future run. There is
-currently no flag to force Liametahi to re-trash a message you've restored on
-purpose; delete its old `action_attempts` history from the state database, or
-match it with a different rule, if you truly want that.
-`--reevaluate` does not affect this check — it governs only the LLM cache.
-
 ## CLI reference
 
 ```
@@ -447,35 +361,30 @@ proper report and the task lock released), `4` authentication failure,
 `5` the task is already running (cron-safe — a typical crontab line is
 `liametahi run TASK || [ $? -eq 5 ]`).
 
-## Development
+### Watching a run
 
-```sh
-uv sync --all-groups
+At a terminal, `run` draws a live status line on stderr showing the current
+phase, how many mails through it is, and elapsed time:
 
-uv run ruff format --check .
-uv run ruff check .
-uv run mypy --strict src/liametahi tests
-uv run pytest                    # unit + integration; integration auto-skips without Docker
-uv run pytest -m integration     # only the Docker-backed IMAP tests (Dovecot)
+```
+⠙ classifying 20/57 mails [########----------------] 130.2s
 ```
 
-The `live` marker (`LIAMETAHI_LIVE=1 uv run pytest -m live`) exercises a real
-mailbox and is never run in CI.
+Every phase counts the same unit — mails — so two bars in one run can never
+be counting different things behind identical-looking numbers. Every slow phase is counted:
+fetching new mail and refreshing flags during the scan, classification,
+body-excerpt escalation, and execution. Escalation is the slowest per
+message, since each one costs its own un-batched model call.
 
-### Testing against a real mailbox without touching it twice
+It is **strictly interactive**: when stderr is not a terminal — cron, CI,
+redirected output — nothing is drawn and the output is byte-for-byte what it
+would have been. Phase boundaries are also logged at `info`, so a cron log
+still records what happened, just without the animation.
 
-```sh
-# Once: pull a corpus from a real account, read-only, into local .eml files.
-uv run tools/capture_corpus.py --host imap.gmail.com --username you@gmail.com \
-    --limit 200 --out tests/corpus/mine
+## Documentation
 
-# From then on: a disposable local Dovecot container seeded from that corpus.
-uv run tools/dev_imap.py up
-uv run tools/dev_imap.py seed --corpus tests/corpus/mine
-uv run tools/dev_imap.py print-config   # a secret-free config pointed at it
-```
-
-`capture_corpus.py` never reads a config file or accepts a password as a CLI
-argument (shell history) — it prompts, or reads `$LIAMETAHI_IMAP_PASSWORD`.
-Every config after that first capture can point at the local container and
-hold no real secret at all.
+- [docs/internals.md](docs/internals.md) — how a run actually works: the
+  three phases, how messages are tracked and retired, the decision cache,
+  and why each safety rule above exists.
+- [docs/development.md](docs/development.md) — test tiers, running the
+  suite, and testing against a real mailbox without touching it twice.
