@@ -20,6 +20,7 @@ Exit codes (spec §9):
 
 import os
 import signal
+import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -100,12 +101,33 @@ def _load(config: Path | None) -> tuple[Config, Path]:
     except ConfigError as exc:
         typer.echo(f"config error: {exc}", err=True)
         raise typer.Exit(code=EXIT_BAD_CONFIG) from exc
-    configure_logging(level=cfg.settings.log_level, log_file=cfg.settings.log_file)
+    try:
+        configure_logging(level=cfg.settings.log_level, log_file=cfg.settings.log_file)
+    except OSError as exc:
+        # `configure_logging` creates `log_file`'s parent directory; an
+        # unwritable location (permission denied, an ancestor that's a
+        # file, ...) is a config problem, not a mid-run failure, so it
+        # gets the same treatment as any other bad config value rather
+        # than a raw traceback.
+        typer.echo(f"config error: settings.log_file: {exc}", err=True)
+        raise typer.Exit(code=EXIT_BAD_CONFIG) from exc
     for account in cfg.accounts.values():
         register_secret(account.password)
     for model in cfg.models.values():
         register_secret(model.api_key)
     return cfg, path
+
+
+def _open_state_db(cfg: Config) -> sqlite3.Connection:
+    """`state.open_database` creates `settings.state_db`'s parent
+    directory; an unwritable location is a config problem, not a
+    mid-command failure, so it gets the same treatment as any other bad
+    config value rather than a raw traceback."""
+    try:
+        return state.open_database(cfg.settings.state_db)
+    except OSError as exc:
+        typer.echo(f"config error: settings.state_db: {exc}", err=True)
+        raise typer.Exit(code=EXIT_BAD_CONFIG) from exc
 
 
 app = typer.Typer(
@@ -265,7 +287,7 @@ def report(
         raise typer.Exit(code=EXIT_BAD_CONFIG)
 
     cfg, _ = _load(config)
-    conn = state.open_database(cfg.settings.state_db)
+    conn = _open_state_db(cfg)
     try:
         if list_:
             typer.echo(report_mod.render_run_list(state.list_runs(conn, task=task)))
@@ -323,7 +345,7 @@ def restore(
         typer.echo(f"unknown account {account_name!r}", err=True)
         raise typer.Exit(code=EXIT_BAD_CONFIG)
 
-    conn = state.open_database(cfg.settings.state_db)
+    conn = _open_state_db(cfg)
     mailbox_conn = None
     try:
         # A dry run verifies the checksum and reports what it would

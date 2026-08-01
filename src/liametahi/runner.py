@@ -207,6 +207,19 @@ def run_task(
             report_data=None,
             diagnostic=str(exc),
         )
+    except OSError as exc:
+        # `task_lock` creates `settings.task_lock_dir` (and opens the
+        # lock file inside it); an unwritable location is a config
+        # problem, not a mid-run failure -- and, same as `LockTimeout`,
+        # nothing here ever got as far as opening the state database, so
+        # there is no run report to produce.
+        return RunOutcome(
+            run_id=None,
+            exit_code=EXIT_BAD_CONFIG,
+            dry_run=dry_run,
+            report_data=None,
+            diagnostic=f"settings.task_lock_dir: {exc}",
+        )
 
 
 def _run_locked(
@@ -228,7 +241,20 @@ def _run_locked(
     register_secret(account_cfg.password)
     register_secret(model_cfg.api_key)
 
-    conn = state.open_database(config.settings.state_db)
+    try:
+        conn = state.open_database(config.settings.state_db)
+    except OSError as exc:
+        # `open_database` creates `settings.state_db`'s parent directory;
+        # an unwritable location is a config problem. Nothing has been
+        # opened yet, so there is no `conn` to close and no run row to
+        # produce a report for.
+        return RunOutcome(
+            run_id=None,
+            exit_code=EXIT_BAD_CONFIG,
+            dry_run=dry_run,
+            report_data=None,
+            diagnostic=f"settings.state_db: {exc}",
+        )
     try:
         account_id = state.upsert_account(
             conn,

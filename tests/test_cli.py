@@ -30,6 +30,16 @@ def _config_with_state(tmp_path: Path) -> Path:
     return write_config(tmp_path / "cfg.yaml", data)
 
 
+def _unwritable_path(tmp_path: Path, name: str) -> str:
+    """A path no `mkdir(parents=True)` can ever create: a plain file
+    sits where a directory component needs to be, so this reproduces the
+    failure portably (unlike a permission-denied path under `/`, which
+    depends on not running as root)."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    return str(blocker / "sub" / name)
+
+
 def test_config_check_valid_config_exits_0(tmp_path: Path) -> None:
     path = write_config(tmp_path / "cfg.yaml", make_config_dict())
     result = runner.invoke(app, ["config", "check", "--config", str(path)])
@@ -84,6 +94,24 @@ def test_config_check_missing_file_exits_2(tmp_path: Path) -> None:
     assert result.exit_code == 2
 
 
+def test_config_check_unwritable_log_file_exits_2_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    """`configure_logging` creates `log_file`'s parent directory; when it
+    can't (a blocking file in the way, permission denied, ...) this must
+    be a clean exit-2 config error, not an unhandled OSError."""
+    data = make_config_dict()
+    data["settings"] = {
+        "log_level": "info",
+        "log_file": _unwritable_path(tmp_path, "liametahi.log"),
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    result = runner.invoke(app, ["config", "check", "--config", str(path)])
+    assert result.exit_code == 2, result.output
+    assert "config error" in result.output
+    assert "settings.log_file" in result.output
+
+
 def test_acceptance_15_config_check_world_readable_exits_2(tmp_path: Path) -> None:
     path = write_config(tmp_path / "cfg.yaml", make_config_dict())
     path.chmod(0o644)
@@ -128,6 +156,36 @@ def test_run_rejects_bad_format(tmp_path: Path) -> None:
     assert result.exit_code == 2, result.output
 
 
+def test_run_unwritable_task_lock_dir_exits_2_not_a_traceback(tmp_path: Path) -> None:
+    """`task_lock` creates `task_lock_dir`; when it can't, this must be a
+    clean exit-2 config error, not an unhandled OSError -- and it must
+    happen before any mailbox/model factory is ever called, since lock
+    acquisition comes first (spec §10)."""
+    data = make_config_dict()
+    data["settings"] = {
+        "log_level": "info",
+        "state_db": str(tmp_path / "state.sqlite3"),
+        "task_lock_dir": _unwritable_path(tmp_path, "locks"),
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    result = runner.invoke(app, ["run", "inbox-cleanup", "--config", str(path)])
+    assert result.exit_code == 2, result.output
+    assert "settings.task_lock_dir" in result.output
+
+
+def test_run_unwritable_state_db_exits_2_not_a_traceback(tmp_path: Path) -> None:
+    data = make_config_dict()
+    data["settings"] = {
+        "log_level": "info",
+        "state_db": _unwritable_path(tmp_path, "state.sqlite3"),
+        "task_lock_dir": str(tmp_path / "locks"),
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    result = runner.invoke(app, ["run", "inbox-cleanup", "--config", str(path)])
+    assert result.exit_code == 2, result.output
+    assert "settings.state_db" in result.output
+
+
 def test_report_with_no_stored_runs_exits_1(tmp_path: Path) -> None:
     path = _config_with_state(tmp_path)
     result = runner.invoke(app, ["report", "--config", str(path)])
@@ -140,6 +198,22 @@ def test_report_list_with_no_runs_exits_0(tmp_path: Path) -> None:
     path = _config_with_state(tmp_path)
     result = runner.invoke(app, ["report", "--config", str(path), "--list"])
     assert result.exit_code == 0, result.output
+
+
+def test_report_unwritable_state_db_exits_2_not_a_traceback(tmp_path: Path) -> None:
+    """`open_database` creates `state_db`'s parent directory; when it
+    can't, this must be a clean exit-2 config error, not an unhandled
+    OSError."""
+    data = make_config_dict()
+    data["settings"] = {
+        "log_level": "info",
+        "state_db": _unwritable_path(tmp_path, "state.sqlite3"),
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    result = runner.invoke(app, ["report", "--config", str(path), "--list"])
+    assert result.exit_code == 2, result.output
+    assert "config error" in result.output
+    assert "settings.state_db" in result.output
 
 
 def test_report_never_contacts_mailbox_or_model(
@@ -172,6 +246,30 @@ def test_restore_unknown_backup_exits_1(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 1, result.output
+
+
+def test_restore_unwritable_state_db_exits_2_not_a_traceback(tmp_path: Path) -> None:
+    data = make_config_dict()
+    data["settings"] = {
+        "log_level": "info",
+        "state_db": _unwritable_path(tmp_path, "state.sqlite3"),
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    result = runner.invoke(
+        app,
+        [
+            "restore",
+            "bkp_NOPE",
+            "--mailbox",
+            "INBOX",
+            "--config",
+            str(path),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert "config error" in result.output
+    assert "settings.state_db" in result.output
 
 
 def test_restore_dry_run_opens_no_connection(
