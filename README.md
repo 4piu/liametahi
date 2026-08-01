@@ -375,10 +375,10 @@ the rules that need it, not everywhere.
 ### Watching a run
 
 At a terminal, `run` draws a live status line on stderr showing the current
-phase, how far through it is, and elapsed time — classification and
-execution are both slow enough to look wedged otherwise, and body-excerpt
-escalation is slower still since each message costs its own un-batched model
-call.
+phase, how far through it is, and elapsed time. Every slow phase is counted:
+fetching new mail and refreshing flags during the scan, classification,
+body-excerpt escalation, and execution. Escalation is the slowest per
+message, since each one costs its own un-batched model call.
 
 It is **strictly interactive**: when stderr is not a terminal — cron, CI,
 redirected output — nothing is drawn and the output is byte-for-byte what it

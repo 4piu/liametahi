@@ -428,6 +428,7 @@ def _run_phases(
             source_mailboxes=task.source_mailboxes,
             fetch_headers=task.fetch_headers,
             max_new_mails=task.max_new_mails,
+            progress=progress,
         )
         for mailbox_result in scan_result.mailboxes:
             logger.debug(

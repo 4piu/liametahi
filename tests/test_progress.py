@@ -179,3 +179,52 @@ def test_a_run_without_a_reporter_still_works(tmp_path: Path) -> None:
     )
     assert outcome.exit_code == 0
     assert outcome.report_data is not None
+
+
+def test_scan_counts_new_mail_and_flag_refreshes(tmp_path: Path) -> None:
+    """The fetch is sliced so the counter can advance per server round
+    trip rather than jumping 0 -> done. The slicing must not change what
+    is fetched: `_MAX_UIDS_PER_FETCH` is 200, so 450 messages exercise
+    three slices in each phase."""
+    from liametahi import state
+    from liametahi.imap_adapter import scan
+
+    count = 450
+    mb = _mailbox(count)
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        headers = ["FROM", "SUBJECT", "MESSAGE-ID"]
+
+        first = RecordingProgress()
+        result = scan(
+            mb,
+            conn,
+            account_id=account_id,
+            source_mailboxes=["INBOX"],
+            fetch_headers=headers,
+            max_new_mails=None,
+            progress=first,
+        )
+        assert result.candidates_scanned == count, "slicing must not drop messages"
+        assert first.phases == [("fetching new mail", count)]
+        assert first.counts["fetching new mail"] == count
+
+        # A second scan finds nothing new, but refreshes every known
+        # message's flags -- counted the same way.
+        second = RecordingProgress()
+        again = scan(
+            mb,
+            conn,
+            account_id=account_id,
+            source_mailboxes=["INBOX"],
+            fetch_headers=headers,
+            max_new_mails=None,
+            progress=second,
+        )
+        assert again.mailboxes[0].new_candidates == 0
+        assert again.mailboxes[0].flags_refreshed == count
+        assert second.phases == [("refreshing flags", count)]
+        assert second.counts["refreshing flags"] == count
+    finally:
+        state.close_database(conn)

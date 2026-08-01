@@ -28,6 +28,7 @@ from typing import Protocol
 from liametahi import state
 from liametahi.domain import Candidate, MessageKey, fingerprint
 from liametahi.logging import get_logger
+from liametahi.progress import NullProgress, Progress
 
 logger = get_logger(__name__)
 
@@ -738,6 +739,7 @@ def scan(
     source_mailboxes: Sequence[str],
     fetch_headers: Sequence[str],
     max_new_mails: int | None,
+    progress: Progress | None = None,
 ) -> ScanResult:
     """Run the scan phase (spec §4.1) across every configured source
     mailbox of one task, in order, stopping once `max_new_mails`
@@ -780,6 +782,7 @@ def scan(
     changes mid-run. Skipped entirely when `UIDVALIDITY` changed --
     every UID is fetched fresh in that branch already.
     """
+    reporter = progress or NullProgress()
     mailbox_results: list[MailboxScanResult] = []
     total_saved = 0
     stopped_at_cap = False
@@ -834,10 +837,22 @@ def scan(
         new_count = 0
         reidentified_count = 0
         if candidate_uids:
+            # Fetched in slices rather than one call so the counter can
+            # advance per server round trip. `fetch_metadata` chunks
+            # internally too (`_MAX_UIDS_PER_FETCH`), so slicing at the
+            # same size here costs no extra round trips -- it just moves
+            # the boundary somewhere this loop can observe.
+            reporter.start("fetching new mail", total=len(candidate_uids))
+            raw_parts: list[RawMetadata] = []
+            for start in range(0, len(candidate_uids), _MAX_UIDS_PER_FETCH):
+                slice_ = candidate_uids[start : start + _MAX_UIDS_PER_FETCH]
+                raw_parts.extend(adapter.fetch_metadata(slice_, fetch_headers))
+                reporter.advance(len(slice_))
+            raw_batch = tuple(raw_parts)
+            reporter.stop()
             # The fetch stays outside the transaction below: holding a
             # write transaction open across network I/O would block every
             # other writer for its duration (see `state.transaction`).
-            raw_batch = adapter.fetch_metadata(candidate_uids, fetch_headers)
             with state.transaction(conn):
                 for raw in sorted(raw_batch, key=lambda r: r.internaldate):
                     if max_new_mails is not None and total_saved >= max_new_mails:
@@ -870,8 +885,14 @@ def scan(
             # pass already uses via `fetch_metadata([...], headers=[])`),
             # so this costs a FLAGS/INTERNALDATE/SIZE fetch, not a second
             # full metadata fetch.
-            flags_batch = adapter.fetch_metadata(known_uids, ())
-            flags_by_uid = {meta.uid: meta.flags for meta in flags_batch}
+            reporter.start("refreshing flags", total=len(known_uids))
+            flags_parts: list[RawMetadata] = []
+            for start in range(0, len(known_uids), _MAX_UIDS_PER_FETCH):
+                slice_ = known_uids[start : start + _MAX_UIDS_PER_FETCH]
+                flags_parts.extend(adapter.fetch_metadata(slice_, ()))
+                reporter.advance(len(slice_))
+            reporter.stop()
+            flags_by_uid = {meta.uid: meta.flags for meta in flags_parts}
             if flags_by_uid:
                 flags_refreshed = state.update_candidate_flags(
                     conn,
