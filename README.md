@@ -375,7 +375,14 @@ the rules that need it, not everywhere.
 ### Watching a run
 
 At a terminal, `run` draws a live status line on stderr showing the current
-phase, how far through it is, and elapsed time. Every slow phase is counted:
+phase, how many mails through it is, and elapsed time:
+
+```
+⠙ classifying 20/57 mails [########----------------] 130.2s
+```
+
+Every phase counts the same unit — mails — so two bars in one run can never
+be counting different things behind identical-looking numbers. Every slow phase is counted:
 fetching new mail and refreshing flags during the scan, classification,
 body-excerpt escalation, and execution. Escalation is the slowest per
 message, since each one costs its own un-batched model call.

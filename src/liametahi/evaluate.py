@@ -276,15 +276,15 @@ def evaluate_candidates(
         )
         total_batches = len(batches)
         logger.info(
-            "run %s: %d candidate(s) need an LLM call, in %d batch(es)",
+            "run %s: %d mail(s) need an LLM call, in %d batch(es)",
             run_id,
             len(llm_items),
             total_batches,
         )
-        reporter.start("classifying", total=total_batches)
+        reporter.start("classifying", total=len(llm_items))
         for index, batch in enumerate(batches, start=1):
             logger.info(
-                "run %s: classifying batch %d/%d (%d candidate(s))",
+                "run %s: classifying batch %d/%d (%d mails)",
                 run_id,
                 index,
                 total_batches,
@@ -302,7 +302,7 @@ def evaluate_candidates(
                 batch_label=f"{index}/{total_batches}",
             )
             stats = _combine_stats(stats, batch_stats)
-            reporter.advance()
+            reporter.advance(len(batch))
         reporter.stop()
 
     results = tuple(per_candidate[candidate_id] for candidate_id, _ in candidates)

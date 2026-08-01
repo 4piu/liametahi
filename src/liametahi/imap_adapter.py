@@ -842,7 +842,7 @@ def scan(
             # internally too (`_MAX_UIDS_PER_FETCH`), so slicing at the
             # same size here costs no extra round trips -- it just moves
             # the boundary somewhere this loop can observe.
-            reporter.start("fetching new mail", total=len(candidate_uids))
+            reporter.start("fetching new", total=len(candidate_uids))
             raw_parts: list[RawMetadata] = []
             for start in range(0, len(candidate_uids), _MAX_UIDS_PER_FETCH):
                 slice_ = candidate_uids[start : start + _MAX_UIDS_PER_FETCH]

@@ -27,12 +27,16 @@ class RecordingProgress:
     def __init__(self) -> None:
         self.phases: list[tuple[str, int | None]] = []
         self.counts: dict[str, int] = {}
+        self.units: dict[str, str] = {}
         self._current: str | None = None
 
-    def start(self, label: str, total: int | None = None) -> None:
+    def start(
+        self, label: str, total: int | None = None, *, unit: str = "mails"
+    ) -> None:
         self.phases.append((label, total))
         self._current = label
         self.counts.setdefault(label, 0)
+        self.units[label] = unit
 
     def advance(self, n: int = 1) -> None:
         if self._current is not None:
@@ -57,7 +61,9 @@ def test_tty_progress_renders_a_bar_and_erases_itself() -> None:
     out = buf.getvalue()
     frames = [f for f in out.split("\r") if "classifying" in f]
     assert frames, out
-    assert "3/3" in frames[-1]
+    # The unit is load-bearing: without it "1/3" next to a log line
+    # reading "batch 2/3" reads as an index into the same sequence.
+    assert "3/3 mails" in frames[-1]
     assert "#" in frames[-1]
     # Leaves the line clean for whatever prints next.
     assert out.endswith("\r\x1b[K")
@@ -207,8 +213,8 @@ def test_scan_counts_new_mail_and_flag_refreshes(tmp_path: Path) -> None:
             progress=first,
         )
         assert result.candidates_scanned == count, "slicing must not drop messages"
-        assert first.phases == [("fetching new mail", count)]
-        assert first.counts["fetching new mail"] == count
+        assert first.phases == [("fetching new", count)]
+        assert first.counts["fetching new"] == count
 
         # A second scan finds nothing new, but refreshes every known
         # message's flags -- counted the same way.
@@ -228,3 +234,46 @@ def test_scan_counts_new_mail_and_flag_refreshes(tmp_path: Path) -> None:
         assert second.counts["refreshing flags"] == count
     finally:
         state.close_database(conn)
+
+
+def test_classification_counts_mails_not_batches(tmp_path: Path) -> None:
+    """Every other phase counts mails, so classification counting
+    *batches* made its bar disagree with the `classifying batch 2/3` log
+    line printed beside it -- same words, same denominator, different
+    numbers, at the same instant. It counts mails like everything else.
+    """
+    path = _config(tmp_path)
+    cfg = load_config(path)
+    reporter = RecordingProgress()
+    mails = 25  # > one batch of 10, so batches and mails cannot coincide
+    clf = FakeClassifier(
+        [
+            outcome_with_matches(
+                matches_by_payload={f"c{i}": [] for i in range(1, 11)}
+            ),
+            outcome_with_matches(
+                matches_by_payload={f"c{i}": [] for i in range(1, 11)}
+            ),
+            outcome_with_matches(matches_by_payload={f"c{i}": [] for i in range(1, 6)}),
+        ]
+    )
+    runner_mod.run_task(
+        config=cfg,
+        config_path=path,
+        task_name="inbox-cleanup",
+        dry_run=False,
+        fail_fast=False,
+        reevaluate=False,
+        wait_seconds=0.0,
+        mailbox_factory=lambda account_cfg: _mailbox(mails),
+        classifier_factory=lambda model_cfg: clf,
+        progress=reporter,
+    )
+    totals = dict(reporter.phases)
+    assert totals["classifying"] == mails, (
+        f"total should be mails ({mails}), not batches: {totals['classifying']}"
+    )
+    assert reporter.counts["classifying"] == mails
+    # And every phase reports the same unit, so no two bars in one run
+    # can be counting different things under identical-looking numbers.
+    assert set(reporter.units.values()) == {"mails"}, reporter.units

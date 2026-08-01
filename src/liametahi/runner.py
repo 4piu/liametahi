@@ -446,7 +446,7 @@ def _run_phases(
             " (stopped at max_new_mails)" if scan_result.stopped_at_cap else ""
         )
         logger.info(
-            "run %s: scan complete: %d candidate(s)%s",
+            "run %s: scan complete: %d mail(s)%s",
             run_id,
             scan_result.candidates_scanned,
             capped_note,
@@ -479,7 +479,7 @@ def _run_phases(
                 eligible.append((candidate_id, candidate))
 
     logger.info(
-        "run %s: evaluating %d candidate(s) (%d protected, excluded)",
+        "run %s: evaluating %d mail(s) (%d protected, excluded)",
         run_id,
         len(eligible),
         len(protected_ids),
@@ -908,7 +908,7 @@ def _run_body_excerpt(
     # "executing N item(s)" to say why.
     reporter = progress or NullProgress()
     logger.info(
-        "run %s: escalating %d candidate(s) to a body excerpt "
+        "run %s: escalating %d mail(s) to a body excerpt "
         "(one model call each, not batched)",
         run_id,
         len(plan),
@@ -926,7 +926,7 @@ def _run_body_excerpt(
     reporter.stop()
     max_chars = model_cfg.body_excerpt.max_chars
     escalated = 0
-    reporter.start("re-classifying with excerpt", total=len(plan))
+    reporter.start("re-classifying", total=len(plan))
     for candidate_id, allowed_rules in plan:
         # Advanced up front, not after the work: three paths below bail
         # out with `continue`, and a bar that silently stalled on them

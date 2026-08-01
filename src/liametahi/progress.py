@@ -34,7 +34,9 @@ class Progress(Protocol):
     non-interactive run, cheap, and never raise -- progress reporting is
     cosmetic and must never be able to fail a run."""
 
-    def start(self, label: str, total: int | None = None) -> None: ...
+    def start(
+        self, label: str, total: int | None = None, *, unit: str = "mails"
+    ) -> None: ...
     def advance(self, n: int = 1) -> None: ...
     def stop(self) -> None: ...
 
@@ -42,7 +44,9 @@ class Progress(Protocol):
 class NullProgress:
     """The default. Does nothing, so a non-TTY run is unchanged."""
 
-    def start(self, label: str, total: int | None = None) -> None:
+    def start(
+        self, label: str, total: int | None = None, *, unit: str = "mails"
+    ) -> None:
         return
 
     def advance(self, n: int = 1) -> None:
@@ -70,6 +74,7 @@ class TtyProgress:
         self._lock = threading.RLock()
         self._label: str | None = None
         self._total: int | None = None
+        self._unit = "mails"
         self._done = 0
         self._started_at = 0.0
         self._spin = itertools.cycle(_SPINNER)
@@ -79,10 +84,13 @@ class TtyProgress:
 
     # --- Progress protocol ------------------------------------------
 
-    def start(self, label: str, total: int | None = None) -> None:
+    def start(
+        self, label: str, total: int | None = None, *, unit: str = "mails"
+    ) -> None:
         with self._lock:
             self._label = label
             self._total = total
+            self._unit = unit
             self._done = 0
             self._started_at = time.monotonic()
         self._ensure_thread()
@@ -152,7 +160,11 @@ class TtyProgress:
         elapsed = time.monotonic() - self._started_at
         parts = [next(self._spin), self._label]
         if self._total:
-            parts.append(f"{self._done}/{self._total}")
+            # The unit is not decoration: without it "1/3" alongside a log
+            # line reading "batch 2/3" invites reading the bar as an index
+            # into the same sequence, when it is a completed count of a
+            # different thing entirely.
+            parts.append(f"{self._done}/{self._total} {self._unit}")
             width = 24
             filled = int(width * min(self._done / self._total, 1.0))
             parts.append("[" + "#" * filled + "-" * (width - filled) + "]")
