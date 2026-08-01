@@ -16,7 +16,8 @@ import json
 import os
 import sqlite3
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -94,6 +95,47 @@ def open_database(db_path: Path) -> sqlite3.Connection:
 
 def close_database(conn: sqlite3.Connection) -> None:
     conn.close()
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    """Group a phase's **bookkeeping** writes into one transaction, and
+    therefore one fsync, instead of one per statement.
+
+    The connection is opened in autocommit mode with
+    `PRAGMA synchronous = FULL` (see `open_database`), so by default every
+    INSERT is its own durable transaction. That is exactly right for the
+    `action_attempts` state machine and the backup manifest -- the
+    reconcile pass (spec §4.0) can only tell how far a crashed run got
+    because each step was committed as it happened -- but it is pure
+    overhead for the bulk bookkeeping a run also produces (candidate
+    upserts, classifications, decision-cache entries, no-op result items),
+    none of which is safety-critical: losing the tail of it to a crash
+    just means the next run re-derives it.
+
+    Two rules for callers, both load-bearing:
+
+    - **Never hold one of these open across network I/O.** A model call or
+      an IMAP fetch inside a write transaction blocks every other writer
+      for its whole duration, against a 5-second `busy_timeout`. Do the
+      I/O first, then open a transaction to record the results.
+    - **Never wrap `execute.execute_items`.** Its per-statement durability
+      is the crash-recovery guarantee, not an oversight.
+
+    Re-entrant: if a transaction is already open on this connection, this
+    joins it rather than raising (SQLite has no nested `BEGIN`).
+    """
+    if conn.in_transaction:
+        yield
+        return
+    conn.execute("BEGIN")
+    try:
+        yield
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
 
 
 def _current_version(conn: sqlite3.Connection) -> int:
@@ -356,18 +398,23 @@ def update_candidate_flags(
     have nothing left to refresh from.
 
     Returns the number of rows actually updated.
+
+    Self-batching: the caller hands over a whole mailbox's worth of UIDs
+    at once and there is no I/O in the loop, so the updates go in one
+    transaction rather than one fsync per message (see `transaction`).
     """
     updated = 0
-    for uid, flags in flags_by_uid.items():
-        cur = conn.execute(
-            """
-            UPDATE candidates SET flags = ?
-            WHERE account_id = ? AND mailbox = ? AND uidvalidity = ? AND uid = ?
-              AND retired_at IS NULL
-            """,
-            (json.dumps(sorted(flags)), account_id, mailbox, uidvalidity, uid),
-        )
-        updated += cur.rowcount
+    with transaction(conn):
+        for uid, flags in flags_by_uid.items():
+            cur = conn.execute(
+                """
+                UPDATE candidates SET flags = ?
+                WHERE account_id = ? AND mailbox = ? AND uidvalidity = ? AND uid = ?
+                  AND retired_at IS NULL
+                """,
+                (json.dumps(sorted(flags)), account_id, mailbox, uidvalidity, uid),
+            )
+            updated += cur.rowcount
     return updated
 
 

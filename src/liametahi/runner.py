@@ -454,19 +454,23 @@ def _run_phases(
     )
     protected_ids: set[int] = set()
     eligible: list[tuple[int, Candidate]] = []
-    for candidate_id, candidate in live_candidates:
-        if rules.is_protected(
-            candidate,
-            protected_flags=task.protect.flags,
-            protected_senders=task.protect.senders,
-            protect_unread=task.protect.unread,
-        ):
-            protected_ids.add(candidate_id)
-            state.insert_result_item(
-                conn, run_id=run_id, candidate_id=candidate_id, status="protected"
-            )
-        else:
-            eligible.append((candidate_id, candidate))
+    # Pure local bookkeeping (no mailbox connection is open here at all),
+    # so the `protected` rows go in one transaction (see
+    # `state.transaction`) rather than one fsync each.
+    with state.transaction(conn):
+        for candidate_id, candidate in live_candidates:
+            if rules.is_protected(
+                candidate,
+                protected_flags=task.protect.flags,
+                protected_senders=task.protect.senders,
+                protect_unread=task.protect.unread,
+            ):
+                protected_ids.add(candidate_id)
+                state.insert_result_item(
+                    conn, run_id=run_id, candidate_id=candidate_id, status="protected"
+                )
+            else:
+                eligible.append((candidate_id, candidate))
 
     logger.info(
         "run %s: evaluating %d candidate(s) (%d protected, excluded)",
@@ -545,79 +549,84 @@ def _run_phases(
 
     execution_items: list[execute.ExecutionItem] = []
     shadowed_by_candidate: dict[int, tuple[str, ...]] = {}
-    for candidate_id, candidate in eligible:
-        result = results_by_id[candidate_id]
-        if result.status is not None:
-            state.insert_result_item(
-                conn,
-                run_id=run_id,
-                candidate_id=candidate_id,
-                status=result.status,
-                detail=result.error or result.reason,
-            )
-            continue
+    # Everything in this loop is local: `policy.decide` is pure and no
+    # mailbox connection is open between the scan and execute phases,
+    # so the whole batch of no-op/skipped result items commits once
+    # instead of fsyncing per row (see `state.transaction`).
+    with state.transaction(conn):
+        for candidate_id, candidate in eligible:
+            result = results_by_id[candidate_id]
+            if result.status is not None:
+                state.insert_result_item(
+                    conn,
+                    run_id=run_id,
+                    candidate_id=candidate_id,
+                    status=result.status,
+                    detail=result.error or result.reason,
+                )
+                continue
 
-        if candidate.fingerprint in restored_fingerprints:
-            state.insert_result_item(
-                conn,
-                run_id=run_id,
-                candidate_id=candidate_id,
-                status="restored",
-                detail=(
-                    "fingerprint already has a completed trash/move_to from "
-                    "a previous run; not re-acting on what looks like a "
-                    "user restore (sync-fix-brief Finding 3)"
-                ),
-            )
-            # Retire it as well as skipping it. Without this the decision
-            # is re-derived on every future run: the candidate stays live,
-            # is re-evaluated, and reports `restored` again forever --
-            # exactly the never-retires waste Fix C exists to end
-            # (Finding 2), just reached by a different path, since
-            # skipping here means `execute._reverify` never runs and so
-            # can never retire it as `vanished` either. One decision to
-            # leave a message alone is final; there is no reason to keep
-            # re-making it.
-            state.retire_candidate(
-                conn, candidate_id=candidate_id, reason="prior_trash"
-            )
-            continue
+            if candidate.fingerprint in restored_fingerprints:
+                state.insert_result_item(
+                    conn,
+                    run_id=run_id,
+                    candidate_id=candidate_id,
+                    status="restored",
+                    detail=(
+                        "fingerprint already has a completed trash/move_to from "
+                        "a previous run; not re-acting on what looks like a "
+                        "user restore (sync-fix-brief Finding 3)"
+                    ),
+                )
+                # Retire it as well as skipping it. Without this the decision
+                # is re-derived on every future run: the candidate stays live,
+                # is re-evaluated, and reports `restored` again forever --
+                # exactly the never-retires waste Fix C exists to end
+                # (Finding 2), just reached by a different path, since
+                # skipping here means `execute._reverify` never runs and so
+                # can never retire it as `vanished` either. One decision to
+                # leave a message alone is final; there is no reason to keep
+                # re-making it.
+                state.retire_candidate(
+                    conn, candidate_id=candidate_id, reason="prior_trash"
+                )
+                continue
 
-        matched = [
-            policy.MatchedRule(
-                rule_id=m.rule_id,
-                priority=rules_by_id[m.rule_id].priority,
-                config_order=rule_order[m.rule_id],
+            matched = [
+                policy.MatchedRule(
+                    rule_id=m.rule_id,
+                    priority=rules_by_id[m.rule_id].priority,
+                    config_order=rule_order[m.rule_id],
+                )
+                for m in result.matches
+            ]
+            decision = policy.decide(
+                protected=False,
+                matches=matched,
+                rules_by_id=rules_by_id,
+                trash_mailbox=account_cfg.trash_mailbox,
             )
-            for m in result.matches
-        ]
-        decision = policy.decide(
-            protected=False,
-            matches=matched,
-            rules_by_id=rules_by_id,
-            trash_mailbox=account_cfg.trash_mailbox,
-        )
-        if decision.status != "matched" or decision.winning_rule is None:
-            # Defensive only: `result.matches` non-empty guarantees a
-            # winner (spec §7.4's select_winner never returns None for a
-            # non-empty input).
-            state.insert_result_item(
-                conn, run_id=run_id, candidate_id=candidate_id, status="no_match"
-            )
-            continue
+            if decision.status != "matched" or decision.winning_rule is None:
+                # Defensive only: `result.matches` non-empty guarantees a
+                # winner (spec §7.4's select_winner never returns None for a
+                # non-empty input).
+                state.insert_result_item(
+                    conn, run_id=run_id, candidate_id=candidate_id, status="no_match"
+                )
+                continue
 
-        execution_items.append(
-            execute.ExecutionItem(
-                candidate_id=candidate_id,
-                key=candidate.key,
-                fingerprint=candidate.fingerprint,
-                message_id=candidate.message_id,
-                winning_rule=decision.winning_rule,
-                actions=decision.actions,
+            execution_items.append(
+                execute.ExecutionItem(
+                    candidate_id=candidate_id,
+                    key=candidate.key,
+                    fingerprint=candidate.fingerprint,
+                    message_id=candidate.message_id,
+                    winning_rule=decision.winning_rule,
+                    actions=decision.actions,
+                )
             )
-        )
-        if decision.shadowed:
-            shadowed_by_candidate[candidate_id] = decision.shadowed
+            if decision.shadowed:
+                shadowed_by_candidate[candidate_id] = decision.shadowed
 
     # --- Phase 3: execute (spec §4.3) -----------------------------------
     logger.info("run %s: executing %d item(s)", run_id, len(execution_items))

@@ -460,36 +460,43 @@ def _classify_batch(
         )
         return _combine_stats(left, right)
 
+    # From here on it is all bookkeeping: the model call above already
+    # happened, so these writes go in one transaction per batch rather
+    # than one fsync per row (see `state.transaction`). The classify()
+    # call is deliberately *outside* it -- a write transaction held open
+    # across a minute-long model call would block every other writer.
     if wholly_invalid:
-        for item in items:
-            _mark_invalid(item, per_candidate, error=failure_reason)
-            state.insert_classification(
-                conn,
-                run_id=run_id,
-                candidate_id=item.candidate_id,
-                input_level="metadata",
-                input_hash=item.input_hash,
-                offered_rules=item.remaining_rule_ids,
-                matches=(),
-                needs_content=False,
-                reason=None,
-                valid=False,
-                error=failure_reason,
-                latency_ms=None,
-            )
+        with state.transaction(conn):
+            for item in items:
+                _mark_invalid(item, per_candidate, error=failure_reason)
+                state.insert_classification(
+                    conn,
+                    run_id=run_id,
+                    candidate_id=item.candidate_id,
+                    input_level="metadata",
+                    input_hash=item.input_hash,
+                    offered_rules=item.remaining_rule_ids,
+                    matches=(),
+                    needs_content=False,
+                    reason=None,
+                    valid=False,
+                    error=failure_reason,
+                    latency_ms=None,
+                )
         return _BatchStats(llm_calls=1)
 
     assert outcome is not None
-    _apply_outcome(
-        conn,
-        outcome,
-        item_by_payload_id,
-        rules_by_id=rules_by_id,
-        run_id=run_id,
-        account_id=account_id,
-        model_id=model_id,
-        per_candidate=per_candidate,
-    )
+    with state.transaction(conn):
+        _apply_outcome(
+            conn,
+            outcome,
+            item_by_payload_id,
+            rules_by_id=rules_by_id,
+            run_id=run_id,
+            account_id=account_id,
+            model_id=model_id,
+            per_candidate=per_candidate,
+        )
     # Defence in depth: a well-behaved `Classifier` always partitions
     # every requested payload id across `results`/`invalid`/`missing`
     # (that invariant is what `prompt.parse_classification_response`

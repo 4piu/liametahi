@@ -834,32 +834,36 @@ def scan(
         new_count = 0
         reidentified_count = 0
         if candidate_uids:
+            # The fetch stays outside the transaction below: holding a
+            # write transaction open across network I/O would block every
+            # other writer for its duration (see `state.transaction`).
             raw_batch = adapter.fetch_metadata(candidate_uids, fetch_headers)
-            for raw in sorted(raw_batch, key=lambda r: r.internaldate):
-                if (
-                    max_candidates_per_run is not None
-                    and total_saved >= max_candidates_per_run
-                ):
-                    stopped_at_cap = True
-                    break
-                candidate = normalize(
-                    raw,
-                    account_id=account_id,
-                    mailbox=mailbox,
-                    uidvalidity=status.uidvalidity,
-                )
-                if uidvalidity_changed and _has_prior_identity(
-                    conn,
-                    account_id=account_id,
-                    mailbox=mailbox,
-                    uidvalidity=status.uidvalidity,
-                    fp=candidate.fingerprint,
-                ):
-                    reidentified_count += 1
-                else:
-                    new_count += 1
-                state.upsert_candidate(conn, candidate)
-                total_saved += 1
+            with state.transaction(conn):
+                for raw in sorted(raw_batch, key=lambda r: r.internaldate):
+                    if (
+                        max_candidates_per_run is not None
+                        and total_saved >= max_candidates_per_run
+                    ):
+                        stopped_at_cap = True
+                        break
+                    candidate = normalize(
+                        raw,
+                        account_id=account_id,
+                        mailbox=mailbox,
+                        uidvalidity=status.uidvalidity,
+                    )
+                    if uidvalidity_changed and _has_prior_identity(
+                        conn,
+                        account_id=account_id,
+                        mailbox=mailbox,
+                        uidvalidity=status.uidvalidity,
+                        fp=candidate.fingerprint,
+                    ):
+                        reidentified_count += 1
+                    else:
+                        new_count += 1
+                    state.upsert_candidate(conn, candidate)
+                    total_saved += 1
 
         flags_refreshed = 0
         if known_uids:
