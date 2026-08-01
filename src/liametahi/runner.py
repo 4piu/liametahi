@@ -65,6 +65,7 @@ from liametahi.domain import Candidate, MessageKey
 from liametahi.imap_adapter import ImapMailbox, MailboxAdapter, scan
 from liametahi.locks import LockTimeout, task_lock
 from liametahi.logging import get_logger, register_secret
+from liametahi.progress import NullProgress, Progress
 
 logger = get_logger(__name__)
 
@@ -151,6 +152,7 @@ def run_task(
     classifier_factory: ClassifierFactory = default_classifier_factory,
     on_run_created: Callable[[str], None] | None = None,
     now: datetime | None = None,
+    progress: Progress | None = None,
 ) -> RunOutcome:
     """Run one task end to end (spec §3, §4). See the module docstring
     for the safety-critical ordering this function enforces.
@@ -188,6 +190,7 @@ def run_task(
                 classifier_factory=classifier_factory,
                 on_run_created=on_run_created,
                 now=now or datetime.now(UTC),
+                progress=progress or NullProgress(),
             )
     except LockTimeout as exc:
         # spec §10: no run report, no DB write, no mailbox/model work.
@@ -233,6 +236,7 @@ def _run_locked(
     classifier_factory: ClassifierFactory,
     on_run_created: Callable[[str], None] | None,
     now: datetime,
+    progress: Progress,
 ) -> RunOutcome:
     """Everything from here on runs with the task lock held (spec §10)."""
     task = config.tasks[task_name]
@@ -295,6 +299,7 @@ def _run_locked(
                 mailbox_factory=mailbox_factory,
                 classifier_factory=classifier_factory,
                 now=now,
+                progress=progress,
             )
         except _AuthFailure as exc:
             state.finish_run(
@@ -397,6 +402,7 @@ def _run_phases(
     mailbox_factory: MailboxFactory,
     classifier_factory: ClassifierFactory,
     now: datetime,
+    progress: Progress,
 ) -> RunOutcome:
     rules_by_id = {rule.id: rule for rule in task.rules}
     rule_order = {rule.id: index for index, rule in enumerate(task.rules)}
@@ -489,6 +495,7 @@ def _run_phases(
         candidates=eligible,
         now=now,
         reevaluate=reevaluate,
+        progress=progress,
     )
     logger.info(
         "run %s: evaluate complete: %d LLM call(s)%s",
@@ -513,6 +520,7 @@ def _run_phases(
         mailbox_factory=mailbox_factory,
         candidates_by_id=candidates_by_id,
         results_by_id=results_by_id,
+        progress=progress,
     )
 
     # Fix D (sync-fix-brief Finding 3): the LLM decision cache is keyed on
@@ -649,6 +657,7 @@ def _run_phases(
             fail_fast=fail_fast,
             protected_flags=task.protect.flags,
             protect_unread=task.protect.unread,
+            progress=progress,
         )
     finally:
         _close_mailbox(exec_mailbox)
@@ -863,6 +872,7 @@ def _run_body_excerpt(
     mailbox_factory: MailboxFactory,
     candidates_by_id: dict[int, Candidate],
     results_by_id: dict[int, evaluate.CandidateResult],
+    progress: Progress | None = None,
 ) -> None:
     rows = conn.execute(
         "SELECT candidate_id, offered_rules FROM classifications "
@@ -890,6 +900,19 @@ def _run_body_excerpt(
     if not plan:
         return
 
+    # This phase used to be entirely silent, which was its own bug: each
+    # escalated message costs a full-body fetch *and* its own un-batched
+    # model call, so a run with a couple of dozen unsure messages can sit
+    # here for minutes with nothing between "evaluate complete" and
+    # "executing N item(s)" to say why.
+    reporter = progress or NullProgress()
+    logger.info(
+        "run %s: escalating %d candidate(s) to a body excerpt "
+        "(one model call each, not batched)",
+        run_id,
+        len(plan),
+    )
+    reporter.start("fetching excerpts", total=len(plan))
     excerpts = _fetch_excerpts(
         conn,
         mailbox_factory=mailbox_factory,
@@ -899,8 +922,16 @@ def _run_body_excerpt(
         candidate_ids=[cid for cid, _ in plan],
     )
 
+    reporter.stop()
     max_chars = model_cfg.body_excerpt.max_chars
+    escalated = 0
+    reporter.start("re-classifying with excerpt", total=len(plan))
     for candidate_id, allowed_rules in plan:
+        # Advanced up front, not after the work: three paths below bail
+        # out with `continue`, and a bar that silently stalled on them
+        # would be worse than none at all. The counter therefore means
+        # "attempted", while `escalated` counts what actually landed.
+        reporter.advance()
         excerpt_text = excerpts.get(candidate_id)
         if excerpt_text is None:
             continue
@@ -947,6 +978,10 @@ def _run_body_excerpt(
             model_id=model_cfg.model,
             input_hash=built.input_hash,
         )
+        escalated += 1
+
+    reporter.stop()
+    logger.info("run %s: escalation complete: %d re-classified", run_id, escalated)
 
 
 def _llm_description(rule: RuleConfig) -> str:

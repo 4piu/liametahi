@@ -58,6 +58,7 @@ from liametahi.classifier import (
 from liametahi.config import ModelConfig, RuleConfig, TaskConfig
 from liametahi.domain import Candidate
 from liametahi.logging import get_logger
+from liametahi.progress import NullProgress, Progress
 
 logger = get_logger(__name__)
 
@@ -189,6 +190,7 @@ def evaluate_candidates(
     candidates: Sequence[tuple[int, Candidate]],
     now: datetime,
     reevaluate: bool,
+    progress: Progress | None = None,
 ) -> EvaluateOutcome:
     """Run spec §4.2 steps 2-6 over already-scanned, already
     protected-filtered candidates.
@@ -198,6 +200,7 @@ def evaluate_candidates(
     `classifications` foreign keys and for the LLM decision cache's
     `fingerprint` (read off the `Candidate` itself).
     """
+    reporter = progress or NullProgress()
     rules_by_id: dict[str, RuleConfig] = {rule.id: rule for rule in task.rules}
     per_candidate: dict[int, CandidateResult] = {}
     llm_items: list[_BatchItem] = []
@@ -278,6 +281,7 @@ def evaluate_candidates(
             len(llm_items),
             total_batches,
         )
+        reporter.start("classifying", total=total_batches)
         for index, batch in enumerate(batches, start=1):
             logger.info(
                 "run %s: classifying batch %d/%d (%d candidate(s))",
@@ -298,6 +302,8 @@ def evaluate_candidates(
                 batch_label=f"{index}/{total_batches}",
             )
             stats = _combine_stats(stats, batch_stats)
+            reporter.advance()
+        reporter.stop()
 
     results = tuple(per_candidate[candidate_id] for candidate_id, _ in candidates)
     return EvaluateOutcome(

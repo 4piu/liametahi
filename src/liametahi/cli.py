@@ -21,6 +21,7 @@ Exit codes (spec §9):
 import os
 import signal
 import sqlite3
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -34,7 +35,13 @@ from liametahi import backup as backup_mod
 from liametahi import report as report_mod
 from liametahi import runner, state
 from liametahi.config import Config, ConfigError, load_config
-from liametahi.logging import configure_logging, enable_verbose, register_secret
+from liametahi.logging import (
+    configure_logging,
+    enable_verbose,
+    register_secret,
+    set_line_clearer,
+)
+from liametahi.progress import NullProgress, Progress, TtyProgress
 
 EXIT_SUCCESS = 0
 EXIT_RUNTIME_FAILURE = 1
@@ -53,6 +60,30 @@ DEFAULT_CONFIG_PATH = (
 
 def _raise_keyboard_interrupt(signum: int, frame: FrameType | None) -> None:
     raise KeyboardInterrupt
+
+
+@contextmanager
+def _interactive_progress() -> Iterator[Progress]:
+    """A live status line, but only when stderr is a real terminal.
+
+    Under cron, in CI, or with output redirected, this yields the no-op
+    reporter and the run's output is byte-for-byte what it always was --
+    a progress line is for a human watching, and carriage returns and
+    escape codes in a mailed cron log would be actively harmful.
+    """
+    stream = sys.stderr
+    if not (hasattr(stream, "isatty") and stream.isatty()):
+        yield NullProgress()
+        return
+    reporter = TtyProgress(stream)
+    # Both write to stderr; the log handler erases the status line first
+    # and the repaint thread puts it back on its next tick.
+    set_line_clearer(reporter.clear)
+    try:
+        yield reporter
+    finally:
+        set_line_clearer(None)
+        reporter.close()
 
 
 @contextmanager
@@ -262,8 +293,9 @@ def run(
     if verbose:
         enable_verbose()
 
-    with _handle_termination():
+    with _handle_termination(), _interactive_progress() as reporter:
         outcome = runner.run_task(
+            progress=reporter,
             config=cfg,
             config_path=path,
             task_name=task,

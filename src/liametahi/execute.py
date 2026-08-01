@@ -58,6 +58,7 @@ from liametahi.domain import MessageKey
 from liametahi.domain import fingerprint as compute_fingerprint
 from liametahi.logging import get_logger
 from liametahi.policy import ResolvedAction
+from liametahi.progress import NullProgress, Progress
 
 logger = get_logger(__name__)
 
@@ -117,6 +118,7 @@ def execute_items(
     fail_fast: bool,
     protected_flags: Collection[str] = (),
     protect_unread: bool = False,
+    progress: Progress | None = None,
 ) -> ExecuteSummary:
     """spec section 4.3. `items` must already be in the order the caller
     wants the cap applied (spec section 4.1: oldest `INTERNALDATE`
@@ -136,6 +138,8 @@ def execute_items(
     """
     outcomes: list[ExecutionOutcome] = []
     actions_done = 0
+    reporter = progress or NullProgress()
+    reporter.start("executing", total=len(items))
 
     for item in items:
         if max_actions is not None and actions_done >= max_actions:
@@ -147,6 +151,7 @@ def execute_items(
                 winning_rule=item.winning_rule,
             )
             outcomes.append(ExecutionOutcome(item.candidate_id, result_id, "capped"))
+            reporter.advance()
             continue
 
         if dry_run:
@@ -170,6 +175,7 @@ def execute_items(
                 )
             actions_done += 1
             outcomes.append(ExecutionOutcome(item.candidate_id, result_id, "dry_run"))
+            reporter.advance()
             continue
 
         actions_done += 1
@@ -187,9 +193,12 @@ def execute_items(
                 item.candidate_id, outcome_result_id, outcome_status, outcome_error
             )
         )
+        reporter.advance()
         if outcome_status == "failed" and fail_fast:
+            reporter.stop()
             return ExecuteSummary(tuple(outcomes), actions_done, True)
 
+    reporter.stop()
     return ExecuteSummary(tuple(outcomes), actions_done, False)
 
 

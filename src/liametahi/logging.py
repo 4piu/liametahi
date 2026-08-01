@@ -19,7 +19,7 @@ mechanisms enforce this:
 
 import contextlib
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 REDACTED = "<redacted>"
@@ -71,6 +71,28 @@ def _scrub_value(value: object) -> object:
     return _scrub(value) if isinstance(value, str) else value
 
 
+#: Set by `cli.py` when an interactive progress line is being drawn on
+#: stderr. Both write to the same stream, so the handler below erases the
+#: status line before emitting a record; the progress thread repaints it
+#: on its next tick. `None` (the default, and always the case for a
+#: non-interactive run) makes this a no-op.
+_line_clearer: Callable[[], None] | None = None
+
+
+def set_line_clearer(clearer: Callable[[], None] | None) -> None:
+    global _line_clearer
+    _line_clearer = clearer
+
+
+class _ClearingStreamHandler(logging.StreamHandler):  # type: ignore[type-arg]
+    """A stderr handler that gets out of the progress line's way first."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if _line_clearer is not None:
+            _line_clearer()
+        super().emit(record)
+
+
 class RedactionFilter(logging.Filter):
     """Scrubs registered secrets and reserved untrusted fields from every
     record before it is formatted by any handler."""
@@ -103,7 +125,7 @@ def configure_logging(
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     redaction_filter = RedactionFilter()
 
-    stream_handler = logging.StreamHandler()
+    stream_handler = _ClearingStreamHandler()
     stream_handler.setFormatter(formatter)
     stream_handler.addFilter(redaction_filter)
     logger.addHandler(stream_handler)
