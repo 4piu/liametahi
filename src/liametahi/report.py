@@ -26,6 +26,7 @@ import json
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from liametahi import state
@@ -265,8 +266,9 @@ def render_table(data: ReportData, *, verbose: bool) -> str:
     lines = [
         f"Run {run.run_id}  task={run.task}  account={data.account_name}  "
         f"model={run.model_name}",
-        f"  started={run.started_at}  ended={run.ended_at or '-'}  "
-        f"dry_run={run.dry_run}  "
+        f"  started={_display_time(run.started_at)}  "
+        f"ended={_display_time(run.ended_at)}  "
+        f"dry_run={_yes_no(run.dry_run)}  "
         f"exit_code={run.exit_code if run.exit_code is not None else '-'}  "
         f"structured_output={run.structured_output_level or '-'}",
         f"  scanned={data.totals.scanned}  acted={data.totals.acted}  "
@@ -313,6 +315,29 @@ def render_table(data: ReportData, *, verbose: bool) -> str:
 # ellipsizing removes the overruns.
 
 _ELLIPSIS = "..."
+
+
+def _display_time(value: str | None) -> str:
+    """A stored timestamp trimmed to whole seconds, for human output only.
+
+    Storage keeps full microsecond ISO-8601 UTC (contracts §2) and the
+    JSON document keeps it verbatim, because that is the machine-readable
+    shape. Sub-second precision is noise in a table, though, and costs
+    seven columns twice over -- nobody reads a report to find out which
+    microsecond a run started.
+    """
+    if not value:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value  # never mangle something we do not understand
+    return parsed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _yes_no(value: bool) -> str:
+    """`True`/`False` are Python spellings leaking into a human column."""
+    return "Yes" if value else "No"
 
 
 def _fit(text: str, width: int) -> str:
@@ -362,9 +387,9 @@ def render_run_list(runs: Sequence[state.RunRow]) -> str:
         [
             run.run_id,
             run.task,
-            run.started_at,
-            run.ended_at or "-",
-            str(run.dry_run),
+            _display_time(run.started_at),
+            _display_time(run.ended_at),
+            _yes_no(run.dry_run),
             str(run.exit_code) if run.exit_code is not None else "-",
         ]
         for run in runs
@@ -373,6 +398,6 @@ def render_run_list(runs: Sequence[state.RunRow]) -> str:
         _format_table(
             ["RUN ID", "TASK", "STARTED", "ENDED", "DRY", "EXIT"],
             rows,
-            max_widths=[16, 24, 27, 27, 5, 0],
+            max_widths=[16, 24, 20, 20, 3, 0],
         )
     )

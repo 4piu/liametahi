@@ -375,3 +375,56 @@ def test_render_table_aligns_a_long_sender(tmp_path: Path) -> None:
         assert len({line.index("junk") for line in body}) == 1, body
     finally:
         state.close_database(conn)
+
+
+def test_display_time_trims_to_whole_seconds() -> None:
+    assert report._display_time("2026-08-01T20:43:22.498895Z") == "2026-08-01T20:43:22Z"
+    assert report._display_time("2026-08-01T20:43:22Z") == "2026-08-01T20:43:22Z"
+    assert report._display_time(None) == "-"
+    assert report._display_time("") == "-"
+    # Anything unparseable is passed through rather than mangled.
+    assert report._display_time("not a timestamp") == "not a timestamp"
+
+
+def test_display_time_normalises_an_offset_to_utc() -> None:
+    """Storage is always UTC (contracts §2), but the parser must not
+    silently render a non-UTC offset as though it were UTC."""
+    assert report._display_time("2026-08-01T22:43:22+02:00") == "2026-08-01T20:43:22Z"
+
+
+def test_yes_no_replaces_python_booleans() -> None:
+    assert report._yes_no(True) == "Yes"
+    assert report._yes_no(False) == "No"
+
+
+def test_rendered_output_trims_time_but_json_keeps_full_precision(
+    tmp_path: Path,
+) -> None:
+    """The JSON document is the machine-readable shape pinned by
+    contracts §5.5 -- trimming it would discard real data. Only the
+    human-facing tables shorten."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        _, run_id = _setup(conn)
+        state.finish_run(
+            conn, run_id=run_id, exit_code=0, candidates_scanned=0, llm_calls=0
+        )
+        data = report.load_report(conn, run_id)
+        stored = data.run.started_at
+        assert "." in stored, "storage should keep sub-second precision"
+
+        table = report.render_table(data, verbose=False)
+        assert stored not in table
+        assert report._display_time(stored) in table
+        assert "dry_run=No" in table
+
+        listing = report.render_run_list(state.list_runs(conn))
+        assert stored not in listing
+        assert report._display_time(stored) in listing
+        assert " No " in listing or listing.rstrip().endswith("No 0")
+
+        document = report.to_json_document(data, verbose=False)
+        assert document["run"]["started_at"] == stored
+        assert document["run"]["dry_run"] is False
+    finally:
+        state.close_database(conn)
