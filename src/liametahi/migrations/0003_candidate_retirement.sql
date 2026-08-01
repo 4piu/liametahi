@@ -1,0 +1,26 @@
+-- Schema version 3.
+--
+-- `runner._live_candidates` previously returned every candidate row
+-- whose `uidvalidity` matched the mailbox's current value, with no
+-- notion of "already handled" -- so a successfully-trashed or
+-- confirmed-vanished message came back as a live candidate forever,
+-- re-matching from the LLM decision cache at zero model cost but still
+-- burning a claim + re-verify round trip on every subsequent run
+-- (sync-fix-brief Finding 2). `retired_at`/`retired_reason` give a
+-- candidate row a terminal state: set once a remote mutation (`trash`/
+-- `move_to:*`) actually completes (`retired_reason='moved'`) or
+-- `execute._reverify` reports the message gone from the server
+-- (`retired_reason='vanished'`). Retired rows are excluded from
+-- `runner._live_candidates`.
+--
+-- Deliberately NOT set on a completed `label:*` action (the message
+-- stays in the mailbox and may legitimately match other rules later),
+-- nor on `failed`/`unsupported`/`capped`/`claimed_by_other_run` (those
+-- must stay live so the next run retries them -- the exact behaviour
+-- the positive decision cache, migration 0002, was added to support).
+--
+-- Rows are never deleted (spec §11: "never deletes rows" is already the
+-- rule for content pruning; the same rule applies here), so retirement
+-- is purely an additional pair of nullable columns, not a row removal.
+ALTER TABLE candidates ADD COLUMN retired_at TEXT;
+ALTER TABLE candidates ADD COLUMN retired_reason TEXT;

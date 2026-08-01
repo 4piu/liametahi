@@ -354,6 +354,33 @@ def _sender_matches_protect_entry(address: str, entry: str) -> bool:
     return domain == entry or domain.endswith("." + entry)
 
 
+def is_protected_by_flags(
+    flags: Collection[str],
+    *,
+    protected_flags: Collection[str],
+    protect_unread: bool,
+) -> bool:
+    """The flags-only half of `is_protected` (sync-fix-brief Fix A): a
+    protected flag, or (when `protect_unread`) the absence of `\\Seen`.
+
+    Deliberately takes a bare `flags` collection rather than a
+    `Candidate`, so this can be re-checked against a *freshly fetched*
+    flag set at execute time (spec §4.3 point 4's re-verify step) without
+    needing a full `Candidate` rebuild. `protect.senders` has no
+    equivalent narrow helper: it keys off `from_address`, which
+    `domain.fingerprint()` already covers, so it cannot go stale between
+    scan and execute the way flags can (sync-fix-brief Finding 1).
+    """
+    flags_lower = {f.lower() for f in flags}
+    for flag in protected_flags:
+        if flag.lower() in _SYSTEM_FLAGS:
+            if flag.lower() in flags_lower:
+                return True
+        elif flag in flags:
+            return True
+    return protect_unread and "\\seen" not in flags_lower
+
+
 def is_protected(
     candidate: Candidate,
     *,
@@ -368,14 +395,11 @@ def is_protected(
     model, which is exactly what guarantees a protected message never
     triggers an LLM call.
     """
-    candidate_flags_lower = {f.lower() for f in candidate.flags}
-    for flag in protected_flags:
-        if flag.lower() in _SYSTEM_FLAGS:
-            if flag.lower() in candidate_flags_lower:
-                return True
-        elif flag in candidate.flags:
-            return True
-    if protect_unread and "\\seen" not in candidate_flags_lower:
+    if is_protected_by_flags(
+        candidate.flags,
+        protected_flags=protected_flags,
+        protect_unread=protect_unread,
+    ):
         return True
     if candidate.from_address:
         for sender in protected_senders:

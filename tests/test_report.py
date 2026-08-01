@@ -174,6 +174,43 @@ def test_quiet_statuses_hidden_by_default_and_shown_verbose(tmp_path: Path) -> N
         state.close_database(conn)
 
 
+def test_restored_status_is_quiet(tmp_path: Path) -> None:
+    """sync-fix-brief Fix D, Finding 3: skipping a previously-trashed
+    message is routine bookkeeping, not an anomaly worth interrupting a
+    cron user over -- and because the candidate is retired at the same
+    time (see `runner.py`), it is reported at most once ever. So
+    `restored` is a quiet status: recorded in the database and visible
+    under `--verbose`, absent from default output."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id, run_id = _setup(conn)
+        candidate = make_candidate(account_id=account_id)
+        candidate_id = state.upsert_candidate(conn, candidate)
+        state.insert_result_item(
+            conn,
+            run_id=run_id,
+            candidate_id=candidate_id,
+            status="restored",
+            detail="fingerprint already has a completed trash from a previous run",
+        )
+        state.finish_run(
+            conn, run_id=run_id, exit_code=0, candidates_scanned=1, llm_calls=0
+        )
+
+        data = report.load_report(conn, run_id)
+        default_table = report.render_table(data, verbose=False)
+        assert "(no actionable or failed items)" in default_table
+
+        default_json = report.to_json_document(data, verbose=False)
+        assert default_json["items"] == []
+
+        # Still recorded, and still reachable with --verbose.
+        verbose_json = report.to_json_document(data, verbose=True)
+        assert [item["status"] for item in verbose_json["items"]] == ["restored"]
+    finally:
+        state.close_database(conn)
+
+
 def test_render_json_matches_pinned_shape(tmp_path: Path) -> None:
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:

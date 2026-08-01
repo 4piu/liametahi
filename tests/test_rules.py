@@ -37,6 +37,7 @@ from liametahi.rules import (
     Tri,
     evaluate,
     is_protected,
+    is_protected_by_flags,
     llm_atom,
 )
 from tests.conftest import make_candidate
@@ -528,4 +529,50 @@ def test_is_protected_sender_domain_suffix_does_not_match_unrelated_domain() -> 
         protected_flags=[],
         protected_senders=["bank.example"],
         protect_unread=False,
+    )
+
+
+# --- is_protected_by_flags() (sync-fix-brief Fix A, Finding 1) ------------
+
+
+def test_is_protected_by_flags_matches_system_flag_case_insensitively() -> None:
+    assert is_protected_by_flags(
+        frozenset({"\\flagged"}),  # server-cased differently than configured
+        protected_flags=["\\Flagged"],
+        protect_unread=False,
+    )
+
+
+def test_is_protected_by_flags_matches_custom_keyword_case_sensitively() -> None:
+    assert is_protected_by_flags(
+        frozenset({"Important"}), protected_flags=["Important"], protect_unread=False
+    )
+    assert not is_protected_by_flags(
+        frozenset({"important"}), protected_flags=["Important"], protect_unread=False
+    )
+
+
+def test_is_protected_by_flags_unread() -> None:
+    assert is_protected_by_flags(frozenset(), protected_flags=[], protect_unread=True)
+    assert not is_protected_by_flags(
+        frozenset({"\\Seen"}), protected_flags=[], protect_unread=True
+    )
+
+
+def test_is_protected_by_flags_nothing_configured_is_never_protected() -> None:
+    assert not is_protected_by_flags(
+        frozenset({"\\Flagged"}), protected_flags=[], protect_unread=False
+    )
+
+
+def test_is_protected_delegates_flags_to_is_protected_by_flags() -> None:
+    """`is_protected` must agree with `is_protected_by_flags` on the
+    flags/unread axes -- it delegates rather than duplicating the
+    `_SYSTEM_FLAGS` casefold logic (sync-fix-brief Fix A)."""
+    candidate = make_candidate(from_address="nobody@nowhere.example", flags=frozenset())
+    assert is_protected_by_flags(
+        candidate.flags, protected_flags=[], protect_unread=True
+    )
+    assert is_protected(
+        candidate, protected_flags=[], protected_senders=[], protect_unread=True
     )

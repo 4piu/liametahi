@@ -25,7 +25,7 @@ from typing import Any
 from liametahi.domain import Candidate, MessageKey
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
-_LATEST_SCHEMA_VERSION = 2
+_LATEST_SCHEMA_VERSION = 3
 
 _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
@@ -311,8 +311,19 @@ def find_candidates_by_fingerprint(
 
 
 def prune_candidate_content(conn: sqlite3.Connection, *, before: str) -> int:
-    """Null prunable candidate content fields for candidates first seen
-    before `before` (ISO-8601 UTC). Never deletes rows (spec §11)."""
+    """Null prunable candidate content fields for **retired** candidates
+    first seen before `before` (ISO-8601 UTC). Never deletes rows (spec
+    §11).
+
+    Restricted to retired rows (sync-fix-brief Fix, Finding 4): while a
+    candidate is still live its content is still sitting in the user's
+    mailbox anyway, so pruning our copy buys little privacy while
+    actively corrupting classification input -- a still-live candidate
+    past `candidate_retention_days` would otherwise get its content
+    nulled, changing `input_hash` and forcing a cache miss that re-sends
+    an effectively blank payload to the model. See the final report for
+    the full rationale.
+    """
     cur = conn.execute(
         """
         UPDATE candidates SET
@@ -320,10 +331,64 @@ def prune_candidate_content(conn: sqlite3.Connection, *, before: str) -> int:
             subject = NULL, list_id = NULL, auth_results = NULL,
             content_pruned_at = ?
         WHERE first_seen_at < ? AND content_pruned_at IS NULL
+          AND retired_at IS NOT NULL
         """,
         (_iso_now(), before),
     )
     return cur.rowcount
+
+
+def update_candidate_flags(
+    conn: sqlite3.Connection,
+    *,
+    account_id: int,
+    mailbox: str,
+    uidvalidity: int,
+    flags_by_uid: Mapping[int, frozenset[str]],
+) -> int:
+    """Refresh the stored `flags` column for already-known candidates
+    (sync-fix-brief Fix B, Finding 1): `imap_adapter.scan()` calls this
+    once per mailbox per run with one batched flags-only fetch's worth of
+    results, so `has-flag`/protection stay honest run to run instead of
+    being frozen at whatever they were the first time a message was
+    seen. Retired rows (Fix C) are excluded -- a retired candidate's
+    message has moved out of the mailbox (or vanished), so its flags
+    have nothing left to refresh from.
+
+    Returns the number of rows actually updated.
+    """
+    updated = 0
+    for uid, flags in flags_by_uid.items():
+        cur = conn.execute(
+            """
+            UPDATE candidates SET flags = ?
+            WHERE account_id = ? AND mailbox = ? AND uidvalidity = ? AND uid = ?
+              AND retired_at IS NULL
+            """,
+            (json.dumps(sorted(flags)), account_id, mailbox, uidvalidity, uid),
+        )
+        updated += cur.rowcount
+    return updated
+
+
+def retire_candidate(
+    conn: sqlite3.Connection, *, candidate_id: int, reason: str
+) -> None:
+    """Give a candidate row a terminal state (sync-fix-brief Fix C,
+    Finding 2): `reason` is `"moved"` (a `trash`/`move_to:*` action
+    completed), `"vanished"` (`execute._reverify` found the message gone
+    from the server), or `"prior_trash"` (Fix D skipped it because its
+    fingerprint already carried a completed destructive action -- see
+    `runner.py`). Idempotent: a row already retired keeps its original
+    `retired_at`/`retired_reason` rather than being overwritten by a
+    later call. Never deletes the row (spec §11)."""
+    conn.execute(
+        """
+        UPDATE candidates SET retired_at = ?, retired_reason = ?
+        WHERE candidate_id = ? AND retired_at IS NULL
+        """,
+        (_iso_now(), reason, candidate_id),
+    )
 
 
 # --- Runs ---------------------------------------------------------------
@@ -788,6 +853,42 @@ def open_action_attempts(
     return conn.execute(
         "SELECT * FROM action_attempts WHERE state IN ('pending', 'in_flight')"
     ).fetchall()
+
+
+def fingerprints_with_completed_destructive_action(
+    conn: sqlite3.Connection,
+    *,
+    account_id: int,
+    fingerprints: Sequence[str],
+    exclude_run_id: str,
+) -> set[str]:
+    """Which of `fingerprints` already carry a *completed* destructive
+    action (`trash` or `move_to:*` -- never `label:*` or `backup`) from
+    some run other than `exclude_run_id` (sync-fix-brief Fix D, Finding
+    3).
+
+    The cache key `(account_id, fingerprint, rule_id, rule_text_hash,
+    input_hash)` is stable across a move (`fingerprint` survives it by
+    design, spec §11), so restoring a trashed message back to a source
+    mailbox re-scans it under a new UID/mailbox and can hit a cached
+    positive decision -- re-trashing it with no model call and no signal
+    to the user. `runner.py` calls this once per run, batched over every
+    candidate about to be offered a winning rule, rather than per
+    candidate, and reports a hit as `restored` instead of executing it.
+    """
+    if not fingerprints:
+        return set()
+    placeholders = ",".join("?" for _ in fingerprints)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT fingerprint FROM action_attempts
+        WHERE account_id = ? AND fingerprint IN ({placeholders})
+          AND state = 'completed' AND run_id != ?
+          AND (action = 'trash' OR action LIKE 'move_to:%')
+        """,
+        (account_id, *fingerprints, exclude_run_id),
+    ).fetchall()
+    return {str(row["fingerprint"]) for row in rows}
 
 
 # --- Audit events (append-only, spec §11) ---------------------------------

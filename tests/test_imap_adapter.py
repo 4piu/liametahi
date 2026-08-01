@@ -66,6 +66,29 @@ def test_quoted_string_escapes_are_consumed_correctly() -> None:
     assert _bodystructure_has_attachment(_bodystructure_line(body)) is True
 
 
+# --- Empty literal: a flags-only fetch requesting no header fields -----
+# (sync-fix-brief Fix B, Finding 1: `imap_adapter.scan()`'s per-run
+# flags refresh, and `execute.py`'s reconcile pass, both call
+# `fetch_metadata(uids, ())`. `ImapMailbox.fetch_metadata` omits the
+# `BODY.PEEK[HEADER.FIELDS (...)]` data item entirely in that case
+# rather than sending the not-well-formed `HEADER.FIELDS ()` -- which
+# means the wire response for such a fetch carries no literal at all, so
+# `_parse_fetch_line` must still parse cleanly when handed an empty
+# literal standing in for "no literal was present.")
+
+
+def test_parse_fetch_line_with_no_header_literal_still_parses() -> None:
+    line = _full_fetch_line(bodystructure=None).replace(
+        b" BODY[HEADER.FIELDS (FROM SUBJECT)]", b""
+    )
+    parsed = _parse_fetch_line(line, b"")
+    assert parsed is not None
+    assert parsed.uid == 101
+    assert parsed.rfc822_size == 529
+    assert parsed.flags == frozenset({"\\Seen"})
+    assert parsed.headers == {}
+
+
 # --- 2. multipart/alternative of text+html, no attachment --------------
 
 

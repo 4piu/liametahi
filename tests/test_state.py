@@ -58,7 +58,7 @@ def test_open_database_creates_all_tables(tmp_path: Path) -> None:
         version_row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 2
+        assert version_row["v"] == 3
     finally:
         state.close_database(conn)
 
@@ -70,7 +70,7 @@ def test_reopening_database_is_idempotent(tmp_path: Path) -> None:
     conn2 = state.open_database(db_path)  # must not re-run already-applied migrations
     try:
         count = conn2.execute("SELECT COUNT(*) AS c FROM schema_version").fetchone()
-        assert count["c"] == 2
+        assert count["c"] == 3
     finally:
         state.close_database(conn2)
 
@@ -86,6 +86,82 @@ def test_newer_schema_version_raises_clear_error(tmp_path: Path) -> None:
 
     with pytest.raises(state.SchemaVersionError):
         state.open_database(db_path)
+
+
+def test_migration_0003_upgrades_v2_database_in_place(tmp_path: Path) -> None:
+    """sync-fix-brief Deliverable 2: build a v2 database directly from
+    the migration files (mirroring the ad-hoc check used for migration
+    0002), open it through `state.open_database`, and confirm it lands
+    on version 3 with `retired_at`/`retired_reason` added and every
+    pre-existing row's data intact."""
+    db_path = tmp_path / "state.sqlite3"
+    migrations_dir = Path(state.__file__).parent / "migrations"
+    raw = sqlite3.connect(str(db_path))
+    try:
+        raw.execute("PRAGMA foreign_keys = ON")
+        for name in ("0001_initial.sql", "0002_llm_decision_cache_matched.sql"):
+            raw.executescript((migrations_dir / name).read_text(encoding="utf-8"))
+        now = datetime.now(UTC).isoformat()
+        raw.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (1, ?)", (now,)
+        )
+        raw.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (2, ?)", (now,)
+        )
+        raw.execute(
+            "INSERT INTO accounts (name, host, username, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("personal", "imap.example.com", "me@example.com", now),
+        )
+        account_id = raw.execute(
+            "SELECT account_id FROM accounts WHERE name = 'personal'"
+        ).fetchone()[0]
+        raw.execute(
+            """
+            INSERT INTO candidates (
+                account_id, mailbox, uidvalidity, uid, fingerprint, message_id,
+                internaldate, rfc822_size, flags, headers_present, from_address,
+                from_display, recipients, cc_count, subject, list_id,
+                has_list_unsubscribe, has_attachment, auth_results, first_seen_at
+            ) VALUES (?, 'INBOX', 1000, 1, 'fp-preexisting', '<x@example.com>',
+                '2026-06-01T00:00:00Z', 1024, '[]', '[]', 'sender@example.com',
+                'Sender', '[]', 0, 'Pre-migration subject', NULL, 0, 0, NULL, ?)
+            """,
+            (account_id, now),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    conn = state.open_database(db_path)
+    try:
+        version_row = conn.execute(
+            "SELECT MAX(version) AS v FROM schema_version"
+        ).fetchone()
+        assert version_row["v"] == 3
+
+        row = conn.execute(
+            "SELECT candidate_id, fingerprint, subject, from_address, "
+            "retired_at, retired_reason FROM candidates WHERE uid = 1"
+        ).fetchone()
+        assert row["fingerprint"] == "fp-preexisting"
+        assert row["subject"] == "Pre-migration subject"
+        assert row["from_address"] == "sender@example.com"
+        assert row["retired_at"] is None
+        assert row["retired_reason"] is None
+
+        # The upgraded row participates normally in the new schema's
+        # functions (Fix C).
+        state.retire_candidate(
+            conn, candidate_id=int(row["candidate_id"]), reason="moved"
+        )
+        retired_row = conn.execute(
+            "SELECT retired_at, retired_reason FROM candidates WHERE uid = 1"
+        ).fetchone()
+        assert retired_row["retired_at"] is not None
+        assert retired_row["retired_reason"] == "moved"
+    finally:
+        state.close_database(conn)
 
 
 def test_audit_events_are_append_only(tmp_path: Path) -> None:
@@ -180,6 +256,207 @@ def test_find_candidates_by_fingerprint(tmp_path: Path) -> None:
         )
         assert len(found) == 1
         assert found[0][1].fingerprint == "fp-abc"
+    finally:
+        state.close_database(conn)
+
+
+def test_update_candidate_flags_refreshes_stored_flags(tmp_path: Path) -> None:
+    """sync-fix-brief Fix B, Finding 1: a batched flags refresh updates
+    the stored `flags` column for an already-known candidate."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="personal", host="h", username="u")
+        candidate = make_candidate(account_id=account_id, flags=frozenset({"\\Seen"}))
+        state.upsert_candidate(conn, candidate)
+
+        updated = state.update_candidate_flags(
+            conn,
+            account_id=account_id,
+            mailbox=candidate.key.mailbox,
+            uidvalidity=candidate.key.uidvalidity,
+            flags_by_uid={candidate.key.uid: frozenset({"\\Seen", "\\Flagged"})},
+        )
+        assert updated == 1
+
+        fetched = state.get_candidate(conn, key=candidate.key)
+        assert fetched is not None
+        assert fetched[1].flags == frozenset({"\\Seen", "\\Flagged"})
+    finally:
+        state.close_database(conn)
+
+
+def test_update_candidate_flags_skips_retired_rows(tmp_path: Path) -> None:
+    """Fix C's retirement and Fix B's flags refresh compose correctly: a
+    retired candidate's stored flags are left alone."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="personal", host="h", username="u")
+        candidate = make_candidate(account_id=account_id, flags=frozenset({"\\Seen"}))
+        candidate_id = state.upsert_candidate(conn, candidate)
+        state.retire_candidate(conn, candidate_id=candidate_id, reason="moved")
+
+        updated = state.update_candidate_flags(
+            conn,
+            account_id=account_id,
+            mailbox=candidate.key.mailbox,
+            uidvalidity=candidate.key.uidvalidity,
+            flags_by_uid={candidate.key.uid: frozenset({"\\Flagged"})},
+        )
+        assert updated == 0
+
+        fetched = state.get_candidate(conn, key=candidate.key)
+        assert fetched is not None
+        assert fetched[1].flags == frozenset({"\\Seen"})
+    finally:
+        state.close_database(conn)
+
+
+def test_retire_candidate_is_idempotent(tmp_path: Path) -> None:
+    """sync-fix-brief Fix C, Finding 2: a second retirement call does not
+    overwrite the original reason/timestamp."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="personal", host="h", username="u")
+        candidate = make_candidate(account_id=account_id)
+        candidate_id = state.upsert_candidate(conn, candidate)
+
+        state.retire_candidate(conn, candidate_id=candidate_id, reason="moved")
+        first = conn.execute(
+            "SELECT retired_at, retired_reason FROM candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        assert first["retired_reason"] == "moved"
+
+        state.retire_candidate(conn, candidate_id=candidate_id, reason="vanished")
+        second = conn.execute(
+            "SELECT retired_at, retired_reason FROM candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        assert second["retired_reason"] == "moved"
+        assert second["retired_at"] == first["retired_at"]
+    finally:
+        state.close_database(conn)
+
+
+def test_fingerprints_with_completed_destructive_action(tmp_path: Path) -> None:
+    """sync-fix-brief Fix D, Finding 3: a `trash`/`move_to:*` action
+    `completed` in an earlier run is found; a `label:*` or `backup`
+    action, an incomplete state, or the excluded (current) run id are
+    not."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="personal", host="h", username="u")
+        earlier_run = state.new_run_id()
+        current_run = state.new_run_id()
+        for run_id in (earlier_run, current_run):
+            state.create_run(
+                conn,
+                run_id=run_id,
+                task="t",
+                account_id=account_id,
+                model_name="m",
+                provider="p",
+                model_id="mi",
+                dry_run=False,
+                reevaluate=False,
+                fetch_headers=[],
+                config_hash="h",
+            )
+
+        def _candidate_and_result(fingerprint: str, uid: int) -> int:
+            candidate = make_candidate(
+                account_id=account_id, uid=uid, fingerprint=fingerprint
+            )
+            candidate_id = state.upsert_candidate(conn, candidate)
+            return state.insert_result_item(
+                conn,
+                run_id=earlier_run,
+                candidate_id=candidate_id,
+                status="completed",
+                winning_rule="r",
+            )
+
+        key = MessageKey(account_id, "INBOX", 1000, 1)
+
+        # Trashed: found.
+        result_trashed = _candidate_and_result("fp-trashed", 1)
+        state.insert_action_attempt(
+            conn,
+            run_id=earlier_run,
+            result_id=result_trashed,
+            seq=0,
+            action="trash",
+            state="completed",
+            key=key,
+            fingerprint="fp-trashed",
+        )
+
+        # Moved: found.
+        result_moved = _candidate_and_result("fp-moved", 2)
+        state.insert_action_attempt(
+            conn,
+            run_id=earlier_run,
+            result_id=result_moved,
+            seq=0,
+            action="move_to:Archive",
+            state="completed",
+            key=key,
+            fingerprint="fp-moved",
+        )
+
+        # Labelled only: not destructive, not found.
+        result_labelled = _candidate_and_result("fp-labelled", 3)
+        state.insert_action_attempt(
+            conn,
+            run_id=earlier_run,
+            result_id=result_labelled,
+            seq=0,
+            action="label:Important",
+            state="completed",
+            key=key,
+            fingerprint="fp-labelled",
+        )
+
+        # Trash attempted but failed: not found.
+        result_failed = _candidate_and_result("fp-failed", 4)
+        state.insert_action_attempt(
+            conn,
+            run_id=earlier_run,
+            result_id=result_failed,
+            seq=0,
+            action="trash",
+            state="failed",
+            key=key,
+            fingerprint="fp-failed",
+        )
+
+        # Trashed by the excluded (current) run: not found.
+        result_current = _candidate_and_result("fp-current-run", 5)
+        state.insert_action_attempt(
+            conn,
+            run_id=current_run,
+            result_id=result_current,
+            seq=0,
+            action="trash",
+            state="completed",
+            key=key,
+            fingerprint="fp-current-run",
+        )
+
+        found = state.fingerprints_with_completed_destructive_action(
+            conn,
+            account_id=account_id,
+            fingerprints=[
+                "fp-trashed",
+                "fp-moved",
+                "fp-labelled",
+                "fp-failed",
+                "fp-current-run",
+                "fp-never-seen",
+            ],
+            exclude_run_id=current_run,
+        )
+        assert found == {"fp-trashed", "fp-moved"}
     finally:
         state.close_database(conn)
 
@@ -470,11 +747,18 @@ def test_backup_insert_and_restore(tmp_path: Path) -> None:
 
 
 def test_prune_candidate_content(tmp_path: Path) -> None:
+    """sync-fix-brief Fix (Finding 4): only *retired* candidates are
+    pruned -- a still-live candidate's content is left alone even once
+    it is older than the retention cutoff, since it is still sitting in
+    the user's mailbox anyway and pruning it would corrupt future
+    classification input (change `input_hash`, force a cache miss, send
+    an effectively blank payload)."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
         account_id = state.upsert_account(conn, name="personal", host="h", username="u")
         candidate = make_candidate(account_id=account_id)
-        state.upsert_candidate(conn, candidate)
+        candidate_id = state.upsert_candidate(conn, candidate)
+        state.retire_candidate(conn, candidate_id=candidate_id, reason="moved")
         far_future = "2099-01-01T00:00:00Z"
         pruned = state.prune_candidate_content(conn, before=far_future)
         assert pruned == 1
@@ -484,5 +768,27 @@ def test_prune_candidate_content(tmp_path: Path) -> None:
         assert row["from_address"] is None
         assert row["subject"] is None
         assert row["content_pruned_at"] is not None
+    finally:
+        state.close_database(conn)
+
+
+def test_prune_candidate_content_leaves_live_candidates_alone(tmp_path: Path) -> None:
+    """sync-fix-brief Fix (Finding 4): a candidate old enough to qualify
+    for pruning by `first_seen_at` alone, but never retired, keeps its
+    content untouched."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="personal", host="h", username="u")
+        candidate = make_candidate(account_id=account_id)
+        state.upsert_candidate(conn, candidate)
+        far_future = "2099-01-01T00:00:00Z"
+        pruned = state.prune_candidate_content(conn, before=far_future)
+        assert pruned == 0
+        row = conn.execute(
+            "SELECT from_address, subject, content_pruned_at FROM candidates"
+        ).fetchone()
+        assert row["from_address"] == candidate.from_address
+        assert row["subject"] == candidate.subject
+        assert row["content_pruned_at"] is None
     finally:
         state.close_database(conn)

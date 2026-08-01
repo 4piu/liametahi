@@ -94,6 +94,125 @@ def test_max_candidates_per_run_unset_means_uncapped(tmp_path: Path) -> None:
         state.close_database(conn)
 
 
+# --- Fix B (sync-fix-brief Finding 1): per-scan flags refresh -------------
+
+
+def test_scan_refreshes_flags_for_already_known_candidates(tmp_path: Path) -> None:
+    """A flag added server-side (e.g. from another IMAP client) between
+    two scans of the same message is picked up on the second scan, in
+    one additional batched `fetch_metadata` call -- not left frozen at
+    whatever it was the first time the message was seen."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        internaldate = datetime(2026, 6, 1, tzinfo=UTC)
+        mb = FakeMailbox(
+            messages=[
+                _StoredMessage(
+                    uid=1,
+                    raw=_raw("Digest", "<m1@test>"),
+                    flags={"\\Seen"},
+                    internaldate=internaldate,
+                    mailbox="INBOX",
+                )
+            ],
+            uidvalidity={"INBOX": 1000},
+        )
+
+        first = scan(
+            mb,
+            conn,
+            account_id=account_id,
+            source_mailboxes=["INBOX"],
+            fetch_headers=_HEADERS,
+            max_candidates_per_run=500,
+        )
+        assert first.mailboxes[0].new_candidates == 1
+
+        stored = state.get_candidate(conn, key=MessageKey(account_id, "INBOX", 1000, 1))
+        assert stored is not None
+        assert stored[1].flags == frozenset({"\\Seen"})
+
+        # The user flags the message important from another IMAP client,
+        # between the two scans -- no re-fetch of full metadata happens
+        # for an already-tracked UID, only this Fix B flags refresh.
+        mb._messages["INBOX"][0].flags.add("\\Flagged")
+
+        second = scan(
+            mb,
+            conn,
+            account_id=account_id,
+            source_mailboxes=["INBOX"],
+            fetch_headers=_HEADERS,
+            max_candidates_per_run=500,
+        )
+        assert second.mailboxes[0].new_candidates == 0
+        assert second.mailboxes[0].flags_refreshed == 1
+
+        refreshed = state.get_candidate(
+            conn, key=MessageKey(account_id, "INBOX", 1000, 1)
+        )
+        assert refreshed is not None
+        assert refreshed[1].flags == frozenset({"\\Seen", "\\Flagged"})
+        # Still read-only: only fetch/select calls, no mutation.
+        assert mb.mutations == ()
+    finally:
+        state.close_database(conn)
+
+
+def test_scan_flags_refresh_skips_retired_candidates(tmp_path: Path) -> None:
+    """sync-fix-brief Fix B composes with Fix C: a retired candidate's
+    stored flags are not overwritten by the per-scan refresh, even if
+    its message somehow still shows up in `search_uids()`."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        internaldate = datetime(2026, 6, 1, tzinfo=UTC)
+        mb = FakeMailbox(
+            messages=[
+                _StoredMessage(
+                    uid=1,
+                    raw=_raw("Digest", "<m1@test>"),
+                    flags={"\\Seen"},
+                    internaldate=internaldate,
+                    mailbox="INBOX",
+                )
+            ],
+            uidvalidity={"INBOX": 1000},
+        )
+        scan(
+            mb,
+            conn,
+            account_id=account_id,
+            source_mailboxes=["INBOX"],
+            fetch_headers=_HEADERS,
+            max_candidates_per_run=500,
+        )
+        stored = state.get_candidate(conn, key=MessageKey(account_id, "INBOX", 1000, 1))
+        assert stored is not None
+        candidate_id, _ = stored
+        state.retire_candidate(conn, candidate_id=candidate_id, reason="moved")
+
+        mb._messages["INBOX"][0].flags.add("\\Flagged")
+        second = scan(
+            mb,
+            conn,
+            account_id=account_id,
+            source_mailboxes=["INBOX"],
+            fetch_headers=_HEADERS,
+            max_candidates_per_run=500,
+        )
+        assert second.mailboxes[0].flags_refreshed == 0
+
+        unchanged = state.get_candidate(
+            conn, key=MessageKey(account_id, "INBOX", 1000, 1)
+        )
+        assert unchanged is not None
+        assert unchanged[1].flags == frozenset({"\\Seen"})  # not overwritten
+    finally:
+        state.close_database(conn)
+
+
 # --- Acceptance test 11 (unit tier) --------------------------------------
 
 

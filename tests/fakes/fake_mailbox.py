@@ -106,8 +106,12 @@ class FakeMailbox:
         accepts_custom_keywords: bool = True,
     ) -> None:
         self._messages: dict[str, list[_StoredMessage]] = {}
+        self._next_uid_counter: dict[str, int] = {}
         for msg in messages:
             self._messages.setdefault(msg.mailbox, []).append(msg)
+            self._next_uid_counter[msg.mailbox] = max(
+                self._next_uid_counter.get(msg.mailbox, 0), msg.uid
+            )
         self._uidvalidity: dict[str, int] = dict(uidvalidity or {})
         self._pending_uidvalidity_bump: set[str] = set()
         self._capabilities = capabilities
@@ -295,5 +299,18 @@ class FakeMailbox:
         return self._selected_mailbox
 
     def _next_uid(self, mailbox: str) -> int:
-        existing = [m.uid for m in self._messages.get(mailbox, [])]
-        return (max(existing) + 1) if existing else 1
+        """The next UID for `mailbox`, tracked as a monotonically
+        increasing per-mailbox counter rather than derived from the
+        currently-present message list: a real IMAP server never reuses
+        a UID within one `UIDVALIDITY` generation, even after the
+        message that held it is moved out or expunged (RFC 3501 §2.3.1.1)
+        -- deriving "next" from `max(currently present) + 1` would let a
+        mailbox that emptied out and then received something new (e.g. a
+        restored message moved/appended back) silently reuse a UID a
+        still-referenced candidate row already claims, which is exactly
+        the identity collision Fix D's restore scenario needs to be able
+        to *not* rely on to reproduce (sync-fix-brief Finding 3)."""
+        current = self._next_uid_counter.get(mailbox, 0)
+        new_uid = current + 1
+        self._next_uid_counter[mailbox] = new_uid
+        return new_uid

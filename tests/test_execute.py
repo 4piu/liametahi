@@ -150,6 +150,210 @@ def test_vanished_message_reported_and_not_mutated(tmp_path: Path) -> None:
         state.close_database(conn)
 
 
+def test_vanished_reverify_retires_candidate(tmp_path: Path) -> None:
+    """sync-fix-brief Fix C, Finding 2: `_reverify` reporting `vanished`
+    retires the candidate row so it stops coming back as a live
+    candidate forever."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        run_id = state.new_run_id()
+        _setup_run(conn, account_id=account_id, run_id=run_id)
+        candidate_id = _candidate_id(conn, account_id)
+        mb, item = _item_and_mailbox(account_id, candidate_id)
+        mb.vanish("INBOX", 1)
+
+        execute.execute_items(
+            conn,
+            mailbox=mb,
+            items=[item],
+            run_id=run_id,
+            backup_dir=tmp_path / "backups",
+            max_actions_per_run=50,
+            dry_run=False,
+            fail_fast=False,
+        )
+        row = conn.execute(
+            "SELECT retired_at, retired_reason FROM candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        assert row["retired_at"] is not None
+        assert row["retired_reason"] == "vanished"
+    finally:
+        state.close_database(conn)
+
+
+def test_protected_flag_added_since_scan_blocks_mutation(tmp_path: Path) -> None:
+    """sync-fix-brief Fix A, Finding 1: a flag added server-side after
+    scan (e.g. the user flags the message important from another
+    client) is caught by the immediate pre-mutation re-check against
+    freshly re-fetched flags, even though the stored candidate row was
+    never told about it."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        run_id = state.new_run_id()
+        _setup_run(conn, account_id=account_id, run_id=run_id)
+        candidate_id = _candidate_id(conn, account_id)
+        mb, item = _item_and_mailbox(
+            account_id, candidate_id, actions=["move_to:Archive"]
+        )
+        # The stored candidate row (and `item.fingerprint`, which does
+        # not cover flags) knows nothing about this -- it happened after
+        # scan, from another IMAP client.
+        mb._messages["INBOX"][0].flags.add("\\Flagged")
+
+        summary = execute.execute_items(
+            conn,
+            mailbox=mb,
+            items=[item],
+            run_id=run_id,
+            backup_dir=tmp_path / "backups",
+            max_actions_per_run=50,
+            dry_run=False,
+            fail_fast=False,
+            protected_flags=["\\Flagged"],
+            protect_unread=False,
+        )
+        assert summary.outcomes[0].status == "protected"
+        mb.select("INBOX", readonly=True)
+        assert mb.search_uids() == (1,)  # untouched
+        assert "move_to" not in ",".join(mb.mutations)
+    finally:
+        state.close_database(conn)
+
+
+def test_protect_unread_added_since_scan_blocks_mutation(tmp_path: Path) -> None:
+    """As above, but for `protect.unread`: the message is still unread
+    (no `\\Seen`) at mutation time, so it must be protected even though
+    the winning rule already matched it."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        run_id = state.new_run_id()
+        _setup_run(conn, account_id=account_id, run_id=run_id)
+        candidate_id = _candidate_id(conn, account_id)
+        mb, item = _item_and_mailbox(
+            account_id, candidate_id, actions=["move_to:Archive"]
+        )
+
+        summary = execute.execute_items(
+            conn,
+            mailbox=mb,
+            items=[item],
+            run_id=run_id,
+            backup_dir=tmp_path / "backups",
+            max_actions_per_run=50,
+            dry_run=False,
+            fail_fast=False,
+            protected_flags=[],
+            protect_unread=True,
+        )
+        assert summary.outcomes[0].status == "protected"
+        mb.select("INBOX", readonly=True)
+        assert mb.search_uids() == (1,)  # untouched
+    finally:
+        state.close_database(conn)
+
+
+def test_protected_flags_default_to_nothing_protected(tmp_path: Path) -> None:
+    """Omitting `protected_flags`/`protect_unread` (every pre-existing
+    caller) means "nothing protected", not a behaviour change."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        run_id = state.new_run_id()
+        _setup_run(conn, account_id=account_id, run_id=run_id)
+        candidate_id = _candidate_id(conn, account_id)
+        mb, item = _item_and_mailbox(
+            account_id, candidate_id, actions=["move_to:Archive"]
+        )
+        mb._messages["INBOX"][0].flags.add("\\Flagged")
+
+        summary = execute.execute_items(
+            conn,
+            mailbox=mb,
+            items=[item],
+            run_id=run_id,
+            backup_dir=tmp_path / "backups",
+            max_actions_per_run=50,
+            dry_run=False,
+            fail_fast=False,
+        )
+        assert summary.outcomes[0].status == "completed"
+    finally:
+        state.close_database(conn)
+
+
+def test_completed_move_retires_candidate(tmp_path: Path) -> None:
+    """sync-fix-brief Fix C, Finding 2: a completed `move_to`/`trash`
+    retires the candidate row."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        run_id = state.new_run_id()
+        _setup_run(conn, account_id=account_id, run_id=run_id)
+        candidate_id = _candidate_id(conn, account_id)
+        mb, item = _item_and_mailbox(
+            account_id, candidate_id, actions=["move_to:Archive"]
+        )
+
+        summary = execute.execute_items(
+            conn,
+            mailbox=mb,
+            items=[item],
+            run_id=run_id,
+            backup_dir=tmp_path / "backups",
+            max_actions_per_run=50,
+            dry_run=False,
+            fail_fast=False,
+        )
+        assert summary.outcomes[0].status == "completed"
+        row = conn.execute(
+            "SELECT retired_at, retired_reason FROM candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        assert row["retired_at"] is not None
+        assert row["retired_reason"] == "moved"
+    finally:
+        state.close_database(conn)
+
+
+def test_completed_label_does_not_retire_candidate(tmp_path: Path) -> None:
+    """sync-fix-brief Fix C, Finding 2: `label:*` is deliberately
+    excluded from retirement -- the message stays in place and may
+    legitimately match other rules on a later run."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        run_id = state.new_run_id()
+        _setup_run(conn, account_id=account_id, run_id=run_id)
+        candidate_id = _candidate_id(conn, account_id)
+        mb, item = _item_and_mailbox(
+            account_id, candidate_id, actions=["label:Important"]
+        )
+
+        summary = execute.execute_items(
+            conn,
+            mailbox=mb,
+            items=[item],
+            run_id=run_id,
+            backup_dir=tmp_path / "backups",
+            max_actions_per_run=50,
+            dry_run=False,
+            fail_fast=False,
+        )
+        assert summary.outcomes[0].status == "completed"
+        row = conn.execute(
+            "SELECT retired_at, retired_reason FROM candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        assert row["retired_at"] is None
+        assert row["retired_reason"] is None
+    finally:
+        state.close_database(conn)
+
+
 def test_uidvalidity_change_reported_as_changed(tmp_path: Path) -> None:
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:

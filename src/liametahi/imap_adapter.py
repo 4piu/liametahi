@@ -495,14 +495,32 @@ class ImapMailbox:
     def fetch_metadata(
         self, uids: Sequence[int], headers: Sequence[str]
     ) -> tuple[RawMetadata, ...]:
+        """`headers=()` (used by the reconcile pass and by `scan()`'s Fix
+        B flags-only refresh, sync-fix-brief Finding 1) omits the
+        `BODY.PEEK[HEADER.FIELDS (...)]` data item entirely rather than
+        sending it with an empty field list: RFC 3501's grammar for
+        `header-fld-name` is `1#header-fld-name` (one or more), so
+        `HEADER.FIELDS ()` is not well-formed IMAP and at least one real
+        server (Dovecot) aborts the connection on it rather than
+        returning an empty match. Omitting the item entirely means the
+        server's response for each UID has no literal at all, which
+        `imaplib` surfaces as a bare `bytes` line instead of the
+        `(line, literal)` tuple a `BODY.PEEK[...]` reply produces --
+        handled below by treating a bare line as one with an empty
+        (no-headers) literal.
+        """
         self._require_selected()
         if not uids:
             return ()
-        header_list = " ".join(sorted({h.upper() for h in headers}))
-        fetch_items = (
-            f"(UID INTERNALDATE RFC822.SIZE FLAGS BODYSTRUCTURE "
-            f"BODY.PEEK[HEADER.FIELDS ({header_list})])"
-        )
+        header_names = sorted({h.upper() for h in headers})
+        if header_names:
+            header_list = " ".join(header_names)
+            fetch_items = (
+                f"(UID INTERNALDATE RFC822.SIZE FLAGS BODYSTRUCTURE "
+                f"BODY.PEEK[HEADER.FIELDS ({header_list})])"
+            )
+        else:
+            fetch_items = "(UID INTERNALDATE RFC822.SIZE FLAGS BODYSTRUCTURE)"
         results: list[RawMetadata] = []
         uid_list = list(uids)
         for start in range(0, len(uid_list), _MAX_UIDS_PER_FETCH):
@@ -512,10 +530,13 @@ class ImapMailbox:
             if typ != "OK":
                 raise ImapTransportError("UID FETCH failed")
             for item in data:
-                if not isinstance(item, tuple) or len(item) != 2:
-                    continue
-                line, literal = item
-                if line is None or literal is None:
+                if isinstance(item, tuple) and len(item) == 2:
+                    line, literal = item
+                    if line is None or literal is None:
+                        continue
+                elif isinstance(item, bytes):
+                    line, literal = item, b""
+                else:
                     continue
                 parsed = _parse_fetch_line(line, literal)
                 if parsed is not None:
@@ -693,6 +714,7 @@ class MailboxScanResult:
     uidvalidity_changed: bool
     new_candidates: int
     reidentified_candidates: int
+    flags_refreshed: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -742,6 +764,21 @@ def scan(
     Within each mailbox, candidates are ordered by `INTERNALDATE`
     ascending before the cap is applied (spec §4.1 point 5), so a
     repeated run makes deterministic forward progress.
+
+    Fix B (sync-fix-brief Finding 1): for a mailbox whose `UIDVALIDITY`
+    is unchanged, already-known UIDs still present on the server also
+    get their stored `flags` refreshed, in one additional batched
+    `fetch_metadata` call (not per UID) covering every already-known
+    live UID -- without this, a message's stored flags are frozen at
+    whatever they were the first time it was seen, so `has-flag` and
+    flag-based protection (spec §4.2 step 1) can silently go stale for
+    as long as the message stays unactioned. `execute._reverify`'s
+    immediate-pre-mutation re-check (Fix A) is the second, independent
+    line of defense this complements, not a replacement for it: this
+    keeps ordinary runs honest cheaply; that one guarantees the
+    destructive path cannot act on stale protection even if a flag
+    changes mid-run. Skipped entirely when `UIDVALIDITY` changed --
+    every UID is fetched fresh in that branch already.
     """
     mailbox_results: list[MailboxScanResult] = []
     total_saved = 0
@@ -774,18 +811,25 @@ def scan(
         )
 
         all_uids = adapter.search_uids()
+        known_uids: tuple[int, ...] = ()
         if uidvalidity_changed:
             candidate_uids = all_uids
         else:
-            candidate_uids = tuple(
-                uid
-                for uid in all_uids
-                if state.get_candidate(
-                    conn,
-                    key=MessageKey(account_id, mailbox, status.uidvalidity, uid),
-                )
-                is None
-            )
+            new_uids: list[int] = []
+            known: list[int] = []
+            for uid in all_uids:
+                if (
+                    state.get_candidate(
+                        conn,
+                        key=MessageKey(account_id, mailbox, status.uidvalidity, uid),
+                    )
+                    is None
+                ):
+                    new_uids.append(uid)
+                else:
+                    known.append(uid)
+            candidate_uids = tuple(new_uids)
+            known_uids = tuple(known)
 
         new_count = 0
         reidentified_count = 0
@@ -817,6 +861,25 @@ def scan(
                 state.upsert_candidate(conn, candidate)
                 total_saved += 1
 
+        flags_refreshed = 0
+        if known_uids:
+            # Fix B: one batched flags-only fetch for every already-known,
+            # still-present UID -- `headers=()` requests no header fields
+            # at all (the same "no headers wanted" shape the reconcile
+            # pass already uses via `fetch_metadata([...], headers=[])`),
+            # so this costs a FLAGS/INTERNALDATE/SIZE fetch, not a second
+            # full metadata fetch.
+            flags_batch = adapter.fetch_metadata(known_uids, ())
+            flags_by_uid = {meta.uid: meta.flags for meta in flags_batch}
+            if flags_by_uid:
+                flags_refreshed = state.update_candidate_flags(
+                    conn,
+                    account_id=account_id,
+                    mailbox=mailbox,
+                    uidvalidity=status.uidvalidity,
+                    flags_by_uid=flags_by_uid,
+                )
+
         mailbox_results.append(
             MailboxScanResult(
                 mailbox=mailbox,
@@ -824,6 +887,7 @@ def scan(
                 uidvalidity_changed=uidvalidity_changed,
                 new_candidates=new_count,
                 reidentified_candidates=reidentified_count,
+                flags_refreshed=flags_refreshed,
             )
         )
 

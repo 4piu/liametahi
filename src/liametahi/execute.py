@@ -19,15 +19,35 @@ status for a `"pending"` result item from its `action_attempts`
 children (all completed -> completed, any failed -> failed, etc.),
 which is also exactly what makes those children -- not the parent row
 -- the right thing for the reconcile pass below to inspect.
+
+Documented deviation (sync-fix-brief Fix A): `execute_items` gained two
+new keyword-only parameters, `protected_flags` and `protect_unread`, both
+defaulting to "nothing protected" so every pre-existing call site keeps
+its prior behaviour unless it opts in. `execute.py`'s public functions
+are not among the signatures contracts section 5 declares fixed (only
+`domain.py`, `rules.py`, `classifier/__init__.py`, `imap_adapter.py`, and
+`report.py`'s JSON shape are), so this is an additive, backward-compatible
+change rather than a deviation from a pinned interface -- it is called
+out here anyway because it is safety-relevant. It exists to close a gap
+where a message's *stored* flags (frozen at first scan, spec section
+4.1) could drift out of sync with the server between the evaluate and
+execute phases -- long enough, in a real run, for a user to flag a
+message as important from another client after Liametahi already scanned
+it. `rules.is_protected_by_flags` is re-checked here against the fresh
+flags `_reverify` already fetches, immediately before any mutation, and
+reports `protected` instead of acting. `protect.senders` needs no
+equivalent check: it keys off `from_address`, which
+`domain.fingerprint()` already covers, so it cannot go stale the way
+flags can.
 """
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from liametahi import backup, state
+from liametahi import backup, rules, state
 from liametahi.backup import (
     MailboxAdapter,
     RawMetadata,
@@ -50,6 +70,7 @@ ItemStatus = Literal[
     "unsupported",
     "vanished",
     "changed",
+    "protected",
 ]
 
 _ReverifyVerdict = Literal["ok", "vanished", "changed"]
@@ -94,6 +115,8 @@ def execute_items(
     max_actions_per_run: int | None,
     dry_run: bool,
     fail_fast: bool,
+    protected_flags: Collection[str] = (),
+    protect_unread: bool = False,
 ) -> ExecuteSummary:
     """spec section 4.3. `items` must already be in the order the caller
     wants the cap applied (spec section 4.1: oldest `INTERNALDATE`
@@ -103,6 +126,13 @@ def execute_items(
     applies the cap when one is configured and still records one
     `result_items` row per candidate with its intended actions (so
     `report` and a future real run agree on what the cap would do).
+
+    `protected_flags`/`protect_unread` are the task's `protect.flags`/
+    `protect.unread` configuration (sync-fix-brief Fix A, see module
+    docstring): re-checked against freshly re-fetched flags immediately
+    before a non-dry-run mutation. Defaulting to "nothing protected"
+    keeps every existing caller's behaviour unchanged unless it passes
+    the real config values.
     """
     outcomes: list[ExecutionOutcome] = []
     actions_done = 0
@@ -144,7 +174,13 @@ def execute_items(
 
         actions_done += 1
         outcome_status, outcome_result_id, outcome_error = _execute_one(
-            conn, mailbox=mailbox, item=item, run_id=run_id, backup_dir=backup_dir
+            conn,
+            mailbox=mailbox,
+            item=item,
+            run_id=run_id,
+            backup_dir=backup_dir,
+            protected_flags=protected_flags,
+            protect_unread=protect_unread,
         )
         outcomes.append(
             ExecutionOutcome(
@@ -164,6 +200,8 @@ def _execute_one(
     item: ExecutionItem,
     run_id: str,
     backup_dir: Path,
+    protected_flags: Collection[str],
+    protect_unread: bool,
 ) -> tuple[ItemStatus, int | None, str | None]:
     # Claim before mutate (spec section 10, section 4.3 point 3): a key
     # held by a different live run is never stolen.
@@ -199,8 +237,43 @@ def _execute_one(
                 status=verdict,
                 winning_rule=item.winning_rule,
             )
+            if verdict == "vanished":
+                # The message is gone from the server entirely -- retire
+                # the candidate so it stops coming back as a live row on
+                # every future run (sync-fix-brief Fix C, Finding 2).
+                state.retire_candidate(
+                    conn, candidate_id=item.candidate_id, reason="vanished"
+                )
             return verdict, result_id, None
         assert meta is not None  # guaranteed by _reverify when verdict == "ok"
+
+        # Fix A (sync-fix-brief Finding 1): stored flags are frozen at
+        # scan time (spec §4.1) and can drift out of sync with the
+        # server in the minutes-wide window before this mutation -- a
+        # message the user flags as important from another client after
+        # Liametahi already scanned it must not be trashed anyway. This
+        # is the safety-net re-check, using the flags `_reverify` just
+        # fetched fresh; `imap_adapter.scan`'s per-run flag refresh (Fix
+        # B) is the complementary first line of defense that keeps
+        # `has-flag`/protection honest run to run in the common case.
+        if rules.is_protected_by_flags(
+            meta.flags,
+            protected_flags=protected_flags,
+            protect_unread=protect_unread,
+        ):
+            logger.debug(
+                "run %s: %s protected by freshly re-fetched flags; not mutating",
+                run_id,
+                item.key.render(),
+            )
+            result_id = state.insert_result_item(
+                conn,
+                run_id=run_id,
+                candidate_id=item.candidate_id,
+                status="protected",
+                winning_rule=item.winning_rule,
+            )
+            return "protected", result_id, None
 
         # See module docstring: "pending" here is a deliberate sentinel,
         # not a bug -- the action_attempts children below are the real
@@ -305,7 +378,7 @@ def _run_action_sequence(
     backup_dir: Path,
     meta: RawMetadata,
 ) -> tuple[ItemStatus, str | None]:
-    """spec section 4.3 points 5-6 / spec's non-negotiables: run actions
+    """spec section 4.3 points 6-7 / spec's non-negotiables: run actions
     strictly in order; the single remote mutation only after every
     preceding action in the sequence succeeded; `trash` never mutates
     without a prior successful backup in *this* sequence unless the
@@ -429,6 +502,13 @@ def _run_action_sequence(
                     conn, attempt_id=attempt_id, state="vanished", finished=True
                 )
                 aborted, final_status = True, "vanished"
+                # Vanished mid-mutation (a race after _reverify succeeded,
+                # not just at re-verify time) is the same "gone from the
+                # server" fact Fix C's retirement targets -- retire here
+                # too so this row does not keep coming back either.
+                state.retire_candidate(
+                    conn, candidate_id=item.candidate_id, reason="vanished"
+                )
             elif is_unsupported_error(exc):
                 state.update_action_attempt_state(
                     conn, attempt_id=attempt_id, state="unsupported", finished=True
@@ -456,6 +536,15 @@ def _run_action_sequence(
         state.update_action_attempt_state(
             conn, attempt_id=attempt_id, state="completed", finished=True
         )
+        if action.kind in ("trash", "move_to"):
+            # Fix C (sync-fix-brief Finding 2): a completed relocation
+            # moves the message out of the source mailbox, so this
+            # candidate row is done -- retire it so it stops being
+            # re-evaluated (and, via cache, re-matched at zero LLM cost)
+            # on every future run. A completed `label` never leaves the
+            # message in place, so it is deliberately excluded: the
+            # message may still legitimately match other rules later.
+            state.retire_candidate(conn, candidate_id=item.candidate_id, reason="moved")
         logger.debug(
             "run %s: %s completed for %s -> %s",
             run_id,

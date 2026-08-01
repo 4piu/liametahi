@@ -34,7 +34,9 @@ from liametahi.domain import MessageKey
 #: spec section 9: hidden from the default table/JSON view, shown with
 #: `--verbose`. Every other status (including `pending` rows whose
 #: derived status turns out to still be `pending`) is shown by default.
-QUIET_STATUSES = frozenset({"no_match", "cached_no_match", "protected", "shadowed"})
+QUIET_STATUSES = frozenset(
+    {"no_match", "cached_no_match", "protected", "shadowed", "restored"}
+)
 
 REPORT_VERSION = 1
 

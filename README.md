@@ -46,6 +46,28 @@ read, test, and audit.
   a crash mid-run is reconciled cleanly on the next invocation; a second
   concurrent invocation of the same task fails fast (exit `5`) rather than
   racing.
+- **Flag-based protection stays honest even though Liametahi isn't assumed
+  to be the mailbox's only writer.** Every scan also refreshes stored flags
+  for messages it already knows about (one batched fetch per mailbox, not
+  per message), and, independently, the moment before any mutation actually
+  runs, `protect.flags`/`protect.unread` are re-checked against freshly
+  re-fetched flags — so flagging a message important from your phone after
+  Liametahi already scanned it still stops it from being trashed.
+- **A message is never re-actioned once it's truly gone.** A candidate whose
+  message was actually moved (`trash`/`move_to`) or confirmed gone from the
+  server is retired and excluded from every later run — it doesn't keep
+  coming back to burn a claim-and-re-verify round trip forever. A completed
+  `label` never retires a candidate, since the message is still there and
+  may match something else later.
+- **Restoring a trashed message is respected, not silently undone.** The
+  decision cache is keyed to survive a message being moved (so a failed
+  trash can retry cheaply on the next run), but that also means it survives
+  a *restore*. If a message's fingerprint already has a completed
+  trash/move from an earlier run, Liametahi quietly skips it instead of
+  re-trashing it — with no model call either way — and retires it, so the
+  decision is made once and never revisited. `--reevaluate` does not
+  override this (see [Re-running and the decision
+  cache](#re-running-and-the-decision-cache)).
 
 ## Requirements
 
@@ -358,6 +380,20 @@ misconfigured `trash_mailbox`, a capability the server doesn't advertise),
 the message stays put and is picked up again next run — the cached match is
 reused straight into policy/execution, not re-sent to the model. `--reevaluate`
 bypasses the cache entirely and forces a fresh pass.
+
+The cache is keyed to survive a message moving, which is exactly what makes
+it survive a *restore* too: if you move a trashed message back to a source
+mailbox, it re-scans under a new UID and can hit the same cached "yes".
+Liametahi checks for this — a candidate whose fingerprint already has a
+completed trash/move from a previous run is skipped, never silently
+re-trashed. The skip is recorded as a quiet `restored` result item (visible
+with `report --verbose`, absent from default output) and retires the
+candidate, so a given message is skipped once and then dropped from
+consideration entirely rather than re-reported on every future run. There is
+currently no flag to force Liametahi to re-trash a message you've restored on
+purpose; delete its old `action_attempts` history from the state database, or
+match it with a different rule, if you truly want that.
+`--reevaluate` does not affect this check — it governs only the LLM cache.
 
 ## CLI reference
 

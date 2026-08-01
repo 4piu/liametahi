@@ -415,9 +415,7 @@ def _run_phases(
                 run_id,
                 reconcile_summary.rows_closed,
             )
-        logger.info(
-            "run %s: scanning %s", run_id, ", ".join(task.source_mailboxes)
-        )
+        logger.info("run %s: scanning %s", run_id, ", ".join(task.source_mailboxes))
         scan_result = scan(
             scan_mailbox,
             conn,
@@ -428,11 +426,13 @@ def _run_phases(
         )
         for mailbox_result in scan_result.mailboxes:
             logger.debug(
-                "run %s: %s: %d new, %d re-identified (uidvalidity=%s%s)",
+                "run %s: %s: %d new, %d re-identified, %d flags refreshed "
+                "(uidvalidity=%s%s)",
                 run_id,
                 mailbox_result.mailbox,
                 mailbox_result.new_candidates,
                 mailbox_result.reidentified_candidates,
+                mailbox_result.flags_refreshed,
                 mailbox_result.uidvalidity,
                 ", changed" if mailbox_result.uidvalidity_changed else "",
             )
@@ -512,6 +512,37 @@ def _run_phases(
         results_by_id=results_by_id,
     )
 
+    # Fix D (sync-fix-brief Finding 3): the LLM decision cache is keyed on
+    # `fingerprint`, which is stable across a move (spec §11) -- so a
+    # message the user restores from Trash back to a source mailbox
+    # re-scans under a new UID/mailbox, hits a cached positive decision,
+    # and would otherwise be re-trashed with no model call and no signal
+    # to the user. One batched query, over every candidate that has a
+    # winning match this run, finds any whose fingerprint already has a
+    # completed `trash`/`move_to:*` from an earlier run; those are
+    # reported `restored` instead of executed. This is deliberately
+    # unconditional -- it does not matter whether the match this run came
+    # from the cache or a fresh classification, and it is intentionally
+    # skip-the-whole-item rather than "only skip if the winning action
+    # would itself be destructive": a message with this history looks
+    # like a deliberate user restore, so the conservative choice is to
+    # leave it alone entirely rather than second-guess which of its
+    # matched rules are safe to still apply. `--reevaluate` does not
+    # override this: it governs the LLM cache, a different concern (see
+    # final report for the resulting gap -- there is currently no way to
+    # deliberately re-trash a restored message).
+    candidates_pending_decision = [
+        (candidate_id, candidate)
+        for candidate_id, candidate in eligible
+        if results_by_id[candidate_id].status is None
+    ]
+    restored_fingerprints = state.fingerprints_with_completed_destructive_action(
+        conn,
+        account_id=account_id,
+        fingerprints=[c.fingerprint for _, c in candidates_pending_decision],
+        exclude_run_id=run_id,
+    )
+
     execution_items: list[execute.ExecutionItem] = []
     shadowed_by_candidate: dict[int, tuple[str, ...]] = {}
     for candidate_id, candidate in eligible:
@@ -523,6 +554,32 @@ def _run_phases(
                 candidate_id=candidate_id,
                 status=result.status,
                 detail=result.error or result.reason,
+            )
+            continue
+
+        if candidate.fingerprint in restored_fingerprints:
+            state.insert_result_item(
+                conn,
+                run_id=run_id,
+                candidate_id=candidate_id,
+                status="restored",
+                detail=(
+                    "fingerprint already has a completed trash/move_to from "
+                    "a previous run; not re-acting on what looks like a "
+                    "user restore (sync-fix-brief Finding 3)"
+                ),
+            )
+            # Retire it as well as skipping it. Without this the decision
+            # is re-derived on every future run: the candidate stays live,
+            # is re-evaluated, and reports `restored` again forever --
+            # exactly the never-retires waste Fix C exists to end
+            # (Finding 2), just reached by a different path, since
+            # skipping here means `execute._reverify` never runs and so
+            # can never retire it as `vanished` either. One decision to
+            # leave a message alone is final; there is no reason to keep
+            # re-making it.
+            state.retire_candidate(
+                conn, candidate_id=candidate_id, reason="prior_trash"
             )
             continue
 
@@ -582,6 +639,8 @@ def _run_phases(
             max_actions_per_run=task.max_actions_per_run,
             dry_run=dry_run,
             fail_fast=fail_fast,
+            protected_flags=task.protect.flags,
+            protect_unread=task.protect.unread,
         )
     finally:
         _close_mailbox(exec_mailbox)
@@ -656,16 +715,24 @@ def _run_phases(
 #
 # "Live" here means: the candidate's own `uidvalidity` still matches the
 # mailbox's current `uidvalidity` in `mailbox_state` -- i.e. it was not
-# superseded by a `UIDVALIDITY` change (spec §4.1, §11). It does *not*
-# detect a candidate whose message was already moved out of the mailbox
-# by an earlier action while `UIDVALIDITY` stayed the same (there is no
-# "resolved" flag on `candidates` in the fixed contracts §4 DDL); such a
-# stale row is re-evaluated again here, but this is safe, not just
-# tolerated: `execute.py`'s re-verify step (spec §4.3 point 4) always
-# re-fetches by key before any mutation and reports `vanished` rather
-# than acting, so at worst this produces repeat "vanished"/no-op report
-# noise for a long-dead candidate, never a wrong mutation. Flagged in the
-# final report as a gap `state.py`/the schema could close.
+# superseded by a `UIDVALIDITY` change (spec §4.1, §11) -- **and** the
+# row is not retired (migration 0003 / sync-fix-brief Fix C: `state.
+# retire_candidate` stamps `retired_at` once a `trash`/`move_to:*` action
+# actually completes, or `execute._reverify` reports the message gone
+# from the server). Excluding retired rows is what makes
+# `max_candidates_per_run`'s "no cap" default bound the evaluate set at
+# all: without it every successfully-trashed or confirmed-vanished
+# message came back forever, re-matching from the LLM decision cache at
+# zero model cost but still burning a claim + re-verify round trip every
+# run (sync-fix-brief Finding 2). It does *not* detect a candidate whose
+# message was already moved out of the mailbox by an earlier action
+# while `UIDVALIDITY` stayed the same and that action's completion was
+# never recorded (e.g. a crash the reconcile pass has not yet visited);
+# such a stale row is re-evaluated again here, but this is safe, not
+# just tolerated: `execute.py`'s re-verify step (spec §4.3 point 4)
+# always re-fetches by key before any mutation and reports `vanished`
+# rather than acting, so at worst this produces repeat "vanished"/no-op
+# report noise for a long-dead candidate, never a wrong mutation.
 
 
 def _live_candidates(
@@ -682,6 +749,7 @@ def _live_candidates(
           ON m.account_id = c.account_id AND m.mailbox = c.mailbox
         WHERE c.account_id = ? AND c.mailbox IN ({placeholders})
           AND c.uidvalidity = m.uidvalidity
+          AND c.retired_at IS NULL
         ORDER BY c.internaldate ASC
         """,
         (account_id, *mailboxes),
