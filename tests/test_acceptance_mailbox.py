@@ -7,13 +7,14 @@ message" half.
 """
 
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 from liametahi import execute, policy, state
 from liametahi.config import RuleConfig
 from liametahi.domain import MessageKey
-from liametahi.imap_adapter import scan
+from liametahi.imap_adapter import RawMetadata, scan
 from tests.fakes.fake_mailbox import FakeMailbox, _StoredMessage
 
 _HEADERS = ["FROM", "SUBJECT", "MESSAGE-ID"]
@@ -445,5 +446,90 @@ def test_acceptance_12_uidvalidity_change_reidentifies_by_fingerprint(
         # Trash still holds exactly the one message from step 2, not two.
         mb.select("Trash", readonly=True)
         assert mb.search_uids() == (1,)
+    finally:
+        state.close_database(conn)
+
+
+class _CountingMailbox(FakeMailbox):
+    """Records how many UIDs were actually asked for over the wire."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.uids_fetched = 0
+
+    def fetch_metadata(
+        self, uids: Sequence[int], headers: Sequence[str]
+    ) -> tuple[RawMetadata, ...]:
+        self.uids_fetched += len(uids)
+        return super().fetch_metadata(uids, headers)
+
+
+def _numbered_messages(count: int) -> list[_StoredMessage]:
+    return [
+        _StoredMessage(
+            uid=i,
+            raw=_raw(f"Subject {i}", f"<m{i}@test>"),
+            flags=set(),
+            internaldate=datetime(2026, 6, 1, tzinfo=UTC),
+            mailbox="INBOX",
+        )
+        for i in range(1, count + 1)
+    ]
+
+
+def test_max_new_mails_bounds_the_fetch_not_just_the_save(tmp_path: Path) -> None:
+    """The cap has to bound the *work*, which means slicing before the
+    fetch. It used to be applied while saving, so `max_new_mails: 1`
+    against a 300-message mailbox still cost 300 fetches -- the cap
+    changed what was stored and nothing about how long a run took.
+    """
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        mb = _CountingMailbox(
+            messages=_numbered_messages(300), uidvalidity={"INBOX": 1000}
+        )
+        result = scan(
+            mb,
+            conn,
+            account_id=account_id,
+            source_mailboxes=["INBOX"],
+            fetch_headers=_HEADERS,
+            max_new_mails=1,
+        )
+        assert result.candidates_scanned == 1
+        assert result.stopped_at_cap is True
+        assert mb.uids_fetched == 1, (
+            f"fetched {mb.uids_fetched} UIDs for a cap of 1 -- the cap must be "
+            "applied before the fetch, not while saving"
+        )
+    finally:
+        state.close_database(conn)
+
+
+def test_capped_scans_make_forward_progress_in_uid_order(tmp_path: Path) -> None:
+    """Slicing by UID rather than by `INTERNALDATE` must still leave each
+    run starting where the last one stopped -- UIDs are stable and
+    ascending, so a repeated capped run drains the mailbox."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        mb = _CountingMailbox(
+            messages=_numbered_messages(10), uidvalidity={"INBOX": 1000}
+        )
+        for _ in range(3):
+            scan(
+                mb,
+                conn,
+                account_id=account_id,
+                source_mailboxes=["INBOX"],
+                fetch_headers=_HEADERS,
+                max_new_mails=3,
+            )
+        stored = [
+            int(row["uid"])
+            for row in conn.execute("SELECT uid FROM candidates ORDER BY uid")
+        ]
+        assert stored == [1, 2, 3, 4, 5, 6, 7, 8, 9], stored
     finally:
         state.close_database(conn)

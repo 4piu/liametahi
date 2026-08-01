@@ -834,6 +834,31 @@ def scan(
             candidate_uids = tuple(new_uids)
             known_uids = tuple(known)
 
+        # Apply the cap *before* fetching, not while saving.
+        #
+        # Spec §4.1 point 5 wants the oldest candidates first, and
+        # `INTERNALDATE` is the natural key for that -- but it only
+        # arrives *with* the metadata, so honouring it literally meant
+        # fetching every new message in the mailbox and then keeping N of
+        # them. `max_new_mails: 1` against a 300-message inbox still cost
+        # 300 fetches, which defeats the point of a cap whose whole job
+        # is to bound a run's work.
+        #
+        # UIDs are assigned strictly increasing in arrival order (RFC
+        # 3501 §2.3.1.1), so the lowest N new UIDs is the same set as the
+        # oldest N by `INTERNALDATE` for any mailbox that only ever had
+        # mail delivered to it, and it is knowable without fetching
+        # anything. The two diverge only for a message *appended* with an
+        # older `INTERNALDATE` than its UID implies -- which this tool's
+        # own `restore` does -- where the restored message is picked up
+        # in arrival order rather than by its original date. Forward
+        # progress is unaffected either way: UIDs are stable and
+        # ascending, so each run starts where the last one stopped.
+        remaining = None if max_new_mails is None else max_new_mails - total_saved
+        if remaining is not None and len(candidate_uids) > remaining:
+            candidate_uids = tuple(sorted(candidate_uids)[: max(remaining, 0)])
+            stopped_at_cap = True
+
         new_count = 0
         reidentified_count = 0
         if candidate_uids:

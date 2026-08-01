@@ -237,7 +237,7 @@ OpenRouter's namespaced id (`vendor/model`). OpenRouter also accepts optional
 | `protect.flags` | IMAP flags that exempt a message — see [Safety model](#safety-model) | `[]` (nothing protected) |
 | `protect.senders` | Sender globs that exempt a message | `[]` |
 | `protect.unread` | Exempt unread messages | `false` |
-| `max_new_mails` | Stop after fetching this many *not-yet-seen* messages from the server in one run. Does not limit how many known messages are re-checked | none (no limit) |
+| `max_new_mails` | Fetch at most this many *not-yet-seen* messages per run, lowest UID (oldest-arrived) first. Bounds the fetch itself, so it genuinely shortens a run. Does not limit how many already-known messages get their flags refreshed | none (no limit) |
 | `max_actions` | Caps one run's mutations | none (uncapped) |
 | `rules` * | Non-empty list — see below | — |
 
