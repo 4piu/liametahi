@@ -101,6 +101,24 @@ def test_no_authorization_header_when_no_api_key() -> None:
     assert "authorization" not in headers
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://local/v1/chat/completions",
+        # Non-standard gateway shapes (e.g. Azure-style deployment URLs
+        # with a query string, or a path unrelated to the OpenAI
+        # convention) must work too: `base_url` is the complete endpoint,
+        # posted to exactly as configured, with no rewriting.
+        "http://local/openai/deployments/x/chat/completions?api-version=2024-02-01",
+        "http://local/buz",
+    ],
+)
+def test_base_url_used_verbatim_as_the_endpoint(base_url: str) -> None:
+    cfg = _config(base_url=base_url)
+    clf = OpenAICompatibleClassifier(cfg)
+    assert clf._endpoint_url == base_url  # noqa: SLF001
+
+
 # --- Structured-output degradation ladder (spec section 8.1) ---------------
 
 

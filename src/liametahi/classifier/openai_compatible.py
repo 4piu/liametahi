@@ -1,8 +1,12 @@
 """Chat-Completions-shaped adapter (spec §8.1).
 
 Covers Ollama, llama.cpp server, LM Studio, vLLM, OpenAI, and any other
-gateway that speaks `POST /chat/completions`. OpenRouter needs no special
-handling here: it is OpenAI-compatible, so pointing `base_url` at it and
+gateway that speaks `POST /chat/completions`. `base_url` is posted to
+verbatim -- it must be the complete endpoint URL (for example
+`https://openrouter.ai/api/v1/chat/completions`), not just the API root,
+since gateways vary in whether the conventional path is what actually
+reaches them. OpenRouter needs no special handling here: it is
+OpenAI-compatible, so pointing `base_url` at its full endpoint and
 setting `model` to a namespaced `vendor/model` slug is purely
 configuration (spec §8.1).
 
@@ -54,11 +58,11 @@ class OpenAICompatibleClassifier:
         if not config.base_url:
             raise ValueError("openai_compatible requires 'base_url'")
         self._config = config
+        self._endpoint_url = config.base_url
         headers = dict(config.extra_headers)
         if config.api_key:
             headers.setdefault("Authorization", f"Bearer {config.api_key}")
         self._client = client or httpx.Client(
-            base_url=config.base_url,
             timeout=config.timeout_seconds,
             headers=headers,
         )
@@ -143,7 +147,7 @@ class OpenAICompatibleClassifier:
         last_exc: Exception | None = None
         for _ in range(attempts):
             try:
-                return self._client.post("/chat/completions", json=body)
+                return self._client.post(self._endpoint_url, json=body)
             except httpx.TransportError as exc:
                 last_exc = exc
                 continue

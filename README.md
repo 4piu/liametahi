@@ -106,7 +106,7 @@ accounts:
 models:
   local:
     provider: openai_compatible
-    base_url: http://127.0.0.1:8080/v1
+    base_url: http://127.0.0.1:8080/v1/chat/completions
     model: qwen2.5-7b-instruct
 
 tasks:
@@ -180,7 +180,7 @@ load time for any other host).
 | Key | Notes |
 | --- | --- |
 | `provider` | `openai_compatible` or `anthropic` |
-| `base_url` | required for `openai_compatible` |
+| `base_url` | required for `openai_compatible`; the complete Chat Completions endpoint URL, posted to as-is |
 | `model` | the provider's model identifier |
 | `api_key` | required for `anthropic`; optional for a local `openai_compatible` server |
 | `structured_output` | `auto` (default) / `json_schema` / `json_object` / `none` |
@@ -188,8 +188,8 @@ load time for any other host).
 | `content_escalation.enabled` | `false` by default — see below |
 
 An OpenRouter endpoint is `provider: openai_compatible` with
-`base_url: https://openrouter.ai/api/v1` and `model` set to OpenRouter's
-namespaced id (`vendor/model`). OpenRouter also accepts optional
+`base_url: https://openrouter.ai/api/v1/chat/completions` and `model` set to
+OpenRouter's namespaced id (`vendor/model`). OpenRouter also accepts optional
 `HTTP-Referer`/`X-Title` attribution headers via `extra_headers`.
 
 ### `tasks.<name>`

@@ -238,7 +238,7 @@ accounts:
 models:
   local:
     provider: openai_compatible
-    base_url: http://127.0.0.1:8080/v1
+    base_url: http://127.0.0.1:8080/v1/chat/completions
     model: qwen2.5-7b
 
 tasks:
