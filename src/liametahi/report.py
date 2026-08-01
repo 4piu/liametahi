@@ -282,21 +282,74 @@ def render_table(data: ReportData, *, verbose: bool) -> str:
         lines.append(f"(no actionable or failed items){hint}")
         return "\n".join(lines)
 
-    header = (
-        f"{'MESSAGE KEY':<38} {'FROM':<26} {'RULE':<20} {'STATUS':<20} "
-        f"{'ACTIONS':<30} BACKUP"
-    )
-    lines.append(header)
-    lines.append("-" * len(header))
-    for item in items:
-        actions_str = ",".join(f"{a.action}:{a.state}" for a in item.actions) or "-"
-        backup_ids = ",".join(a.backup_id for a in item.actions if a.backup_id) or "-"
-        lines.append(
-            f"{item.message_key:<38} {(item.from_address or '-'):<26} "
-            f"{(item.winning_rule or '-'):<20} {item.status:<20} "
-            f"{actions_str:<30} {backup_ids}"
+    rows = [
+        [
+            item.message_key,
+            item.from_address or "-",
+            item.winning_rule or "-",
+            item.status,
+            ",".join(f"{a.action}:{a.state}" for a in item.actions) or "-",
+            ",".join(a.backup_id for a in item.actions if a.backup_id) or "-",
+        ]
+        for item in items
+    ]
+    lines.extend(
+        _format_table(
+            ["MESSAGE KEY", "FROM", "RULE", "STATUS", "ACTIONS", "BACKUP"],
+            rows,
+            max_widths=[30, 30, 18, 20, 34, 0],
         )
+    )
     return "\n".join(lines)
+
+
+# --- Table layout ------------------------------------------------------
+#
+# Columns are sized to the data rather than to fixed constants. Fixed
+# widths were both too wide and too narrow at once: a message key padded
+# to 38 left a chasm before a 15-character value, while a 27-character
+# sender overran a 26-wide column and shoved every column after it out of
+# alignment. Sizing to the widest cell removes the gaps; capping and
+# ellipsizing removes the overruns.
+
+_ELLIPSIS = "..."
+
+
+def _fit(text: str, width: int) -> str:
+    """`text` truncated to `width`, with the cut marked. ASCII dots
+    rather than U+2026 because a report is routinely redirected to a file
+    or mailed by cron, where the output encoding is not ours to assume."""
+    if len(text) <= width:
+        return text
+    if width <= len(_ELLIPSIS):
+        return text[:width]
+    return text[: width - len(_ELLIPSIS)] + _ELLIPSIS
+
+
+def _format_table(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    *,
+    max_widths: Sequence[int],
+) -> list[str]:
+    """Render a fixed-column table. Every column but the last is padded to
+    the width of its widest cell (bounded by `max_widths`); the last is
+    neither padded nor truncated, since nothing follows it to misalign
+    and it carries identifiers worth keeping whole."""
+    widths = [
+        min(max([len(header), *(len(row[i]) for row in rows)]), cap)
+        for i, (header, cap) in enumerate(zip(headers, max_widths, strict=True))
+    ]
+
+    def line(cells: Sequence[str]) -> str:
+        padded = [
+            _fit(cell, width).ljust(width)
+            for cell, width in zip(cells[:-1], widths[:-1], strict=True)
+        ]
+        return " ".join([*padded, cells[-1]])
+
+    head = line(headers)
+    return [head, "-" * len(head), *(line(row) for row in rows)]
 
 
 # --- `report --list` ---------------------------------------------------
@@ -305,14 +358,21 @@ def render_table(data: ReportData, *, verbose: bool) -> str:
 def render_run_list(runs: Sequence[state.RunRow]) -> str:
     if not runs:
         return "(no runs recorded)"
-    header = (
-        f"{'RUN ID':<30} {'TASK':<20} {'STARTED':<25} {'ENDED':<25} {'DRY':<6} EXIT"
-    )
-    lines = [header, "-" * len(header)]
-    for run in runs:
-        lines.append(
-            f"{run.run_id:<30} {run.task:<20} {run.started_at:<25} "
-            f"{(run.ended_at or '-'):<25} {str(run.dry_run):<6} "
-            f"{run.exit_code if run.exit_code is not None else '-'}"
+    rows = [
+        [
+            run.run_id,
+            run.task,
+            run.started_at,
+            run.ended_at or "-",
+            str(run.dry_run),
+            str(run.exit_code) if run.exit_code is not None else "-",
+        ]
+        for run in runs
+    ]
+    return "\n".join(
+        _format_table(
+            ["RUN ID", "TASK", "STARTED", "ENDED", "DRY", "EXIT"],
+            rows,
+            max_widths=[16, 24, 27, 27, 5, 0],
         )
-    return "\n".join(lines)
+    )

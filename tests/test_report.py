@@ -293,3 +293,85 @@ def test_render_run_list(tmp_path: Path) -> None:
         assert report.render_run_list([]) == "(no runs recorded)"
     finally:
         state.close_database(conn)
+
+
+# --- Table layout ---------------------------------------------------------
+
+
+def test_fit_truncates_with_an_ellipsis_and_never_exceeds_width() -> None:
+    assert report._fit("short", 10) == "short"
+    assert report._fit("exactlyten", 10) == "exactlyten"
+    assert report._fit("wayolongerthanten", 10) == "wayolon..."
+    assert len(report._fit("wayolongerthanten", 10)) == 10
+    # Degenerate widths must still not overflow, even though there is no
+    # room for the marker.
+    for width in range(0, 4):
+        assert len(report._fit("abcdefgh", width)) == width
+
+
+def test_table_columns_are_sized_to_the_data() -> None:
+    """Fixed widths were simultaneously too wide (a 38-column message key
+    beside a 15-character value) and too narrow (a 27-character sender in
+    a 26-wide column shoved every later column out of true)."""
+    rows = [
+        ["1/INBOX/1/15330", "a@x.com", "junk", "completed", "backup:completed", "abc"],
+        [
+            "1/INBOX/1/15383",
+            "email@email.playstation.com",
+            "junk",
+            "completed",
+            "backup:completed",
+            "def",
+        ],
+    ]
+    lines = report._format_table(
+        ["MESSAGE KEY", "FROM", "RULE", "STATUS", "ACTIONS", "BACKUP"],
+        rows,
+        max_widths=[30, 30, 18, 20, 34, 0],
+    )
+    header, rule, *body = lines
+    assert set(rule) == {"-"}
+    # Every row starts its second column at the same offset -- the bug
+    # was that a long value in column two pushed the rest rightwards.
+    offsets = {line.index("junk") for line in body}
+    assert len(offsets) == 1, body
+    # No column is padded wider than its widest value needs.
+    assert "MESSAGE KEY" in header
+    assert header.index("FROM") == len("1/INBOX/1/15330") + 1
+
+
+def test_table_last_column_is_neither_padded_nor_truncated() -> None:
+    """Nothing follows it to misalign, and it carries identifiers."""
+    long_id = "a" * 60
+    lines = report._format_table(["A", "B"], [["x", long_id]], max_widths=[10, 0])
+    assert lines[-1].endswith(long_id)
+    assert not lines[-1].endswith(" ")
+
+
+def test_render_table_aligns_a_long_sender(tmp_path: Path) -> None:
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id, run_id = _setup(conn)
+        for i, sender in enumerate(
+            ["a@x.com", "email@email.playstation.com", "b@y.com"], start=1
+        ):
+            candidate = make_candidate(
+                account_id=account_id, uid=i, from_address=sender
+            )
+            candidate_id = state.upsert_candidate(conn, candidate)
+            state.insert_result_item(
+                conn,
+                run_id=run_id,
+                candidate_id=candidate_id,
+                status="failed",
+                winning_rule="junk",
+            )
+        state.finish_run(
+            conn, run_id=run_id, exit_code=1, candidates_scanned=3, llm_calls=0
+        )
+        table = report.render_table(report.load_report(conn, run_id), verbose=False)
+        body = [line for line in table.splitlines() if "junk" in line]
+        assert len(body) == 3
+        assert len({line.index("junk") for line in body}) == 1, body
+    finally:
+        state.close_database(conn)
