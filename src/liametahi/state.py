@@ -15,7 +15,6 @@ import contextlib
 import json
 import os
 import sqlite3
-import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -28,7 +27,7 @@ from liametahi.domain import Candidate, MessageKey
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 _LATEST_SCHEMA_VERSION = 4
 
-_CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
 
 
 class SchemaVersionError(Exception):
@@ -39,25 +38,34 @@ class SchemaVersionError(Exception):
 # --- Identifiers (contracts §3) -------------------------------------------
 
 
-def _new_ulid() -> str:
-    """A 26-character, uppercase, Crockford-base32, time-sortable ID:
-    48-bit millisecond timestamp followed by 80 bits of randomness."""
-    timestamp_ms = int(time.time() * 1000)
-    randomness = int.from_bytes(os.urandom(10), "big")
-    value = (timestamp_ms << 80) | randomness
-    chars = []
-    for _ in range(26):
-        chars.append(_CROCKFORD_ALPHABET[value & 0x1F])
-        value >>= 5
-    return "".join(reversed(chars))
+def _new_id() -> str:
+    """A short, bare, random identifier: 10 characters of lowercase
+    Crockford base32 (50 bits).
+
+    Deliberately *not* a ULID. The original design used a 26-character
+    time-sortable ULID, but nothing ever sorted by id -- `list_runs` and
+    every other ordering key off `started_at`/`internaldate`, and the id
+    is only ever an identity -- so the timestamp prefix bought nothing
+    while making the string long and, worse, making short prefixes
+    useless: two ULIDs minutes apart share their first ~8 characters.
+    Fully random means every character discriminates, which is what
+    makes `resolve_run_id`'s prefix matching practical.
+
+    Crockford's alphabet omits i, l, o and u, so there is no 1/l or 0/O
+    ambiguity when reading one off a terminal and retyping it. 50 bits
+    is far more than a personal tool needs (a collision would raise
+    `IntegrityError` against the primary key, not corrupt anything).
+    """
+    value = int.from_bytes(os.urandom(8), "big")
+    return "".join(_CROCKFORD_ALPHABET[(value >> (5 * i)) & 0x1F] for i in range(10))
 
 
 def new_run_id() -> str:
-    return f"run_{_new_ulid()}"
+    return _new_id()
 
 
 def new_backup_id() -> str:
-    return f"bkp_{_new_ulid()}"
+    return _new_id()
 
 
 def _iso_now() -> str:
@@ -526,6 +534,65 @@ def _row_to_run(row: sqlite3.Row) -> RunRow:
         input_tokens=row["input_tokens"],
         output_tokens=row["output_tokens"],
     )
+
+
+class AmbiguousIdError(Exception):
+    """A supplied id prefix matched more than one row. Carries the
+    matches so the caller can show the user what to disambiguate
+    between."""
+
+    def __init__(self, prefix: str, matches: Sequence[str]) -> None:
+        self.prefix = prefix
+        self.matches = tuple(matches)
+        super().__init__(
+            f"{prefix!r} is ambiguous -- it matches {len(self.matches)} ids: "
+            + ", ".join(self.matches)
+        )
+
+
+def _resolve_id(
+    conn: sqlite3.Connection, *, table: str, column: str, value: str
+) -> str | None:
+    """Resolve a full id, or an unambiguous leading prefix of one, to the
+    full id. Returns `None` if nothing matches; raises
+    `AmbiguousIdError` if a prefix matches more than one row.
+
+    Ids are fully random (see `_new_id`), so every character narrows the
+    search and a handful is normally enough -- the same ergonomics as
+    short commit hashes or `docker` short ids. An exact match always
+    wins outright, so a complete id can never be reported ambiguous
+    merely because it also prefixes a longer one.
+    """
+    normalised = value.strip().lower()
+    # Ids only ever contain `_CROCKFORD_ALPHABET`, so anything else cannot
+    # match -- rejecting it here also means the LIKE below can never see a
+    # `%` or `_` wildcard and needs no escaping.
+    if not normalised or set(normalised) - set(_CROCKFORD_ALPHABET):
+        return None
+    # `table`/`column` are module-internal literals, never user input.
+    exact = conn.execute(
+        f"SELECT {column} FROM {table} WHERE {column} = ?",
+        (normalised,),  # noqa: S608
+    ).fetchone()
+    if exact is not None:
+        return str(exact[column])
+    rows = conn.execute(
+        f"SELECT {column} FROM {table} WHERE {column} LIKE ? ORDER BY {column}",  # noqa: S608
+        (normalised + "%",),
+    ).fetchall()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        raise AmbiguousIdError(normalised, [str(r[column]) for r in rows])
+    return str(rows[0][column])
+
+
+def resolve_run_id(conn: sqlite3.Connection, value: str) -> str | None:
+    return _resolve_id(conn, table="runs", column="run_id", value=value)
+
+
+def resolve_backup_id(conn: sqlite3.Connection, value: str) -> str | None:
+    return _resolve_id(conn, table="backups", column="backup_id", value=value)
 
 
 def get_run(conn: sqlite3.Connection, run_id: str) -> RunRow | None:

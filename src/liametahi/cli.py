@@ -21,7 +21,7 @@ Exit codes (spec §9):
 import os
 import signal
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import FrameType
@@ -116,6 +116,30 @@ def _load(config: Path | None) -> tuple[Config, Path]:
     for model in cfg.models.values():
         register_secret(model.api_key)
     return cfg, path
+
+
+def _resolve_id(
+    lookup: Callable[[], str | None],
+    supplied: str,
+    *,
+    error_prefix: str,
+    noun: str,
+) -> str:
+    """Turn a user-supplied id -- full, or an unambiguous leading prefix
+    of one -- into the full id, or exit with a useful message.
+
+    Ids are short and fully random, so a few leading characters are
+    normally enough, the same way a short commit hash is.
+    """
+    try:
+        resolved = lookup()
+    except state.AmbiguousIdError as exc:
+        typer.echo(f"{error_prefix} error: {exc}", err=True)
+        raise typer.Exit(code=EXIT_RUNTIME_FAILURE) from exc
+    if resolved is None:
+        typer.echo(f"{error_prefix} error: no {noun} matching {supplied!r}", err=True)
+        raise typer.Exit(code=EXIT_RUNTIME_FAILURE)
+    return resolved
 
 
 def _open_state_db(cfg: Config) -> sqlite3.Connection:
@@ -293,13 +317,19 @@ def report(
             typer.echo(report_mod.render_run_list(state.list_runs(conn, task=task)))
             return
 
-        target = run_id
-        if target is None:
+        if run_id is None:
             runs = state.list_runs(conn, task=task)
             if not runs:
                 typer.echo("no stored runs", err=True)
                 raise typer.Exit(code=EXIT_RUNTIME_FAILURE)
             target = runs[0].run_id
+        else:
+            target = _resolve_id(
+                lambda: state.resolve_run_id(conn, run_id),
+                run_id,
+                error_prefix="report",
+                noun="run",
+            )
 
         try:
             data = report_mod.load_report(conn, target)
@@ -348,6 +378,12 @@ def restore(
     conn = _open_state_db(cfg)
     mailbox_conn = None
     try:
+        backup_id = _resolve_id(
+            lambda: state.resolve_backup_id(conn, backup_id),
+            backup_id,
+            error_prefix="restore",
+            noun="backup",
+        )
         # A dry run verifies the checksum and reports what it would
         # append; it must not open a connection to do that (spec §4.4).
         adapter = None

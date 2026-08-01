@@ -466,8 +466,6 @@ def test_run_create_finish_get_list(tmp_path: Path) -> None:
     try:
         account_id = state.upsert_account(conn, name="personal", host="h", username="u")
         run_id = state.new_run_id()
-        assert run_id.startswith("run_")
-        assert len(run_id) == len("run_") + 26
 
         state.create_run(
             conn,
@@ -510,10 +508,77 @@ def test_run_create_finish_get_list(tmp_path: Path) -> None:
         state.close_database(conn)
 
 
-def test_backup_id_format() -> None:
-    backup_id = state.new_backup_id()
-    assert backup_id.startswith("bkp_")
-    assert len(backup_id) == len("bkp_") + 26
+def test_ids_are_short_bare_and_unambiguous() -> None:
+    """Short (10 chars), no `run_`/`bkp_` prefix, and drawn from
+    Crockford base32 -- which omits i/l/o/u so there is no 1/l or 0/O
+    confusion reading one off a terminal and retyping it."""
+    alphabet = set("0123456789abcdefghjkmnpqrstvwxyz")
+    for make in (state.new_run_id, state.new_backup_id):
+        for _ in range(50):
+            value = make()
+            assert len(value) == 10, value
+            assert not set(value) - alphabet, value
+            assert not set("ilou") & set(value), value
+    # Fully random, so distinct calls differ from the first character
+    # often enough for short prefixes to discriminate (unlike a ULID,
+    # whose leading characters are a timestamp).
+    assert len({state.new_run_id() for _ in range(500)}) == 500
+
+
+def test_resolve_id_accepts_a_unique_prefix(tmp_path: Path) -> None:
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        run_id = state.new_run_id()
+        state.create_run(
+            conn,
+            run_id=run_id,
+            task="t",
+            account_id=account_id,
+            model_name="m",
+            provider="p",
+            model_id="mi",
+            dry_run=False,
+            reevaluate=False,
+            fetch_headers=[],
+            config_hash="h",
+        )
+        assert state.resolve_run_id(conn, run_id) == run_id
+        assert state.resolve_run_id(conn, run_id[:4]) == run_id
+        assert state.resolve_run_id(conn, run_id[:4].upper()) == run_id
+        assert state.resolve_run_id(conn, "zzzzzzzzzz") is None
+        # A wildcard can never leak into the LIKE: not alphabet chars.
+        assert state.resolve_run_id(conn, "%") is None
+        assert state.resolve_run_id(conn, "") is None
+    finally:
+        state.close_database(conn)
+
+
+def test_resolve_id_reports_an_ambiguous_prefix(tmp_path: Path) -> None:
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        for suffix in ("aaaaaaaa", "bbbbbbbb"):
+            state.create_run(
+                conn,
+                run_id="dpq" + suffix,
+                task="t",
+                account_id=account_id,
+                model_name="m",
+                provider="p",
+                model_id="mi",
+                dry_run=False,
+                reevaluate=False,
+                fetch_headers=[],
+                config_hash="h",
+            )
+        with pytest.raises(state.AmbiguousIdError) as excinfo:
+            state.resolve_run_id(conn, "dpq")
+        assert len(excinfo.value.matches) == 2
+        # An exact id is never ambiguous, even against a longer sibling.
+        assert state.resolve_run_id(conn, "dpqaaaaaaaa") == "dpqaaaaaaaa"
+    finally:
+        state.close_database(conn)
 
 
 def test_key_claims_claim_release_and_no_steal(tmp_path: Path) -> None:

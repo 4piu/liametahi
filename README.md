@@ -175,7 +175,9 @@ uv run liametahi report --list
 uv run liametahi report            # the newest run
 
 # Undo a trash by restoring from its backup.
-uv run liametahi restore bkp_01J... --mailbox INBOX
+uv run liametahi restore 4w8wbbs3fs --mailbox INBOX
+# ...or just enough leading characters to be unambiguous:
+uv run liametahi restore 4w8w --mailbox INBOX
 ```
 
 ## Configuration reference
@@ -403,6 +405,13 @@ liametahi run TASK [--dry-run] [--fail-fast] [--reevaluate] [--wait SECONDS] [--
 liametahi report [RUN_ID] [--list] [--task TASK] [--format table|json] [--verbose]
 liametahi restore BACKUP_ID --mailbox MAILBOX [--account NAME] [--dry-run]
 ```
+
+Run and backup ids are short random strings such as `4w8wbbs3fs`. Anywhere
+one is accepted you may type just enough leading characters to identify it
+uniquely — like a short commit hash — and you get a listing of the
+candidates back if the prefix is ambiguous. They use Crockford's base32
+alphabet, which omits `i`, `l`, `o` and `u`, so there is no `1`/`l` or
+`0`/`O` confusion reading one off the terminal.
 
 `--config PATH` is accepted by every subcommand and overrides
 `$LIAMETAHI_CONFIG` and the platform default.
