@@ -345,8 +345,10 @@ liametahi restore BACKUP_ID --mailbox MAILBOX [--account NAME] [--dry-run]
 `$LIAMETAHI_CONFIG` and the platform default.
 
 Exit codes: `0` success, `1` runtime/partial failure, `2` bad config or
-invocation, `4` authentication failure, `5` the task is already running
-(cron-safe — a typical crontab line is `liametahi run TASK || [ $? -eq 5 ]`).
+invocation, `3` interrupted (SIGINT/SIGTERM — the run is finished with a
+proper report and the task lock released), `4` authentication failure,
+`5` the task is already running (cron-safe — a typical crontab line is
+`liametahi run TASK || [ $? -eq 5 ]`).
 
 ## Development
 

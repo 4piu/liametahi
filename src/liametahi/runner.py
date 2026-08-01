@@ -71,6 +71,7 @@ logger = get_logger(__name__)
 EXIT_SUCCESS = 0
 EXIT_RUNTIME_FAILURE = 1
 EXIT_BAD_CONFIG = 2
+EXIT_INTERRUPTED = 3
 EXIT_AUTH_FAILURE = 4
 EXIT_TASK_RUNNING = 5
 
@@ -285,6 +286,33 @@ def _run_locked(
                 dry_run=dry_run,
                 report_data=report_data,
                 diagnostic=str(exc),
+            )
+        except KeyboardInterrupt:
+            # SIGINT is turned into this by Python itself; `cli.py`
+            # additionally turns SIGTERM into it (spec §10) so both
+            # signals reach exactly one handler. Caught here rather than
+            # left to propagate so the run gets a proper terminal report
+            # instead of the silent, unreported abort a bare
+            # `KeyboardInterrupt` would otherwise leave behind -- the
+            # `with task_lock(...)` block in `run_task` still releases
+            # the lock normally either way, since this returns rather
+            # than re-raising.
+            state.finish_run(
+                conn,
+                run_id=run_id,
+                exit_code=EXIT_INTERRUPTED,
+                candidates_scanned=0,
+                llm_calls=0,
+            )
+            logger.warning("run %s: interrupted (SIGINT/SIGTERM)", run_id)
+            state.append_audit_event(conn, run_id=run_id, kind="run_interrupted")
+            report_data = report.load_report(conn, run_id)
+            return RunOutcome(
+                run_id=run_id,
+                exit_code=EXIT_INTERRUPTED,
+                dry_run=dry_run,
+                report_data=report_data,
+                diagnostic="run interrupted (SIGINT/SIGTERM)",
             )
         except Exception as exc:  # noqa: BLE001 - recorded outcome, not swallowed
             state.finish_run(

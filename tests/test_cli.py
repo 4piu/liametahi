@@ -1,5 +1,7 @@
 """Tests for `liametahi.cli` (spec §9)."""
 
+import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -7,7 +9,7 @@ from typer.testing import CliRunner
 
 from liametahi import runner as runner_mod
 from liametahi import state
-from liametahi.cli import app
+from liametahi.cli import _handle_termination, app
 from liametahi.config import load_config
 from liametahi.locks import task_lock
 from tests.conftest import make_config_dict, write_config
@@ -262,6 +264,23 @@ def test_acceptance_09_wait_times_out_and_still_exits_5(
         )
 
     assert result.exit_code == 5, result.output
+
+
+def test_handle_termination_turns_sigterm_into_keyboard_interrupt() -> None:
+    """spec §10: SIGTERM must reach `runner.py` as the same
+    `KeyboardInterrupt` Python already raises for SIGINT (Ctrl+C)."""
+    with pytest.raises(KeyboardInterrupt), _handle_termination():
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def test_handle_termination_restores_the_previous_sigterm_handler() -> None:
+    original = signal.getsignal(signal.SIGTERM)
+    try:
+        with pytest.raises(KeyboardInterrupt), _handle_termination():
+            os.kill(os.getpid(), signal.SIGTERM)
+        assert signal.getsignal(signal.SIGTERM) is original
+    finally:
+        signal.signal(signal.SIGTERM, original)
 
 
 def _run_count(cfg: object) -> int:

@@ -13,13 +13,17 @@ Exit codes (spec §9):
     0  success
     1  runtime or partial failure
     2  bad invocation or configuration
-    3  reserved
+    3  interrupted (SIGINT/SIGTERM)
     4  authentication failure
     5  task already running
 """
 
 import os
+import signal
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from types import FrameType
 from typing import Annotated
 
 import platformdirs
@@ -34,6 +38,7 @@ from liametahi.logging import configure_logging, enable_verbose, register_secret
 EXIT_SUCCESS = 0
 EXIT_RUNTIME_FAILURE = 1
 EXIT_BAD_CONFIG = 2
+EXIT_INTERRUPTED = 3
 EXIT_AUTH_FAILURE = 4
 EXIT_TASK_RUNNING = 5
 
@@ -43,6 +48,26 @@ EXIT_TASK_RUNNING = 5
 DEFAULT_CONFIG_PATH = (
     platformdirs.user_config_path("liametahi", appauthor=False) / "config.yaml"
 )
+
+
+def _raise_keyboard_interrupt(signum: int, frame: FrameType | None) -> None:
+    raise KeyboardInterrupt
+
+
+@contextmanager
+def _handle_termination() -> Iterator[None]:
+    """Make SIGTERM raise the same `KeyboardInterrupt` Python already
+    raises for SIGINT (Ctrl+C), so `runner.py` has exactly one signal to
+    catch and finish the run gracefully with (spec §10: exit code 3).
+    Scoped to `run` alone and restored on exit, since `signal.signal` is
+    process-global and this same process handles every CLI invocation in
+    a test run.
+    """
+    previous = signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def _resolve_config_path(supplied: Path | None) -> Path:
@@ -175,6 +200,11 @@ def run(
     to `debug` for low-level per-call detail on top of that, and also
     controls how detailed the final report is.
 
+    SIGINT (Ctrl+C) and SIGTERM both interrupt gracefully: the task lock
+    is released either way, but a signal caught mid-run also finishes the
+    run with a proper stored report and exit code 3, rather than aborting
+    silently and leaving the run row looking perpetually in-progress.
+
     A report is always produced and stored, including for a dry run and
     for a failed run.
     """
@@ -186,16 +216,17 @@ def run(
     if verbose:
         enable_verbose()
 
-    outcome = runner.run_task(
-        config=cfg,
-        config_path=path,
-        task_name=task,
-        dry_run=dry_run,
-        fail_fast=fail_fast,
-        reevaluate=reevaluate,
-        wait_seconds=wait,
-        on_run_created=lambda run_id: typer.echo(f"run {run_id} started"),
-    )
+    with _handle_termination():
+        outcome = runner.run_task(
+            config=cfg,
+            config_path=path,
+            task_name=task,
+            dry_run=dry_run,
+            fail_fast=fail_fast,
+            reevaluate=reevaluate,
+            wait_seconds=wait,
+            on_run_created=lambda run_id: typer.echo(f"run {run_id} started"),
+        )
 
     # spec §10: a lock-contended run writes one line to stderr and no
     # report at all, so there is nothing to render.
