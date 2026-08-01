@@ -36,7 +36,10 @@ from liametahi.backup import (
 )
 from liametahi.domain import MessageKey
 from liametahi.domain import fingerprint as compute_fingerprint
+from liametahi.logging import get_logger
 from liametahi.policy import ResolvedAction
+
+logger = get_logger(__name__)
 
 ItemStatus = Literal[
     "completed",
@@ -166,6 +169,9 @@ def _execute_one(
     # held by a different live run is never stolen.
     claimed = state.claim_key(conn, key=item.key, run_id=run_id)
     if not claimed:
+        logger.debug(
+            "run %s: %s claimed by another run; skipping", run_id, item.key.render()
+        )
         result_id = state.insert_result_item(
             conn,
             run_id=run_id,
@@ -180,6 +186,12 @@ def _execute_one(
             conn, mailbox, key=item.key, expected_fingerprint=item.fingerprint
         )
         if verdict != "ok":
+            logger.debug(
+                "run %s: %s re-verify: %s; skipping",
+                run_id,
+                item.key.render(),
+                verdict,
+            )
             result_id = state.insert_result_item(
                 conn,
                 run_id=run_id,
@@ -330,6 +342,13 @@ def _run_action_sequence(
         state.update_action_attempt_state(
             conn, attempt_id=attempt_id, state="in_flight"
         )
+        logger.debug(
+            "run %s: %s %s (rule %s)",
+            run_id,
+            action.action,
+            item.key.render(),
+            item.winning_rule,
+        )
 
         if action.kind == "backup":
             try:
@@ -355,6 +374,9 @@ def _run_action_sequence(
                     finished=True,
                 )
                 aborted, final_status, error = True, "failed", str(exc)
+                logger.debug(
+                    "run %s: backup failed for %s: %s", run_id, item.key.render(), exc
+                )
                 continue
             state.update_action_attempt_state(
                 conn,
@@ -364,6 +386,12 @@ def _run_action_sequence(
                 finished=True,
             )
             backup_completed = True
+            logger.debug(
+                "run %s: backup completed backup_id=%s for %s",
+                run_id,
+                result.backup_id,
+                item.key.render(),
+            )
             continue
 
         # A remote mutation: trash, move_to, or label.
@@ -415,10 +443,25 @@ def _run_action_sequence(
                     finished=True,
                 )
                 aborted, final_status, error = True, "failed", str(exc)
+            logger.debug(
+                "run %s: %s %s for %s: %s",
+                run_id,
+                action.action,
+                final_status,
+                item.key.render(),
+                exc,
+            )
             continue
 
         state.update_action_attempt_state(
             conn, attempt_id=attempt_id, state="completed", finished=True
+        )
+        logger.debug(
+            "run %s: %s completed for %s -> %s",
+            run_id,
+            action.action,
+            item.key.render(),
+            destination,
         )
 
     return final_status, error

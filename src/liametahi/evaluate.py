@@ -58,6 +58,9 @@ from liametahi.classifier import (
 )
 from liametahi.config import ModelConfig, RuleConfig, TaskConfig
 from liametahi.domain import Candidate
+from liametahi.logging import get_logger
+
+logger = get_logger(__name__)
 
 #: Cap on a model-reported `reason`, written to the audit table only and
 #: never read by policy (spec §5.3).
@@ -256,7 +259,22 @@ def evaluate_candidates(
 
     stats = _BatchStats(llm_calls=0)
     if llm_items:
-        for batch in _group_into_batches(llm_items, batch_size=model_config.batch_size):
+        batches = _group_into_batches(llm_items, batch_size=model_config.batch_size)
+        total_batches = len(batches)
+        logger.info(
+            "run %s: %d candidate(s) need an LLM call, in %d batch(es)",
+            run_id,
+            len(llm_items),
+            total_batches,
+        )
+        for index, batch in enumerate(batches, start=1):
+            logger.info(
+                "run %s: classifying batch %d/%d (%d candidate(s))",
+                run_id,
+                index,
+                total_batches,
+                len(batch),
+            )
             batch_stats = _classify_batch(
                 conn,
                 batch,
@@ -266,6 +284,7 @@ def evaluate_candidates(
                 account_id=account_id,
                 model_id=model_id,
                 per_candidate=per_candidate,
+                batch_label=f"{index}/{total_batches}",
             )
             stats = _combine_stats(stats, batch_stats)
 
@@ -357,6 +376,7 @@ def _classify_batch(
     model_id: str,
     per_candidate: dict[int, CandidateResult],
     allow_retry: bool = True,
+    batch_label: str = "1/1",
 ) -> _BatchStats:
     """Classify one batch. If the response is unparseable or wholly
     invalid (spec §5.4 point 2), split the batch in half and retry each
@@ -374,12 +394,38 @@ def _classify_batch(
     except Exception as exc:  # noqa: BLE001 - explicit recorded outcome below
         wholly_invalid = True
         failure_reason = f"classifier raised {type(exc).__name__}: {exc}"
+        logger.debug(
+            "run %s: batch %s: classify() raised %s",
+            run_id,
+            batch_label,
+            failure_reason,
+        )
     else:
         outcome = completed
         wholly_invalid = len(completed.results) == 0
         failure_reason = "unparseable or wholly invalid model response"
+        logger.debug(
+            "run %s: batch %s: structured_output=%s latency_ms=%s "
+            "input_tokens=%s output_tokens=%s valid=%d invalid=%d missing=%d",
+            run_id,
+            batch_label,
+            outcome.structured_output_level,
+            outcome.latency_ms,
+            outcome.input_tokens,
+            outcome.output_tokens,
+            len(outcome.results),
+            len(outcome.invalid),
+            len(outcome.missing),
+        )
 
     if wholly_invalid and allow_retry and len(items) > 1:
+        logger.debug(
+            "run %s: batch %s wholly invalid (%s); splitting %d item(s) and retrying",
+            run_id,
+            batch_label,
+            failure_reason,
+            len(items),
+        )
         midpoint = len(items) // 2
         left = _classify_batch(
             conn,
@@ -391,6 +437,7 @@ def _classify_batch(
             model_id=model_id,
             per_candidate=per_candidate,
             allow_retry=False,
+            batch_label=f"{batch_label} (retry 1/2)",
         )
         right = _classify_batch(
             conn,
@@ -402,6 +449,7 @@ def _classify_batch(
             model_id=model_id,
             per_candidate=per_candidate,
             allow_retry=False,
+            batch_label=f"{batch_label} (retry 2/2)",
         )
         return _combine_stats(left, right)
 

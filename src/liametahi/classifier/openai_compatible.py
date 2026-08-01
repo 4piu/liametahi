@@ -25,12 +25,15 @@ import httpx
 
 from liametahi.classifier import CandidatePayload, ClassifyOutcome, OfferedRule
 from liametahi.config import ModelConfig
+from liametahi.logging import get_logger
 from liametahi.prompt import (
     RESPONSE_JSON_SCHEMA,
     SYSTEM_PROMPT,
     build_request_payload,
     parse_classification_response,
 )
+
+logger = get_logger(__name__)
 
 #: A JSON response is small; this bounds runaway generation without
 #: needing a dedicated config knob (the spec does not define one).
@@ -101,6 +104,7 @@ class OpenAICompatibleClassifier:
                 response = self._post_with_retry(body)
             except TransportError as exc:
                 last_error = exc
+                logger.debug("classify: structured_output=%s: %s", level, exc)
                 continue
             latency_ms = int((time.monotonic() - start) * 1000)
 
@@ -111,12 +115,27 @@ class OpenAICompatibleClassifier:
                     f"HTTP {response.status_code} at structured_output={level}: "
                     f"{response.text[:200]}"
                 )
+                logger.debug(
+                    "classify: structured_output=%s rejected: HTTP %d in %dms",
+                    level,
+                    response.status_code,
+                    latency_ms,
+                )
                 continue
 
             data = response.json()
             content = _extract_content(data)
             input_tokens, output_tokens = _extract_usage(data)
             parsed = parse_classification_response(content, requested_ids)
+            logger.debug(
+                "classify: structured_output=%s accepted: HTTP %d in %dms "
+                "(input_tokens=%s output_tokens=%s)",
+                level,
+                response.status_code,
+                latency_ms,
+                input_tokens,
+                output_tokens,
+            )
             return ClassifyOutcome(
                 results=parsed.results,
                 invalid=parsed.invalid,
@@ -145,11 +164,17 @@ class OpenAICompatibleClassifier:
         caller above, not retried here)."""
         attempts = self._config.max_retries + 1
         last_exc: Exception | None = None
-        for _ in range(attempts):
+        for attempt in range(1, attempts + 1):
             try:
                 return self._client.post(self._endpoint_url, json=body)
             except httpx.TransportError as exc:
                 last_exc = exc
+                logger.debug(
+                    "classify: transport attempt %d/%d failed: %s",
+                    attempt,
+                    attempts,
+                    exc,
+                )
                 continue
         assert last_exc is not None
         raise TransportError(str(last_exc)) from last_exc

@@ -123,3 +123,13 @@ def configure_logging(
 
 def get_logger(logger_name: str = "liametahi") -> logging.Logger:
     return logging.getLogger(logger_name)
+
+
+def enable_verbose(logger_name: str = "liametahi") -> None:
+    """Escalate the already-configured logger to `debug` for this
+    invocation only (`run --verbose`), without touching its handlers.
+    Low-level per-call detail (retry attempts, per-item action results,
+    ...) is logged at `debug` precisely so it stays silent unless this
+    is called; high-level phase/batch progress is logged at `info` and
+    is visible regardless."""
+    logging.getLogger(logger_name).setLevel(logging.DEBUG)

@@ -29,7 +29,7 @@ from liametahi import backup as backup_mod
 from liametahi import report as report_mod
 from liametahi import runner, state
 from liametahi.config import Config, ConfigError, load_config
-from liametahi.logging import configure_logging, register_secret
+from liametahi.logging import configure_logging, enable_verbose, register_secret
 
 EXIT_SUCCESS = 0
 EXIT_RUNTIME_FAILURE = 1
@@ -157,9 +157,23 @@ def run(
         ),
     ] = 0.0,
     format_: Annotated[str, typer.Option("--format", help="table|json")] = "table",
-    verbose: Annotated[bool, typer.Option("--verbose")] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            help=(
+                "Detailed report output, and low-level per-call progress "
+                "logging (retries, per-batch/per-item detail) during the run"
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Evaluate and, unless `--dry-run`, act on a task's mailbox (spec §4).
+
+    High-level phase/batch progress is logged at `info` regardless of
+    `--verbose` (scan/evaluate/execute boundaries); `--verbose` escalates
+    to `debug` for low-level per-call detail on top of that, and also
+    controls how detailed the final report is.
 
     A report is always produced and stored, including for a dry run and
     for a failed run.
@@ -169,6 +183,8 @@ def run(
         raise typer.Exit(code=EXIT_BAD_CONFIG)
 
     cfg, path = _load(config)
+    if verbose:
+        enable_verbose()
 
     outcome = runner.run_task(
         config=cfg,

@@ -40,6 +40,7 @@ import json
 import re
 import sqlite3
 import ssl
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -348,6 +349,7 @@ def _run_phases(
     rule_order = {rule.id: index for index, rule in enumerate(task.rules)}
 
     # --- Phase 1: scan (spec §4.1) + reconcile (spec §4.0) -------------
+    logger.info("run %s: connecting to account %s", run_id, task.account)
     scan_mailbox = _connect(mailbox_factory, account_cfg)
     try:
         reconcile_summary = execute.reconcile_task(
@@ -359,6 +361,9 @@ def _run_phases(
                 run_id,
                 reconcile_summary.rows_closed,
             )
+        logger.info(
+            "run %s: scanning %s", run_id, ", ".join(task.source_mailboxes)
+        )
         scan_result = scan(
             scan_mailbox,
             conn,
@@ -366,6 +371,25 @@ def _run_phases(
             source_mailboxes=task.source_mailboxes,
             fetch_headers=task.fetch_headers,
             max_candidates_per_run=task.max_candidates_per_run,
+        )
+        for mailbox_result in scan_result.mailboxes:
+            logger.debug(
+                "run %s: %s: %d new, %d re-identified (uidvalidity=%s%s)",
+                run_id,
+                mailbox_result.mailbox,
+                mailbox_result.new_candidates,
+                mailbox_result.reidentified_candidates,
+                mailbox_result.uidvalidity,
+                ", changed" if mailbox_result.uidvalidity_changed else "",
+            )
+        capped_note = (
+            " (stopped at max_candidates_per_run)" if scan_result.stopped_at_cap else ""
+        )
+        logger.info(
+            "run %s: scan complete: %d candidate(s)%s",
+            run_id,
+            scan_result.candidates_scanned,
+            capped_note,
         )
     finally:
         _close_mailbox(scan_mailbox)
@@ -390,6 +414,12 @@ def _run_phases(
         else:
             eligible.append((candidate_id, candidate))
 
+    logger.info(
+        "run %s: evaluating %d candidate(s) (%d protected, excluded)",
+        run_id,
+        len(eligible),
+        len(protected_ids),
+    )
     classifier = classifier_factory(model_cfg)
     evaluate_outcome = evaluate.evaluate_candidates(
         conn,
@@ -402,6 +432,14 @@ def _run_phases(
         candidates=eligible,
         now=now,
         reevaluate=reevaluate,
+    )
+    logger.info(
+        "run %s: evaluate complete: %d LLM call(s)%s",
+        run_id,
+        evaluate_outcome.llm_calls,
+        f" (structured_output={evaluate_outcome.structured_output_level})"
+        if evaluate_outcome.structured_output_level
+        else "",
     )
     candidates_by_id = dict(eligible)
     results_by_id = {r.candidate_id: r for r in evaluate_outcome.results}
@@ -471,6 +509,7 @@ def _run_phases(
             shadowed_by_candidate[candidate_id] = decision.shadowed
 
     # --- Phase 3: execute (spec §4.3) -----------------------------------
+    logger.info("run %s: executing %d item(s)", run_id, len(execution_items))
     exec_mailbox = _connect(mailbox_factory, account_cfg)
     try:
         execution_items = _drop_unsupported_for_dry_run(
@@ -492,6 +531,21 @@ def _run_phases(
         )
     finally:
         _close_mailbox(exec_mailbox)
+
+    status_counts = Counter(outcome.status for outcome in execute_summary.outcomes)
+    status_note = ", ".join(
+        f"{count} {status}" for status, count in sorted(status_counts.items())
+    )
+    stopped_note = (
+        " [stopped early: --fail-fast]" if execute_summary.stopped_early else ""
+    )
+    logger.info(
+        "run %s: execute complete: %d action(s) performed (%s)%s",
+        run_id,
+        execute_summary.actions_performed,
+        status_note,
+        stopped_note,
+    )
 
     for outcome in execute_summary.outcomes:
         shadowed = shadowed_by_candidate.get(outcome.candidate_id)

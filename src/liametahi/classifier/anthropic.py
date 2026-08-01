@@ -27,12 +27,15 @@ import anthropic
 
 from liametahi.classifier import CandidatePayload, ClassifyOutcome, OfferedRule
 from liametahi.config import ModelConfig
+from liametahi.logging import get_logger
 from liametahi.prompt import (
     RESPONSE_JSON_SCHEMA,
     SYSTEM_PROMPT,
     build_request_payload,
     parse_classification_response,
 )
+
+logger = get_logger(__name__)
 
 _MAX_TOKENS = 4096
 
@@ -92,6 +95,7 @@ class AnthropicClassifier:
             # The provider rejected structured output for this model;
             # degrade to an unstructured request (spec §8.1's ladder,
             # applied to the one structured level Anthropic offers).
+            logger.debug("classify: structured_output=json_schema rejected: %s", exc)
             try:
                 message = self._create(user_content, with_schema=False)
                 level = "none"
@@ -104,6 +108,14 @@ class AnthropicClassifier:
         content = _extract_text(message)
         input_tokens, output_tokens = _extract_usage(message)
         parsed = parse_classification_response(content, requested_ids)
+        logger.debug(
+            "classify: structured_output=%s accepted in %dms "
+            "(input_tokens=%s output_tokens=%s)",
+            level,
+            latency_ms,
+            input_tokens,
+            output_tokens,
+        )
         return ClassifyOutcome(
             results=parsed.results,
             invalid=parsed.invalid,
