@@ -97,7 +97,7 @@ def _run_one_matched_item(
         items=[item],
         run_id=run_id,
         backup_dir=tmp_path / "backups",
-        max_actions_per_run=50,
+        max_actions=50,
         dry_run=False,
         fail_fast=False,
     )

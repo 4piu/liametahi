@@ -233,6 +233,8 @@ def evaluate_candidates(
                     rule_id=rule_id,
                     rule_text_hash=rule_text_hash,
                     input_hash=built.input_hash,
+                    model_id=model_id,
+                    prompt_version=prompt.PROMPT_VERSION,
                 )
                 if cached is not None:
                     cache_hit = True
@@ -266,7 +268,9 @@ def evaluate_candidates(
 
     stats = _BatchStats(llm_calls=0)
     if llm_items:
-        batches = _group_into_batches(llm_items, batch_size=model_config.batch_size)
+        batches = _group_into_batches(
+            llm_items, batch_size=model_config.mails_per_request
+        )
         total_batches = len(batches)
         logger.info(
             "run %s: %d candidate(s) need an LLM call, in %d batch(es)",
@@ -746,6 +750,7 @@ def _resolve_item(
                 rule_text_hash=rule_text_hash,
                 input_hash=item.input_hash,
                 model_id=model_id,
+                prompt_version=prompt.PROMPT_VERSION,
                 matched=rule_id in seen_rule_ids,
             )
 

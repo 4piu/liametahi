@@ -102,6 +102,8 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
             rule_id="stale-updates",
             rule_text_hash=rule_text_hash_v1,
             input_hash=result_1.input_hash,
+            model_id="mi",
+            prompt_version=1,
         )
         is not None
     )
@@ -186,6 +188,8 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
         rule_id="stale-updates",
         rule_text_hash=rule_text_hash_v2,
         input_hash=result_4.input_hash,
+        model_id="mi",
+        prompt_version=1,
     )
     assert cached_match is not None
     assert cached_match["matched"] is True

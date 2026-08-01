@@ -139,7 +139,7 @@ def test_vanished_message_reported_and_not_mutated(tmp_path: Path) -> None:
             items=[item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -169,7 +169,7 @@ def test_vanished_reverify_retires_candidate(tmp_path: Path) -> None:
             items=[item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -209,7 +209,7 @@ def test_protected_flag_added_since_scan_blocks_mutation(tmp_path: Path) -> None
             items=[item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
             protected_flags=["\\Flagged"],
@@ -243,7 +243,7 @@ def test_protect_unread_added_since_scan_blocks_mutation(tmp_path: Path) -> None
             items=[item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
             protected_flags=[],
@@ -276,7 +276,7 @@ def test_protected_flags_default_to_nothing_protected(tmp_path: Path) -> None:
             items=[item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -304,7 +304,7 @@ def test_completed_move_retires_candidate(tmp_path: Path) -> None:
             items=[item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -339,7 +339,7 @@ def test_completed_label_does_not_retire_candidate(tmp_path: Path) -> None:
             items=[item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -370,7 +370,7 @@ def test_uidvalidity_change_reported_as_changed(tmp_path: Path) -> None:
             items=[item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -404,7 +404,7 @@ def test_content_changed_since_scan_reported_as_changed(tmp_path: Path) -> None:
             items=[stale_item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -434,7 +434,7 @@ def test_unsupported_capability_reported_and_not_mutated(tmp_path: Path) -> None
             items=[item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -465,7 +465,7 @@ def test_label_unsupported_when_no_custom_keywords(tmp_path: Path) -> None:
             items=[item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -474,7 +474,7 @@ def test_label_unsupported_when_no_custom_keywords(tmp_path: Path) -> None:
         state.close_database(conn)
 
 
-def test_max_actions_per_run_caps_remaining_items(tmp_path: Path) -> None:
+def test_max_actions_caps_remaining_items(tmp_path: Path) -> None:
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
         account_id = state.upsert_account(conn, name="a", host="h", username="u")
@@ -545,7 +545,7 @@ def test_max_actions_per_run_caps_remaining_items(tmp_path: Path) -> None:
             items=items,
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=2,
+            max_actions=2,
             dry_run=False,
             fail_fast=False,
         )
@@ -556,8 +556,8 @@ def test_max_actions_per_run_caps_remaining_items(tmp_path: Path) -> None:
         state.close_database(conn)
 
 
-def test_max_actions_per_run_none_means_uncapped(tmp_path: Path) -> None:
-    """spec §6: an unset `max_actions_per_run` (`None`) means no cap at
+def test_max_actions_none_means_uncapped(tmp_path: Path) -> None:
+    """spec §6: an unset `max_actions` (`None`) means no cap at
     all -- every item must run, none reported `capped`."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
@@ -625,7 +625,7 @@ def test_max_actions_per_run_none_means_uncapped(tmp_path: Path) -> None:
             items=items,
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=None,
+            max_actions=None,
             dry_run=False,
             fail_fast=False,
         )
@@ -667,7 +667,7 @@ def test_fail_fast_stops_remaining_items_on_failure(tmp_path: Path) -> None:
             items=[failing_item, second_item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=True,
         )
@@ -734,7 +734,7 @@ def test_failure_without_fail_fast_continues_to_next_item(tmp_path: Path) -> Non
             items=[failing_item, second_item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )

@@ -53,12 +53,12 @@ read, test, and audit.
   runs, `protect.flags`/`protect.unread` are re-checked against freshly
   re-fetched flags — so flagging a message important from your phone after
   Liametahi already scanned it still stops it from being trashed.
-- **A message is never re-actioned once it's truly gone.** A candidate whose
-  message was actually moved (`trash`/`move_to`) or confirmed gone from the
+- **A message is never re-actioned once it's truly gone.** A tracked message
+  that was actually moved (`trash`/`move_to`) or confirmed gone from the
   server is retired and excluded from every later run — it doesn't keep
   coming back to burn a claim-and-re-verify round trip forever. A completed
-  `label` never retires a candidate, since the message is still there and
-  may match something else later.
+  `label` never retires it, since the message is still there and may match
+  something else later.
 - **Restoring a trashed message is respected, not silently undone.** The
   decision cache is keyed to survive a message being moved (so a failed
   trash can retry cheaply on the next run), but that also means it survives
@@ -192,7 +192,6 @@ default.
 | `task_lock_dir` | Directory for per-task advisory lock files | `<platform data dir>/liametahi/locks` |
 | `log_file` | Also write logs here, in addition to stderr | none (stderr only) |
 | `log_level` | `debug` / `info` / `warning` / `error` | `info` |
-| `candidate_retention_days` | Days before pruned candidates' content (not the row itself) is purged | `90` |
 
 ### `accounts.<name>`
 
@@ -215,12 +214,11 @@ default.
 | `api_key` | Required for `anthropic`; optional for a local `openai_compatible` server | none |
 | `extra_headers` | Extra HTTP headers merged into every request | `{}` |
 | `structured_output` | `auto` / `json_schema` / `json_object` / `none` | `auto` |
-| `batch_size` | Candidates per classification call, range 1–25 | `10` |
+| `mails_per_request` | Messages sent to the model per classification call. No upper bound is enforced, but large batches measurably degrade small local models | `10` |
 | `timeout_seconds` | Per-request HTTP timeout | `45` |
 | `max_retries` | Transport-error retries — never a rejected response | `2` |
-| `content_escalation.format` | Excerpt format offered on escalation | `plain_text_excerpt` |
-| `content_escalation.max_chars` | Excerpt length cap | `2000` |
-| `content_escalation.max_messages_per_run` | Caps how many candidates get an excerpt fetch in one run — see [Content escalation](#content-escalation) | `20` |
+| `body_excerpt.format` | Excerpt format offered on escalation | `plain_text_excerpt` |
+| `body_excerpt.max_chars` | Truncate each body excerpt to this many characters | none (no limit) |
 
 An OpenRouter endpoint is `provider: openai_compatible` with
 `base_url: https://openrouter.ai/api/v1/chat/completions` and `model` set to
@@ -237,8 +235,8 @@ OpenRouter's namespaced id (`vendor/model`). OpenRouter also accepts optional
 | `protect.flags` | IMAP flags that exempt a message — see [Safety model](#safety-model) | `[]` (nothing protected) |
 | `protect.senders` | Sender globs that exempt a message | `[]` |
 | `protect.unread` | Exempt unread messages | `false` |
-| `max_candidates_per_run` | Caps one run's scan; unset scans every eligible candidate in one pass | none (uncapped) |
-| `max_actions_per_run` | Caps one run's mutations | none (uncapped) |
+| `max_new_mails` | Stop after fetching this many *not-yet-seen* messages from the server in one run. Does not limit how many known messages are re-checked | none (no limit) |
+| `max_actions` | Caps one run's mutations | none (uncapped) |
 | `rules` * | Non-empty list — see below | — |
 
 ### `tasks.<name>.rules[]`
@@ -249,7 +247,7 @@ OpenRouter's namespaced id (`vendor/model`). OpenRouter also accepts optional
 | `when` * | A condition tree — see [Rule conditions](#rule-conditions) below | — |
 | `actions` * | Non-empty ordered list: `backup`, `trash`, `move_to:<mailbox>`, `label:<keyword>` | — |
 | `priority` | Higher wins when more than one rule matches the same message (ties break by declaration order — earlier wins) | `0` |
-| `allow_content_escalation` | Let this rule's `llm` condition trigger the bounded body-excerpt second pass (see [Content escalation](#content-escalation)) when the model reports it's unsure | `false` |
+| `allow_body_excerpt` | Let this rule's `llm` condition trigger the bounded body-excerpt second pass (see [Reading the message body](#reading-the-message-body)) when the model reports it's unsure | `false` |
 | `allow_trash_without_backup` | Required if `trash` appears with no preceding `backup` in the same action list — see [Safety model](#safety-model) | `false` |
 
 ### Rule conditions
@@ -361,14 +359,16 @@ model answers "does X apply," not an arbitrary boolean expression.
 rule matches a message, the rule with the highest `priority` wins (ties
 broken by config order); the rest are reported `shadowed`, not run.
 
-### Content escalation
+### Reading the message body
 
 By default, the model only ever sees message metadata (headers, sizes,
-flags) — never the body. If a rule sets `allow_content_escalation: true` and
+flags) — never the body. If a rule sets `allow_body_excerpt: true` and
 the model reports it's unsure, a bounded plain-text excerpt of the body is
 fetched once and the message is re-classified. Off by default; turn it on
-per-rule, and cap the blast radius with
-`models.<name>.content_escalation.max_messages_per_run`.
+per-rule with `allow_body_excerpt: true`. Bear in mind this is the only
+path where message *bodies* reach the model, and that each escalation is
+its own un-batched model call plus a full-message fetch — so enable it on
+the rules that need it, not everywhere.
 
 ### Re-running and the decision cache
 
@@ -384,11 +384,11 @@ bypasses the cache entirely and forces a fresh pass.
 The cache is keyed to survive a message moving, which is exactly what makes
 it survive a *restore* too: if you move a trashed message back to a source
 mailbox, it re-scans under a new UID and can hit the same cached "yes".
-Liametahi checks for this — a candidate whose fingerprint already has a
+Liametahi checks for this — a message whose fingerprint already has a
 completed trash/move from a previous run is skipped, never silently
 re-trashed. The skip is recorded as a quiet `restored` result item (visible
 with `report --verbose`, absent from default output) and retires the
-candidate, so a given message is skipped once and then dropped from
+message, so it is skipped once and then dropped from
 consideration entirely rather than re-reported on every future run. There is
 currently no flag to force Liametahi to re-trash a message you've restored on
 purpose; delete its old `action_attempts` history from the state database, or

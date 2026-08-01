@@ -23,7 +23,7 @@ override them:
   *requirement* is decided here, once, from configuration -- the execute
   phase never re-derives it from a rule.
 
-The run-wide action cap (`max_actions_per_run`) is the third guardrail
+The run-wide action cap (`max_actions`) is the third guardrail
 the specification names, but it is inherently a cross-candidate,
 stateful concern (how many messages this run has already mutated), so
 it is enforced by the execute phase, not here. It is opt-in: a task with

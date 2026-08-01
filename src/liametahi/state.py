@@ -26,7 +26,7 @@ from typing import Any
 from liametahi.domain import Candidate, MessageKey
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
-_LATEST_SCHEMA_VERSION = 3
+_LATEST_SCHEMA_VERSION = 4
 
 _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
@@ -352,34 +352,6 @@ def find_candidates_by_fingerprint(
     return [(int(row["candidate_id"]), _row_to_candidate(row)) for row in rows]
 
 
-def prune_candidate_content(conn: sqlite3.Connection, *, before: str) -> int:
-    """Null prunable candidate content fields for **retired** candidates
-    first seen before `before` (ISO-8601 UTC). Never deletes rows (spec
-    §11).
-
-    Restricted to retired rows (sync-fix-brief Fix, Finding 4): while a
-    candidate is still live its content is still sitting in the user's
-    mailbox anyway, so pruning our copy buys little privacy while
-    actively corrupting classification input -- a still-live candidate
-    past `candidate_retention_days` would otherwise get its content
-    nulled, changing `input_hash` and forcing a cache miss that re-sends
-    an effectively blank payload to the model. See the final report for
-    the full rationale.
-    """
-    cur = conn.execute(
-        """
-        UPDATE candidates SET
-            from_address = NULL, from_display = NULL, recipients = NULL,
-            subject = NULL, list_id = NULL, auth_results = NULL,
-            content_pruned_at = ?
-        WHERE first_seen_at < ? AND content_pruned_at IS NULL
-          AND retired_at IS NOT NULL
-        """,
-        (_iso_now(), before),
-    )
-    return cur.rowcount
-
-
 def update_candidate_flags(
     conn: sqlite3.Connection,
     *,
@@ -653,14 +625,24 @@ def get_cached_decision(
     rule_id: str,
     rule_text_hash: str,
     input_hash: str,
+    model_id: str,
+    prompt_version: int,
 ) -> Mapping[str, Any] | None:
     row = conn.execute(
         """
         SELECT model_id, decided_at, matched FROM llm_decision_cache
         WHERE account_id=? AND fingerprint=? AND rule_id=? AND rule_text_hash=?
-          AND input_hash=?
+          AND input_hash=? AND model_id=? AND prompt_version=?
         """,
-        (account_id, fingerprint, rule_id, rule_text_hash, input_hash),
+        (
+            account_id,
+            fingerprint,
+            rule_id,
+            rule_text_hash,
+            input_hash,
+            model_id,
+            prompt_version,
+        ),
     ).fetchone()
     if row is None:
         return None
@@ -680,17 +662,18 @@ def record_decision(
     rule_text_hash: str,
     input_hash: str,
     model_id: str,
+    prompt_version: int,
     matched: bool,
 ) -> None:
     conn.execute(
         """
         INSERT INTO llm_decision_cache (
             account_id, fingerprint, rule_id, rule_text_hash, input_hash,
-            model_id, decided_at, matched
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (account_id, fingerprint, rule_id, rule_text_hash, input_hash)
+            model_id, prompt_version, decided_at, matched
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (account_id, fingerprint, rule_id, rule_text_hash, input_hash,
+                     model_id, prompt_version)
         DO UPDATE SET
-            model_id = excluded.model_id,
             decided_at = excluded.decided_at,
             matched = excluded.matched
         """,
@@ -701,6 +684,7 @@ def record_decision(
             rule_text_hash,
             input_hash,
             model_id,
+            prompt_version,
             _iso_now(),
             int(matched),
         ),

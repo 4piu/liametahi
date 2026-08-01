@@ -37,7 +37,7 @@ def _model_config(**overrides: object) -> ModelConfig:
         "provider": "openai_compatible",
         "base_url": "http://local",
         "model": "m",
-        "batch_size": 10,
+        "mails_per_request": 10,
     }
     base.update(overrides)
     return ModelConfig.model_validate(base)
@@ -458,6 +458,8 @@ def test_needs_content_does_not_cache_a_negative_decision(tmp_path: Path) -> Non
         rule_id="rule-a",
         rule_text_hash=evaluate._rule_text_hash(task.rules[0]),
         input_hash=_require_input_hash(result),
+        model_id="mi",
+        prompt_version=1,
     )
     assert cached is None
 
@@ -511,6 +513,8 @@ def test_acceptance_04_unsure_classification_is_a_no_op_and_caches_nothing(
             rule_id=rule_id,
             rule_text_hash=evaluate._rule_text_hash(rule),
             input_hash=_require_input_hash(result),
+            model_id="mi",
+            prompt_version=1,
         )
         assert cached is None, f"{rule_id} must not be cached from an unsure item"
 
@@ -548,6 +552,8 @@ def test_accepted_match_is_cached(tmp_path: Path) -> None:
         rule_id="rule-a",
         rule_text_hash=evaluate._rule_text_hash(task.rules[0]),
         input_hash=_require_input_hash(result),
+        model_id="mi",
+        prompt_version=1,
     )
     assert cached is not None
     assert cached["matched"] is True
@@ -585,6 +591,8 @@ def test_matched_and_unselected_rules_are_both_cached_correctly(
         rule_id="matched-rule",
         rule_text_hash=evaluate._rule_text_hash(task.rules[0]),
         input_hash=_require_input_hash(result),
+        model_id="mi",
+        prompt_version=1,
     )
     unselected_cached = state.get_cached_decision(
         conn,
@@ -593,6 +601,8 @@ def test_matched_and_unselected_rules_are_both_cached_correctly(
         rule_id="unselected-rule",
         rule_text_hash=evaluate._rule_text_hash(task.rules[1]),
         input_hash=_require_input_hash(result),
+        model_id="mi",
+        prompt_version=1,
     )
     assert matched_cached is not None
     assert matched_cached["matched"] is True
@@ -775,7 +785,7 @@ def test_batch_size_chunks_a_larger_group_into_multiple_calls(tmp_path: Path) ->
         task=task,
         classifier=fc,
         candidates=candidates,  # type: ignore[arg-type]
-        model_config=_model_config(batch_size=2),
+        model_config=_model_config(mails_per_request=2),
     )
     assert fc.call_count == 2
     assert len(outcome.results) == 3

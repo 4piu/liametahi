@@ -3,7 +3,7 @@
 Both are callables Unit 5's orchestrator sequences (contracts section 7:
 "Units 2-4 each expose their phase as a callable Unit 5 will sequence").
 This module owns claim-before-mutate, re-verify-before-mutate,
-backup-before-trash enforcement, the opt-in `max_actions_per_run` cap
+backup-before-trash enforcement, the opt-in `max_actions` cap
 (unset means uncapped, spec §6), and closing out `action_attempts` rows
 left non-terminal by a crashed previous run of the same task.
 
@@ -112,7 +112,7 @@ def execute_items(
     items: Sequence[ExecutionItem],
     run_id: str,
     backup_dir: Path,
-    max_actions_per_run: int | None,
+    max_actions: int | None,
     dry_run: bool,
     fail_fast: bool,
     protected_flags: Collection[str] = (),
@@ -120,7 +120,7 @@ def execute_items(
 ) -> ExecuteSummary:
     """spec section 4.3. `items` must already be in the order the caller
     wants the cap applied (spec section 4.1: oldest `INTERNALDATE`
-    first). `max_actions_per_run` is opt-in: `None` means no cap at all
+    first). `max_actions` is opt-in: `None` means no cap at all
     (spec §6) and the cap check below is skipped entirely. `dry_run`
     performs no claim, no mailbox call, and no mutation, but still
     applies the cap when one is configured and still records one
@@ -138,7 +138,7 @@ def execute_items(
     actions_done = 0
 
     for item in items:
-        if max_actions_per_run is not None and actions_done >= max_actions_per_run:
+        if max_actions is not None and actions_done >= max_actions:
             result_id = state.insert_result_item(
                 conn,
                 run_id=run_id,

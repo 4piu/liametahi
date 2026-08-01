@@ -88,14 +88,28 @@ def sanitize_text(value: str) -> str:
     return "".join(out)
 
 
-def _cap(value: str, max_len: int) -> tuple[str, bool]:
-    """Cap `value` to `max_len` characters. Returns `(capped, truncated)`."""
-    if len(value) <= max_len:
+def _cap(value: str, max_len: int | None) -> tuple[str, bool]:
+    """Cap `value` to `max_len` characters. Returns `(capped, truncated)`.
+
+    `max_len=None` means no limit -- used by the opt-in
+    `body_excerpt.max_chars`, which is unset by default. The internal
+    metadata caps (`SUBJECT_CAP` and friends) always pass an int: those
+    bound the prompt-injection surface and participate in `input_hash`,
+    so they are deliberately not user-tunable."""
+    if max_len is None or len(value) <= max_len:
         return value, False
     return value[:max_len], True
 
 
 # --- System prompt (spec §5.2) ------------------------------------------
+
+#: Bump whenever SYSTEM_PROMPT or RESPONSE_JSON_SCHEMA changes in a way
+#: that could change the model's answer. It is part of the §13 cache key,
+#: so bumping it invalidates every cached decision -- which is the point:
+#: a rule's own `llm` text is covered by `rule_text_hash`, but nothing
+#: covered the instructions wrapped around it.
+PROMPT_VERSION = 1
+
 
 SYSTEM_PROMPT = (
     "You are a mail-triage classifier for a personal mailbox cleanup tool. "
@@ -252,7 +266,7 @@ def build_excerpt_payload(
     payload_id: str,
     offered: Sequence[str],
     excerpt_text: str,
-    max_chars: int,
+    max_chars: int | None,
 ) -> BuiltPayload:
     """Build the excerpt-level escalation payload for one candidate
     (spec §5.1): the same fixed metadata fields plus a capped, sanitised

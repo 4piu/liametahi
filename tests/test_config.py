@@ -35,21 +35,21 @@ def test_valid_config_loads(config_path: Path) -> None:
     assert task.protect.unread is False
     assert task.protect.flags == []
     assert task.protect.senders == []
-    assert task.max_candidates_per_run is None  # unset means no cap (spec §6)
-    assert task.max_actions_per_run is None  # unset means no cap (spec §6)
+    assert task.max_new_mails is None  # unset means no cap (spec §6)
+    assert task.max_actions is None  # unset means no cap (spec §6)
 
 
-def test_explicit_max_actions_per_run_is_honoured(tmp_path: Path) -> None:
+def test_explicit_max_actions_is_honoured(tmp_path: Path) -> None:
     data = make_config_dict()
-    data["tasks"]["inbox-cleanup"]["max_actions_per_run"] = 5
+    data["tasks"]["inbox-cleanup"]["max_actions"] = 5
     path = write_config(tmp_path / "cfg.yaml", data)
     cfg = load_config(path)
-    assert cfg.tasks["inbox-cleanup"].max_actions_per_run == 5
+    assert cfg.tasks["inbox-cleanup"].max_actions == 5
 
 
-def test_max_actions_per_run_must_be_positive(tmp_path: Path) -> None:
+def test_max_actions_must_be_positive(tmp_path: Path) -> None:
     data = make_config_dict()
-    data["tasks"]["inbox-cleanup"]["max_actions_per_run"] = 0
+    data["tasks"]["inbox-cleanup"]["max_actions"] = 0
     path = write_config(tmp_path / "cfg.yaml", data)
     with pytest.raises(ConfigError):
         load_config(path)
@@ -74,7 +74,6 @@ def test_explicit_protect_block_is_honoured(tmp_path: Path) -> None:
 
 def test_settings_defaults_applied(config_path: Path) -> None:
     cfg = load_config(config_path)
-    assert cfg.settings.candidate_retention_days == 90
     assert str(cfg.settings.state_db).endswith("state.sqlite3")
     assert cfg.settings.log_level == "info"
 
@@ -101,7 +100,7 @@ def test_full_spec_example_config_loads(tmp_path: Path) -> None:
                     )
                 },
             ],
-            "allow_content_escalation": True,
+            "allow_body_excerpt": True,
             "actions": ["move_to:Archive"],
         },
         {
@@ -657,12 +656,18 @@ def test_anthropic_with_api_key_ok(tmp_path: Path) -> None:
     load_config(path)  # should not raise
 
 
-def test_batch_size_out_of_range_rejected(tmp_path: Path) -> None:
+def test_mails_per_request_has_no_upper_bound(tmp_path: Path) -> None:
+    """A large batch measurably degrades small local models, but that is
+    guidance for the README, not grounds for rejecting the config: an
+    implicit ceiling the user never wrote is exactly the kind of hidden
+    limit these keys were reworked to remove. Only <1 is refused."""
     data = make_config_dict()
-    data["models"]["local"]["batch_size"] = 30
-    path = write_config(tmp_path / "cfg.yaml", data)
+    data["models"]["local"]["mails_per_request"] = 200
+    load_config(write_config(tmp_path / "cfg.yaml", data))  # must not raise
+
+    data["models"]["local"]["mails_per_request"] = 0
     with pytest.raises(ConfigError):
-        load_config(path)
+        load_config(write_config(tmp_path / "cfg2.yaml", data))
 
 
 # --- Derived fetch-header list (spec §4.1) --------------------------------

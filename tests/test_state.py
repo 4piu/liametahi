@@ -58,7 +58,7 @@ def test_open_database_creates_all_tables(tmp_path: Path) -> None:
         version_row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 3
+        assert version_row["v"] == 4
     finally:
         state.close_database(conn)
 
@@ -70,7 +70,7 @@ def test_reopening_database_is_idempotent(tmp_path: Path) -> None:
     conn2 = state.open_database(db_path)  # must not re-run already-applied migrations
     try:
         count = conn2.execute("SELECT COUNT(*) AS c FROM schema_version").fetchone()
-        assert count["c"] == 3
+        assert count["c"] == 4
     finally:
         state.close_database(conn2)
 
@@ -88,7 +88,7 @@ def test_newer_schema_version_raises_clear_error(tmp_path: Path) -> None:
         state.open_database(db_path)
 
 
-def test_migration_0003_upgrades_v2_database_in_place(tmp_path: Path) -> None:
+def test_migrations_upgrade_a_v2_database_in_place(tmp_path: Path) -> None:
     """sync-fix-brief Deliverable 2: build a v2 database directly from
     the migration files (mirroring the ad-hoc check used for migration
     0002), open it through `state.open_database`, and confirm it lands
@@ -138,7 +138,7 @@ def test_migration_0003_upgrades_v2_database_in_place(tmp_path: Path) -> None:
         version_row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 3
+        assert version_row["v"] == 4
 
         row = conn.execute(
             "SELECT candidate_id, fingerprint, subject, from_address, "
@@ -637,6 +637,8 @@ def test_decision_cache_round_trip_negative(tmp_path: Path) -> None:
                 rule_id="r",
                 rule_text_hash="th",
                 input_hash="ih",
+                model_id="m",
+                prompt_version=1,
             )
             is None
         )
@@ -648,6 +650,7 @@ def test_decision_cache_round_trip_negative(tmp_path: Path) -> None:
             rule_text_hash="th",
             input_hash="ih",
             model_id="m",
+            prompt_version=1,
             matched=False,
         )
         cached = state.get_cached_decision(
@@ -657,6 +660,8 @@ def test_decision_cache_round_trip_negative(tmp_path: Path) -> None:
             rule_id="r",
             rule_text_hash="th",
             input_hash="ih",
+            model_id="m",
+            prompt_version=1,
         )
         assert cached is not None
         assert cached["model_id"] == "m"
@@ -680,6 +685,7 @@ def test_decision_cache_round_trip_positive(tmp_path: Path) -> None:
             rule_text_hash="th",
             input_hash="ih",
             model_id="m",
+            prompt_version=1,
             matched=True,
         )
         cached = state.get_cached_decision(
@@ -689,6 +695,8 @@ def test_decision_cache_round_trip_positive(tmp_path: Path) -> None:
             rule_id="r",
             rule_text_hash="th",
             input_hash="ih",
+            model_id="m",
+            prompt_version=1,
         )
         assert cached is not None
         assert cached["matched"] is True
@@ -746,49 +754,99 @@ def test_backup_insert_and_restore(tmp_path: Path) -> None:
         state.close_database(conn)
 
 
-def test_prune_candidate_content(tmp_path: Path) -> None:
-    """sync-fix-brief Fix (Finding 4): only *retired* candidates are
-    pruned -- a still-live candidate's content is left alone even once
-    it is older than the retention cutoff, since it is still sitting in
-    the user's mailbox anyway and pruning it would corrupt future
-    classification input (change `input_hash`, force a cache miss, send
-    an effectively blank payload)."""
+def test_cached_decision_is_scoped_to_the_model_that_made_it(tmp_path: Path) -> None:
+    """A verdict must not outlive the model that produced it: pointing a
+    task at a different model is usually a request for better judgement,
+    so silently reusing the weaker model's answers defeats the purpose.
+    `model_id` is part of the cache key, not just a stored column."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
-        account_id = state.upsert_account(conn, name="personal", host="h", username="u")
-        candidate = make_candidate(account_id=account_id)
-        candidate_id = state.upsert_candidate(conn, candidate)
-        state.retire_candidate(conn, candidate_id=candidate_id, reason="moved")
-        far_future = "2099-01-01T00:00:00Z"
-        pruned = state.prune_candidate_content(conn, before=far_future)
-        assert pruned == 1
-        row = conn.execute(
-            "SELECT from_address, subject, content_pruned_at FROM candidates"
-        ).fetchone()
-        assert row["from_address"] is None
-        assert row["subject"] is None
-        assert row["content_pruned_at"] is not None
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        state.record_decision(
+            conn,
+            account_id=account_id,
+            fingerprint="fp",
+            rule_id="junk",
+            rule_text_hash="th",
+            input_hash="ih",
+            model_id="qwen2.5-7b",
+            prompt_version=1,
+            matched=True,
+        )
+        assert (
+            state.get_cached_decision(
+                conn,
+                account_id=account_id,
+                fingerprint="fp",
+                rule_id="junk",
+                rule_text_hash="th",
+                input_hash="ih",
+                model_id="qwen2.5-7b",
+                prompt_version=1,
+            )
+            is not None
+        )
+        # A different model has no cached answer for the same message.
+        assert (
+            state.get_cached_decision(
+                conn,
+                account_id=account_id,
+                fingerprint="fp",
+                rule_id="junk",
+                rule_text_hash="th",
+                input_hash="ih",
+                model_id="claude-haiku-4-5",
+                prompt_version=1,
+            )
+            is None
+        )
     finally:
         state.close_database(conn)
 
 
-def test_prune_candidate_content_leaves_live_candidates_alone(tmp_path: Path) -> None:
-    """sync-fix-brief Fix (Finding 4): a candidate old enough to qualify
-    for pruning by `first_seen_at` alone, but never retired, keeps its
-    content untouched."""
+def test_cached_decision_is_scoped_to_the_prompt_version(tmp_path: Path) -> None:
+    """A rule's own `llm` text is covered by `rule_text_hash`, but the
+    system prompt wrapped around it was covered by nothing. Bumping
+    `prompt.PROMPT_VERSION` must invalidate."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
-        account_id = state.upsert_account(conn, name="personal", host="h", username="u")
-        candidate = make_candidate(account_id=account_id)
-        state.upsert_candidate(conn, candidate)
-        far_future = "2099-01-01T00:00:00Z"
-        pruned = state.prune_candidate_content(conn, before=far_future)
-        assert pruned == 0
-        row = conn.execute(
-            "SELECT from_address, subject, content_pruned_at FROM candidates"
-        ).fetchone()
-        assert row["from_address"] == candidate.from_address
-        assert row["subject"] == candidate.subject
-        assert row["content_pruned_at"] is None
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        state.record_decision(
+            conn,
+            account_id=account_id,
+            fingerprint="fp",
+            rule_id="junk",
+            rule_text_hash="th",
+            input_hash="ih",
+            model_id="m",
+            prompt_version=1,
+            matched=False,
+        )
+        assert (
+            state.get_cached_decision(
+                conn,
+                account_id=account_id,
+                fingerprint="fp",
+                rule_id="junk",
+                rule_text_hash="th",
+                input_hash="ih",
+                model_id="m",
+                prompt_version=1,
+            )
+            is not None
+        )
+        assert (
+            state.get_cached_decision(
+                conn,
+                account_id=account_id,
+                fingerprint="fp",
+                rule_id="junk",
+                rule_text_hash="th",
+                input_hash="ih",
+                model_id="m",
+                prompt_version=2,
+            )
+            is None
+        )
     finally:
         state.close_database(conn)

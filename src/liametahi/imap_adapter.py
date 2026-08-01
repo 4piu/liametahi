@@ -737,11 +737,11 @@ def scan(
     account_id: int,
     source_mailboxes: Sequence[str],
     fetch_headers: Sequence[str],
-    max_candidates_per_run: int | None,
+    max_new_mails: int | None,
 ) -> ScanResult:
     """Run the scan phase (spec §4.1) across every configured source
-    mailbox of one task, in order, stopping once `max_candidates_per_run`
-    candidate rows have been saved in total. `max_candidates_per_run` is
+    mailbox of one task, in order, stopping once `max_new_mails`
+    candidate rows have been saved in total. `max_new_mails` is
     opt-in: `None` (the default) means no cap at all and every eligible
     candidate is scanned in one pass.
 
@@ -785,7 +785,7 @@ def scan(
     stopped_at_cap = False
 
     for mailbox in source_mailboxes:
-        if max_candidates_per_run is not None and total_saved >= max_candidates_per_run:
+        if max_new_mails is not None and total_saved >= max_new_mails:
             stopped_at_cap = True
             break
 
@@ -840,10 +840,7 @@ def scan(
             raw_batch = adapter.fetch_metadata(candidate_uids, fetch_headers)
             with state.transaction(conn):
                 for raw in sorted(raw_batch, key=lambda r: r.internaldate):
-                    if (
-                        max_candidates_per_run is not None
-                        and total_saved >= max_candidates_per_run
-                    ):
+                    if max_new_mails is not None and total_saved >= max_new_mails:
                         stopped_at_cap = True
                         break
                     candidate = normalize(

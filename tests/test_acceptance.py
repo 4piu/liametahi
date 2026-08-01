@@ -138,7 +138,7 @@ def test_acceptance_01_backup_then_trash_and_dry_run_does_neither(
             items=[item_dry],
             run_id=run_dry,
             backup_dir=backup_dir,
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=True,
             fail_fast=False,
         )
@@ -160,7 +160,7 @@ def test_acceptance_01_backup_then_trash_and_dry_run_does_neither(
             items=[item],
             run_id=run_id,
             backup_dir=backup_dir,
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -198,7 +198,7 @@ def test_acceptance_05_backup_and_manifest_exist_before_server_move(
             items=[item],
             run_id=run_id,
             backup_dir=backup_dir,
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -265,7 +265,7 @@ def test_acceptance_06_simulated_backup_write_failure_leaves_message_untouched(
             items=[item],
             run_id=run_id,
             backup_dir=broken_backup_dir,
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -511,7 +511,7 @@ def test_acceptance_10_two_concurrent_runs_only_one_claims_and_mutates(
             items=[item],
             run_id=run_b,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -528,7 +528,7 @@ def test_acceptance_10_two_concurrent_runs_only_one_claims_and_mutates(
             items=[item],
             run_id=run_a,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )

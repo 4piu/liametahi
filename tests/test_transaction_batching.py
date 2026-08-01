@@ -199,7 +199,7 @@ def test_action_attempt_writes_stay_individually_durable(tmp_path: Path) -> None
                 items=[item],
                 run_id=run_id,
                 backup_dir=tmp_path / "backups",
-                max_actions_per_run=None,
+                max_actions=None,
                 dry_run=False,
                 fail_fast=False,
             )

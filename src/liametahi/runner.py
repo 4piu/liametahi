@@ -43,7 +43,7 @@ import ssl
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from email import message_from_bytes
 from email.message import Message
 from html import unescape
@@ -361,7 +361,6 @@ def _run_locked(
                 diagnostic=f"run failed: {exc}",
             )
 
-        _prune_old_candidate_content(conn, settings=config.settings, now=now)
         return outcome
     finally:
         state.close_database(conn)
@@ -422,7 +421,7 @@ def _run_phases(
             account_id=account_id,
             source_mailboxes=task.source_mailboxes,
             fetch_headers=task.fetch_headers,
-            max_candidates_per_run=task.max_candidates_per_run,
+            max_new_mails=task.max_new_mails,
         )
         for mailbox_result in scan_result.mailboxes:
             logger.debug(
@@ -437,7 +436,7 @@ def _run_phases(
                 ", changed" if mailbox_result.uidvalidity_changed else "",
             )
         capped_note = (
-            " (stopped at max_candidates_per_run)" if scan_result.stopped_at_cap else ""
+            " (stopped at max_new_mails)" if scan_result.stopped_at_cap else ""
         )
         logger.info(
             "run %s: scan complete: %d candidate(s)%s",
@@ -502,7 +501,7 @@ def _run_phases(
     candidates_by_id = dict(eligible)
     results_by_id = {r.candidate_id: r for r in evaluate_outcome.results}
 
-    _run_content_escalation(
+    _run_body_excerpt(
         conn,
         run_id=run_id,
         account_id=account_id,
@@ -645,7 +644,7 @@ def _run_phases(
             items=execution_items,
             run_id=run_id,
             backup_dir=config.settings.backup_dir,
-            max_actions_per_run=task.max_actions_per_run,
+            max_actions=task.max_actions,
             dry_run=dry_run,
             fail_fast=fail_fast,
             protected_flags=task.protect.flags,
@@ -729,7 +728,7 @@ def _run_phases(
 # retire_candidate` stamps `retired_at` once a `trash`/`move_to:*` action
 # actually completes, or `execute._reverify` reports the message gone
 # from the server). Excluding retired rows is what makes
-# `max_candidates_per_run`'s "no cap" default bound the evaluate set at
+# `max_new_mails`'s "no cap" default bound the evaluate set at
 # all: without it every successfully-trashed or confirmed-vanished
 # message came back forever, re-matching from the LLM decision cache at
 # zero model cost but still burning a claim + re-verify round trip every
@@ -839,19 +838,19 @@ def _drop_unsupported_for_dry_run(
 # `classifications` row so this module -- which *does* have mailbox
 # access -- can find and re-drive exactly those candidates. Honours both
 # switches named in the work-unit brief, in this precedence:
-#   1. Per rule `allow_content_escalation` -- the only opt-in; only rules
+#   1. Per rule `allow_body_excerpt` -- the only opt-in; only rules
 #      that set it are re-offered, and if none of a candidate's
 #      originally-offered rules opt in, escalation is unavailable for it
 #      (spec §5.3's "if escalation is unavailable for any reason, the
 #      item is treated as unknown"). There is deliberately no separate
 #      model-level on/off switch alongside this one (spec §5.1) -- a rule
 #      opting in is already the enable signal.
-#   2. `model.content_escalation.max_messages_per_run` -- caps how many
+#   2. `model.body_excerpt.max_messages_per_run` -- caps how many
 #      candidates get an excerpt fetch in this run at all, applied in
 #      the same oldest-first order candidates are otherwise processed.
 
 
-def _run_content_escalation(
+def _run_body_excerpt(
     conn: sqlite3.Connection,
     *,
     run_id: str,
@@ -873,7 +872,6 @@ def _run_content_escalation(
     if not rows:
         return
 
-    max_messages = model_cfg.content_escalation.max_messages_per_run
     plan: list[tuple[int, tuple[str, ...]]] = []
     for row in rows:
         candidate_id = int(row["candidate_id"])
@@ -884,13 +882,11 @@ def _run_content_escalation(
         allowed = tuple(
             rule_id
             for rule_id in offered
-            if getattr(rules_by_id.get(rule_id), "allow_content_escalation", False)
+            if getattr(rules_by_id.get(rule_id), "allow_body_excerpt", False)
         )
         if not allowed:
             continue
         plan.append((candidate_id, allowed))
-        if len(plan) >= max_messages:
-            break
     if not plan:
         return
 
@@ -903,7 +899,7 @@ def _run_content_escalation(
         candidate_ids=[cid for cid, _ in plan],
     )
 
-    max_chars = model_cfg.content_escalation.max_chars
+    max_chars = model_cfg.body_excerpt.max_chars
     for candidate_id, allowed_rules in plan:
         excerpt_text = excerpts.get(candidate_id)
         if excerpt_text is None:
@@ -1003,7 +999,7 @@ def _resolve_escalation_response(
         # Unlike the metadata-level pass in `evaluate.py`, this cache
         # write is not (yet) read back anywhere: escalation is re-driven
         # from this run's own classification rows (see
-        # `_run_content_escalation`), not from a cache lookup keyed by
+        # `_run_body_excerpt`), not from a cache lookup keyed by
         # the excerpt-level input hash. Recording it is still correct
         # bookkeeping and costs nothing; it just doesn't yet save a
         # re-escalation on a later run the way the metadata-level cache
@@ -1018,6 +1014,7 @@ def _resolve_escalation_response(
                 rule_text_hash=_rule_text_hash(rule_cfg),
                 input_hash=input_hash,
                 model_id=model_id,
+                prompt_version=prompt.PROMPT_VERSION,
                 matched=rule_id in seen,
             )
 
@@ -1189,15 +1186,6 @@ def _strip_html(html: str) -> str:
 # No other module calls `state.prune_candidate_content`; it is run-time
 # housekeeping with no natural owner among Units 1-4's phase callables,
 # so it is invoked once per run here.
-
-
-def _prune_old_candidate_content(
-    conn: sqlite3.Connection, *, settings: object, now: datetime
-) -> None:
-    retention_days = getattr(settings, "candidate_retention_days", 90)
-    cutoff = now - timedelta(days=retention_days)
-    before = cutoff.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    state.prune_candidate_content(conn, before=before)
 
 
 # --- `config check --connect` (spec §9) ------------------------------------

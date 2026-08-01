@@ -58,8 +58,8 @@ def _setup_run(conn: sqlite3.Connection, *, account_id: int, run_id: str) -> Non
     )
 
 
-def test_max_candidates_per_run_unset_means_uncapped(tmp_path: Path) -> None:
-    """`max_candidates_per_run` is opt-in (spec §9/§4.1 point 6): `None`
+def test_max_new_mails_unset_means_uncapped(tmp_path: Path) -> None:
+    """`max_new_mails` is opt-in (spec §9/§4.1 point 6): `None`
     scans every eligible candidate in one pass rather than stopping."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
@@ -85,7 +85,7 @@ def test_max_candidates_per_run_unset_means_uncapped(tmp_path: Path) -> None:
             account_id=account_id,
             source_mailboxes=["INBOX"],
             fetch_headers=_HEADERS,
-            max_candidates_per_run=None,
+            max_new_mails=None,
         )
 
         assert result.candidates_scanned == 3
@@ -125,7 +125,7 @@ def test_scan_refreshes_flags_for_already_known_candidates(tmp_path: Path) -> No
             account_id=account_id,
             source_mailboxes=["INBOX"],
             fetch_headers=_HEADERS,
-            max_candidates_per_run=500,
+            max_new_mails=500,
         )
         assert first.mailboxes[0].new_candidates == 1
 
@@ -144,7 +144,7 @@ def test_scan_refreshes_flags_for_already_known_candidates(tmp_path: Path) -> No
             account_id=account_id,
             source_mailboxes=["INBOX"],
             fetch_headers=_HEADERS,
-            max_candidates_per_run=500,
+            max_new_mails=500,
         )
         assert second.mailboxes[0].new_candidates == 0
         assert second.mailboxes[0].flags_refreshed == 1
@@ -186,7 +186,7 @@ def test_scan_flags_refresh_skips_retired_candidates(tmp_path: Path) -> None:
             account_id=account_id,
             source_mailboxes=["INBOX"],
             fetch_headers=_HEADERS,
-            max_candidates_per_run=500,
+            max_new_mails=500,
         )
         stored = state.get_candidate(conn, key=MessageKey(account_id, "INBOX", 1000, 1))
         assert stored is not None
@@ -200,7 +200,7 @@ def test_scan_flags_refresh_skips_retired_candidates(tmp_path: Path) -> None:
             account_id=account_id,
             source_mailboxes=["INBOX"],
             fetch_headers=_HEADERS,
-            max_candidates_per_run=500,
+            max_new_mails=500,
         )
         assert second.mailboxes[0].flags_refreshed == 0
 
@@ -253,7 +253,7 @@ def test_acceptance_11_metadata_fetch_does_not_set_seen(tmp_path: Path) -> None:
             account_id=account_id,
             source_mailboxes=["INBOX"],
             fetch_headers=_HEADERS,
-            max_candidates_per_run=500,
+            max_new_mails=500,
         )
 
         after = {m.uid: frozenset(m.flags) for m in mb._messages["INBOX"]}
@@ -308,7 +308,7 @@ def test_acceptance_12_uidvalidity_change_reidentifies_by_fingerprint(
             account_id=account_id,
             source_mailboxes=["INBOX"],
             fetch_headers=_HEADERS,
-            max_candidates_per_run=500,
+            max_new_mails=500,
         )
         assert first.mailboxes[0].new_candidates == 2
         assert first.mailboxes[0].reidentified_candidates == 0
@@ -347,7 +347,7 @@ def test_acceptance_12_uidvalidity_change_reidentifies_by_fingerprint(
             items=[item],
             run_id=run_id,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )
@@ -366,7 +366,7 @@ def test_acceptance_12_uidvalidity_change_reidentifies_by_fingerprint(
             account_id=account_id,
             source_mailboxes=["INBOX"],
             fetch_headers=_HEADERS,
-            max_candidates_per_run=500,
+            max_new_mails=500,
         )
         assert second.mailboxes[0].uidvalidity_changed is True
         new_uidvalidity = second.mailboxes[0].uidvalidity
@@ -403,7 +403,7 @@ def test_acceptance_12_uidvalidity_change_reidentifies_by_fingerprint(
             account_id=account_id,
             source_mailboxes=["INBOX"],
             fetch_headers=_HEADERS,
-            max_candidates_per_run=500,
+            max_new_mails=500,
         )
         assert third.mailboxes[0].uidvalidity_changed is False
         assert third.mailboxes[0].new_candidates == 0
@@ -437,7 +437,7 @@ def test_acceptance_12_uidvalidity_change_reidentifies_by_fingerprint(
             items=[stale_item],
             run_id=run_id_2,
             backup_dir=tmp_path / "backups",
-            max_actions_per_run=50,
+            max_actions=50,
             dry_run=False,
             fail_fast=False,
         )

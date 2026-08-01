@@ -1,7 +1,7 @@
-"""Tests for `runner._run_content_escalation` (spec §4.2 step 7, §5.1).
+"""Tests for `runner._run_body_excerpt` (spec §4.2 step 7, §5.1).
 
-There is deliberately no model-level `content_escalation.enabled` switch
-alongside a rule's own `allow_content_escalation` -- the rule opting in is
+There is deliberately no model-level `body_excerpt.enabled` switch
+alongside a rule's own `allow_body_excerpt` -- the rule opting in is
 already the enable signal, so escalation must fire on that alone.
 """
 
@@ -29,7 +29,7 @@ def _config_with_state(tmp_path: Path) -> Path:
         "id": "maybe-archive",
         "priority": 0,
         "when": [{"llm": "should this be archived?"}],
-        "allow_content_escalation": True,
+        "allow_body_excerpt": True,
         "actions": ["move_to:Archive"],
     }
     return write_config(tmp_path / "cfg.yaml", data)
@@ -60,7 +60,7 @@ def _mailbox() -> FakeMailbox:
 
 
 def test_rule_opt_in_alone_triggers_escalation(tmp_path: Path) -> None:
-    """A rule's `allow_content_escalation: true` is sufficient by itself:
+    """A rule's `allow_body_excerpt: true` is sufficient by itself:
     no model-level field needs to be set for the excerpt re-classify pass
     to run when the model reports it's unsure."""
     path = _config_with_state(tmp_path)

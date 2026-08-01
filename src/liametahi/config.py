@@ -507,7 +507,6 @@ class Settings(BaseModel):
     task_lock_dir: Path = Field(default_factory=lambda: DEFAULT_LOCK_DIR)
     log_file: Path | None = None
     log_level: Literal["debug", "info", "warning", "error"] = "info"
-    candidate_retention_days: int = Field(default=90, gt=0)
 
     @field_validator(
         "state_db", "backup_dir", "task_lock_dir", "log_file", mode="before"
@@ -549,9 +548,9 @@ class AccountConfig(BaseModel):
         return self
 
 
-class ContentEscalationConfig(BaseModel):
+class BodyExcerptConfig(BaseModel):
     """No separate on/off switch here (spec §5.1): a rule's own
-    `allow_content_escalation` is already the opt-in, and a second gate
+    `allow_body_excerpt` is already the opt-in, and a second gate
     at the model level would only mean two places to enable the same
     thing before it does anything, with no clear story for what one
     enabled and the other disabled means."""
@@ -559,8 +558,9 @@ class ContentEscalationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     format: Literal["plain_text_excerpt"] = "plain_text_excerpt"
-    max_chars: int = Field(default=2000, gt=0)
-    max_messages_per_run: int = Field(default=20, gt=0)
+    # Opt-in: unset means no truncation. An implicit default here would
+    # silently shorten an excerpt with nothing in the config to point at.
+    max_chars: int | None = Field(default=None, gt=0)
 
 
 class ModelConfig(BaseModel):
@@ -572,12 +572,14 @@ class ModelConfig(BaseModel):
     api_key: str | None = None
     extra_headers: dict[str, str] = Field(default_factory=dict)
     structured_output: Literal["auto", "json_schema", "json_object", "none"] = "auto"
-    batch_size: int = Field(default=10, ge=1, le=25)
+    # Not a limit but a batching factor: a request needs *some* size, so
+    # unlike the `max_*` keys this keeps a default. No upper bound is
+    # enforced -- large batches measurably degrade small local models, but
+    # that is guidance for the README, not something to reject outright.
+    mails_per_request: int = Field(default=10, ge=1)
     timeout_seconds: int = Field(default=45, gt=0)
     max_retries: int = Field(default=2, ge=0)
-    content_escalation: ContentEscalationConfig = Field(
-        default_factory=ContentEscalationConfig
-    )
+    body_excerpt: BodyExcerptConfig = Field(default_factory=BodyExcerptConfig)
 
     @model_validator(mode="after")
     def _validate_provider_requirements(self) -> Self:
@@ -610,7 +612,7 @@ class RuleConfig(BaseModel):
     when: ConditionTree
     actions: list[str] = Field(min_length=1)
     priority: int = 0
-    allow_content_escalation: bool = False
+    allow_body_excerpt: bool = False
     allow_trash_without_backup: bool = False
 
     @field_validator("when", mode="before")
@@ -637,8 +639,8 @@ class TaskConfig(BaseModel):
     model: str = Field(min_length=1)
     source_mailboxes: list[str] = Field(default_factory=lambda: ["INBOX"])
     protect: ProtectConfig = Field(default_factory=ProtectConfig)
-    max_candidates_per_run: int | None = Field(default=None, gt=0)
-    max_actions_per_run: int | None = Field(default=None, gt=0)
+    max_new_mails: int | None = Field(default=None, gt=0)
+    max_actions: int | None = Field(default=None, gt=0)
     rules: list[RuleConfig] = Field(min_length=1)
 
     @model_validator(mode="after")

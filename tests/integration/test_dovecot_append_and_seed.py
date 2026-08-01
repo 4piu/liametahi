@@ -76,7 +76,7 @@ def test_seed_corpus_via_append_and_scan_recovers_every_message(
                 account_id=account_id,
                 source_mailboxes=["INBOX"],
                 fetch_headers=list(BASE_FETCH_HEADERS),
-                max_candidates_per_run=500,
+                max_new_mails=500,
             )
         finally:
             scan_adapter.close()
@@ -95,7 +95,7 @@ def test_seed_corpus_via_append_and_scan_recovers_every_message(
                 account_id=account_id,
                 source_mailboxes=["INBOX"],
                 fetch_headers=list(BASE_FETCH_HEADERS),
-                max_candidates_per_run=500,
+                max_new_mails=500,
             )
         finally:
             rescan_adapter.close()
