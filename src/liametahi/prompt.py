@@ -161,10 +161,9 @@ RESPONSE_JSON_SCHEMA: dict[str, object] = {
 
 @dataclass(frozen=True, slots=True)
 class BuiltPayload:
-    """A `CandidatePayload` plus the bookkeeping needed for the
-    negative-decision cache (spec §13): the input hash (which the
-    truncation flag participates in, per spec §5.2) and the truncation
-    flag itself."""
+    """A `CandidatePayload` plus the bookkeeping needed for the LLM
+    decision cache (spec §13): the input hash (which the truncation flag
+    participates in, per spec §5.2) and the truncation flag itself."""
 
     payload: CandidatePayload
     input_hash: str

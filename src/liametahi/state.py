@@ -25,7 +25,7 @@ from typing import Any
 from liametahi.domain import Candidate, MessageKey
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
-_LATEST_SCHEMA_VERSION = 1
+_LATEST_SCHEMA_VERSION = 2
 
 _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
@@ -525,7 +525,12 @@ def insert_classification(
     return int(cur.lastrowid)
 
 
-# --- Negative-decision cache (spec §13) ----------------------------------
+# --- LLM decision cache (spec §13) ----------------------------------------
+#
+# One row per (account, fingerprint, rule, rule text, input) -- `matched`
+# records which way the model answered, so a re-run can reuse either a
+# prior "no" (elide the rule) or a prior "yes" (skip straight to policy/
+# execution) without asking again.
 
 
 def get_cached_decision(
@@ -539,7 +544,7 @@ def get_cached_decision(
 ) -> Mapping[str, Any] | None:
     row = conn.execute(
         """
-        SELECT model_id, decided_at FROM llm_decision_cache
+        SELECT model_id, decided_at, matched FROM llm_decision_cache
         WHERE account_id=? AND fingerprint=? AND rule_id=? AND rule_text_hash=?
           AND input_hash=?
         """,
@@ -550,10 +555,11 @@ def get_cached_decision(
     return {
         "model_id": row["model_id"],
         "decided_at": row["decided_at"],
+        "matched": bool(row["matched"]),
     }
 
 
-def record_negative_decision(
+def record_decision(
     conn: sqlite3.Connection,
     *,
     account_id: int,
@@ -562,17 +568,19 @@ def record_negative_decision(
     rule_text_hash: str,
     input_hash: str,
     model_id: str,
+    matched: bool,
 ) -> None:
     conn.execute(
         """
         INSERT INTO llm_decision_cache (
             account_id, fingerprint, rule_id, rule_text_hash, input_hash,
-            model_id, decided_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            model_id, decided_at, matched
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (account_id, fingerprint, rule_id, rule_text_hash, input_hash)
         DO UPDATE SET
             model_id = excluded.model_id,
-            decided_at = excluded.decided_at
+            decided_at = excluded.decided_at,
+            matched = excluded.matched
         """,
         (
             account_id,
@@ -582,6 +590,7 @@ def record_negative_decision(
             input_hash,
             model_id,
             _iso_now(),
+            int(matched),
         ),
     )
 

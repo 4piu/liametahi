@@ -897,9 +897,17 @@ def _resolve_escalation_response(
                 continue
             seen.add(rule_id)
             accepted.append(evaluate.ValidatedMatch(rule_id=rule_id))
-        for rule_id in offered_set - seen:
+        # Unlike the metadata-level pass in `evaluate.py`, this cache
+        # write is not (yet) read back anywhere: escalation is re-driven
+        # from this run's own classification rows (see
+        # `_run_content_escalation`), not from a cache lookup keyed by
+        # the excerpt-level input hash. Recording it is still correct
+        # bookkeeping and costs nothing; it just doesn't yet save a
+        # re-escalation on a later run the way the metadata-level cache
+        # now avoids a re-classification.
+        for rule_id in offered_set:
             rule_cfg = rules_by_id[rule_id]
-            state.record_negative_decision(
+            state.record_decision(
                 conn,
                 account_id=account_id,
                 fingerprint=candidate.fingerprint,
@@ -907,6 +915,7 @@ def _resolve_escalation_response(
                 rule_text_hash=_rule_text_hash(rule_cfg),
                 input_hash=input_hash,
                 model_id=model_id,
+                matched=rule_id in seen,
             )
 
     reason = getattr(classification, "reason", None)

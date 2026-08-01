@@ -1,7 +1,6 @@
 """The evaluate phase (spec §4.2, steps 2-6): three-valued rule
-evaluation against the negative-decision cache, batched LLM
-classification, response validation, and split-and-retry failure
-handling.
+evaluation against the LLM decision cache, batched LLM classification,
+response validation, and split-and-retry failure handling.
 
 This module is the callable Unit 5's `runner.py` will sequence for
 phase 2 — deliberately not named `runner.py` itself, which is Unit 5's
@@ -116,7 +115,7 @@ class EvaluateOutcome:
 class _BatchItem:
     candidate_id: int
     candidate: Candidate
-    deterministic_matches: tuple[ValidatedMatch, ...]
+    resolved_matches: tuple[ValidatedMatch, ...]
     cache_hit: bool
     remaining_rule_ids: tuple[str, ...]
     input_hash: str
@@ -150,14 +149,14 @@ def _combine_stats(left: _BatchStats, right: _BatchStats) -> _BatchStats:
 
 def _finalize_no_llm(
     candidate_id: int,
-    deterministic_matches: tuple[ValidatedMatch, ...],
+    resolved_matches: tuple[ValidatedMatch, ...],
     *,
     cache_hit: bool,
 ) -> CandidateResult:
     """A candidate whose rule set was fully resolved by deterministic
-    evaluation plus (optionally) the negative-decision cache, with no
-    model call this run (spec §4.2 step 4)."""
-    if deterministic_matches:
+    evaluation plus (optionally) the LLM decision cache, with no model
+    call this run (spec §4.2 step 4)."""
+    if resolved_matches:
         status = None
     elif cache_hit:
         status = "cached_no_match"
@@ -165,7 +164,7 @@ def _finalize_no_llm(
         status = "no_match"
     return CandidateResult(
         candidate_id=candidate_id,
-        matches=deterministic_matches,
+        matches=resolved_matches,
         status=status,
         reason=None,
         offered_rules=(),
@@ -196,7 +195,7 @@ def evaluate_candidates(
 
     `candidates` pairs each candidate with its `candidates.candidate_id`
     primary key (contracts §4), needed for `result_items`/
-    `classifications` foreign keys and for the negative-decision cache's
+    `classifications` foreign keys and for the LLM decision cache's
     `fingerprint` (read off the `Candidate` itself).
     """
     rules_by_id: dict[str, RuleConfig] = {rule.id: rule for rule in task.rules}
@@ -204,18 +203,18 @@ def evaluate_candidates(
     llm_items: list[_BatchItem] = []
 
     for candidate_id, candidate in candidates:
-        deterministic_matches: list[ValidatedMatch] = []
+        resolved_matches: list[ValidatedMatch] = []
         unknown_rule_ids: list[str] = []
         for rule in task.rules:
             tri = rules.evaluate(rule.when, candidate, now=now)
             if tri is rules.Tri.TRUE:
-                deterministic_matches.append(ValidatedMatch(rule.id))
+                resolved_matches.append(ValidatedMatch(rule.id))
             elif tri is rules.Tri.UNKNOWN:
                 unknown_rule_ids.append(rule.id)
 
         if not unknown_rule_ids:
             per_candidate[candidate_id] = _finalize_no_llm(
-                candidate_id, tuple(deterministic_matches), cache_hit=False
+                candidate_id, tuple(resolved_matches), cache_hit=False
             )
             continue
 
@@ -237,12 +236,20 @@ def evaluate_candidates(
                 )
                 if cached is not None:
                     cache_hit = True
+                    if cached["matched"]:
+                        # A cached "yes": skip straight to policy/execution
+                        # without asking again. This is what lets a message
+                        # whose remote mutation failed last run (wrong
+                        # trash_mailbox, an unadvertised capability, ...)
+                        # retry that mutation on the next run instead of
+                        # being reclassified from scratch every time.
+                        resolved_matches.append(ValidatedMatch(rule_id))
                     continue
             remaining.append(rule_id)
 
         if not remaining:
             per_candidate[candidate_id] = _finalize_no_llm(
-                candidate_id, tuple(deterministic_matches), cache_hit=cache_hit
+                candidate_id, tuple(resolved_matches), cache_hit=cache_hit
             )
             continue
 
@@ -250,7 +257,7 @@ def evaluate_candidates(
             _BatchItem(
                 candidate_id=candidate_id,
                 candidate=candidate,
-                deterministic_matches=tuple(deterministic_matches),
+                resolved_matches=tuple(resolved_matches),
                 cache_hit=cache_hit,
                 remaining_rule_ids=tuple(remaining),
                 input_hash=built.input_hash,
@@ -507,10 +514,10 @@ def _classify_batch(
 def _mark_invalid(
     item: _BatchItem, per_candidate: dict[int, CandidateResult], *, error: str
 ) -> None:
-    if item.deterministic_matches:
+    if item.resolved_matches:
         per_candidate[item.candidate_id] = CandidateResult(
             candidate_id=item.candidate_id,
-            matches=item.deterministic_matches,
+            matches=item.resolved_matches,
             status=None,
             reason=None,
             offered_rules=item.remaining_rule_ids,
@@ -532,10 +539,10 @@ def _mark_invalid(
 
 
 def _mark_missing(item: _BatchItem, per_candidate: dict[int, CandidateResult]) -> None:
-    if item.deterministic_matches:
+    if item.resolved_matches:
         per_candidate[item.candidate_id] = CandidateResult(
             candidate_id=item.candidate_id,
-            matches=item.deterministic_matches,
+            matches=item.resolved_matches,
             status=None,
             reason=None,
             offered_rules=item.remaining_rule_ids,
@@ -661,7 +668,7 @@ def _resolve_item(
     every rule id that survives vocabulary validation is accepted
     outright.
     """
-    accepted: list[ValidatedMatch] = list(item.deterministic_matches)
+    accepted: list[ValidatedMatch] = list(item.resolved_matches)
     offered_set = set(item.remaining_rule_ids)
     seen_rule_ids: set[str] = set()
     raw_matches_for_audit: list[str] = list(classification.matches)
@@ -673,10 +680,10 @@ def _resolve_item(
         # any reason, the item is treated as unknown and produces no
         # action", the *entire* response for this candidate is
         # discarded: no match is accepted from it, regardless of what
-        # `matches` also contained, and — critically — nothing is
-        # cached as a negative decision, because the model did not
-        # decline any of these rules, it deferred. Caching a "no" here
-        # would permanently suppress a future re-ask once escalation is
+        # `matches` also contained, and — critically — nothing is cached
+        # either way, because the model did not decline or confirm any
+        # of these rules, it deferred. Caching either answer here would
+        # permanently suppress a future re-ask once escalation is
         # actually available.
         state.append_audit_event(
             conn,
@@ -713,13 +720,18 @@ def _resolve_item(
             seen_rule_ids.add(rule_id)
             accepted.append(ValidatedMatch(rule_id=rule_id))
 
-        # Every offered rule the model did not (validly) claim is a
-        # negative decision — cache it so a re-run does not re-ask
-        # (spec §13).
-        for rule_id in offered_set - seen_rule_ids:
+        # Every offered rule got a confident yes or no this run (a rule
+        # that requested escalation instead never reaches this branch at
+        # all — see the `needs_content` arm above) — cache it either way
+        # so a re-run does not re-ask (spec §13). Caching the "yes" too is
+        # what lets a message whose remote mutation failed last run
+        # (wrong trash_mailbox, an unadvertised capability, ...) retry
+        # that mutation on the next run instead of being reclassified
+        # from scratch every time.
+        for rule_id in offered_set:
             rule_cfg = rules_by_id[rule_id]
             rule_text_hash = _rule_text_hash(rule_cfg)
-            state.record_negative_decision(
+            state.record_decision(
                 conn,
                 account_id=account_id,
                 fingerprint=item.candidate.fingerprint,
@@ -727,6 +739,7 @@ def _resolve_item(
                 rule_text_hash=rule_text_hash,
                 input_hash=item.input_hash,
                 model_id=model_id,
+                matched=rule_id in seen_rule_ids,
             )
 
     reason = classification.reason

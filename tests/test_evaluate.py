@@ -156,7 +156,7 @@ def test_rule_offered_to_sibling_candidate_in_same_batch_is_rejected(
     item_a = evaluate._BatchItem(
         candidate_id=cid_a,
         candidate=cand_a,
-        deterministic_matches=(),
+        resolved_matches=(),
         cache_hit=False,
         remaining_rule_ids=("rule-a", "rule-b"),
         input_hash="hash-a",
@@ -164,7 +164,7 @@ def test_rule_offered_to_sibling_candidate_in_same_batch_is_rejected(
     item_b = evaluate._BatchItem(
         candidate_id=cid_b,
         candidate=cand_b,
-        deterministic_matches=(),
+        resolved_matches=(),
         cache_hit=False,
         # candidate B was only ever offered rule-a.
         remaining_rule_ids=("rule-a",),
@@ -516,11 +516,15 @@ def test_acceptance_04_unsure_classification_is_a_no_op_and_caches_nothing(
 
 
 # =========================================================================
-# A match is never cached; a rule the model did not select is cached
+# Both a match and a non-match are cached, each tagged with which they
+# were (spec §13): a re-run reuses either answer without asking again.
 # =========================================================================
 
 
-def test_accepted_match_is_never_cached(tmp_path: Path) -> None:
+def test_accepted_match_is_cached(tmp_path: Path) -> None:
+    """Caching the match too (not just the non-match) is what lets a
+    message whose remote mutation failed last run retry that mutation on
+    the next run instead of being reclassified from scratch."""
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
     task = _task([_llm_rule("rule-a", "condition A")])
@@ -545,10 +549,11 @@ def test_accepted_match_is_never_cached(tmp_path: Path) -> None:
         rule_text_hash=evaluate._rule_text_hash(task.rules[0]),
         input_hash=_require_input_hash(result),
     )
-    assert cached is None
+    assert cached is not None
+    assert cached["matched"] is True
 
 
-def test_unselected_offered_rule_is_cached_as_negative_alongside_an_accepted_match(
+def test_matched_and_unselected_rules_are_both_cached_correctly(
     tmp_path: Path,
 ) -> None:
     conn, account_id = _setup(tmp_path)
@@ -589,8 +594,47 @@ def test_unselected_offered_rule_is_cached_as_negative_alongside_an_accepted_mat
         rule_text_hash=evaluate._rule_text_hash(task.rules[1]),
         input_hash=_require_input_hash(result),
     )
-    assert matched_cached is None
+    assert matched_cached is not None
+    assert matched_cached["matched"] is True
     assert unselected_cached is not None
+    assert unselected_cached["matched"] is False
+
+
+def test_cached_match_is_reused_without_a_model_call(tmp_path: Path) -> None:
+    """The core payoff (spec §13): once a rule's match is cached, a later
+    run with the same rule text and input skips the model entirely and
+    still produces an accepted match -- e.g. because the previous run's
+    remote mutation failed and the message is still a live candidate."""
+    conn, account_id = _setup(tmp_path)
+    task = _task([_llm_rule("rule-a", "condition A")])
+    cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "p" * 60)
+    cid = state.upsert_candidate(conn, cand)
+
+    run_1 = _new_run(conn, account_id)
+    fc_1 = FakeClassifier([outcome_with_matches(matches_by_payload={"c1": ["rule-a"]})])
+    _evaluate(
+        conn,
+        account_id=account_id,
+        run_id=run_1,
+        task=task,
+        classifier=fc_1,
+        candidates=[(cid, cand)],
+    )
+    assert fc_1.call_count == 1
+
+    run_2 = _new_run(conn, account_id)
+    fc_2 = FakeClassifier([])  # any classify() call would raise -- none expected
+    result_2 = _evaluate(
+        conn,
+        account_id=account_id,
+        run_id=run_2,
+        task=task,
+        classifier=fc_2,
+        candidates=[(cid, cand)],
+    ).results[0]
+    assert fc_2.call_count == 0
+    assert result_2.status is None
+    assert [m.rule_id for m in result_2.matches] == ["rule-a"]
 
 
 # =========================================================================

@@ -58,7 +58,7 @@ def test_open_database_creates_all_tables(tmp_path: Path) -> None:
         version_row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 1
+        assert version_row["v"] == 2
     finally:
         state.close_database(conn)
 
@@ -67,10 +67,10 @@ def test_reopening_database_is_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "state.sqlite3"
     conn1 = state.open_database(db_path)
     state.close_database(conn1)
-    conn2 = state.open_database(db_path)  # must not re-run migration 1
+    conn2 = state.open_database(db_path)  # must not re-run already-applied migrations
     try:
         count = conn2.execute("SELECT COUNT(*) AS c FROM schema_version").fetchone()
-        assert count["c"] == 1
+        assert count["c"] == 2
     finally:
         state.close_database(conn2)
 
@@ -348,7 +348,7 @@ def test_result_item_and_classification_and_action_attempt_round_trip(
         state.close_database(conn)
 
 
-def test_negative_decision_cache_round_trip(tmp_path: Path) -> None:
+def test_decision_cache_round_trip_negative(tmp_path: Path) -> None:
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
         account_id = state.upsert_account(conn, name="personal", host="h", username="u")
@@ -363,7 +363,7 @@ def test_negative_decision_cache_round_trip(tmp_path: Path) -> None:
             )
             is None
         )
-        state.record_negative_decision(
+        state.record_decision(
             conn,
             account_id=account_id,
             fingerprint="fp",
@@ -371,6 +371,7 @@ def test_negative_decision_cache_round_trip(tmp_path: Path) -> None:
             rule_text_hash="th",
             input_hash="ih",
             model_id="m",
+            matched=False,
         )
         cached = state.get_cached_decision(
             conn,
@@ -382,6 +383,38 @@ def test_negative_decision_cache_round_trip(tmp_path: Path) -> None:
         )
         assert cached is not None
         assert cached["model_id"] == "m"
+        assert cached["matched"] is False
+    finally:
+        state.close_database(conn)
+
+
+def test_decision_cache_round_trip_positive(tmp_path: Path) -> None:
+    """A rule the model matched is cached too (spec §13): a re-run reuses
+    the "yes" and goes straight to policy/execution rather than asking
+    again."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="personal", host="h", username="u")
+        state.record_decision(
+            conn,
+            account_id=account_id,
+            fingerprint="fp",
+            rule_id="r",
+            rule_text_hash="th",
+            input_hash="ih",
+            model_id="m",
+            matched=True,
+        )
+        cached = state.get_cached_decision(
+            conn,
+            account_id=account_id,
+            fingerprint="fp",
+            rule_id="r",
+            rule_text_hash="th",
+            input_hash="ih",
+        )
+        assert cached is not None
+        assert cached["matched"] is True
     finally:
         state.close_database(conn)
 

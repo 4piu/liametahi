@@ -1,0 +1,14 @@
+-- Schema version 2.
+--
+-- llm_decision_cache originally stored non-matches only (a row's mere
+-- presence meant "no"; see 0001's trailing comment). A rule's positive
+-- match was never cached, on the theory that a match always either moves
+-- the message out of the source mailbox or ends in a terminal result
+-- item -- but a failed remote mutation (wrong trash_mailbox, a
+-- capability the server doesn't advertise, ...) leaves the message
+-- exactly where it was, so it comes back as a live candidate and gets
+-- reclassified by the model on every subsequent run until the failure is
+-- fixed. `matched` lets the same cache row represent either answer, so a
+-- re-run reuses a prior "yes" too and goes straight to policy/execution
+-- instead of re-asking the model.
+ALTER TABLE llm_decision_cache ADD COLUMN matched INTEGER NOT NULL DEFAULT 0;

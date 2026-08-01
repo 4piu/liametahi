@@ -348,6 +348,17 @@ fetched once and the message is re-classified. Off by default; turn it on
 per-rule, and cap the blast radius with
 `models.<name>.content_escalation.max_messages_per_run`.
 
+### Re-running and the decision cache
+
+A rule's model decision — match or non-match — is cached per message and
+reused on later runs, so an hourly cron job never re-classifies the same
+already-decided mail. This is also what makes a failed action retry cheaply:
+if a message matched a `trash` rule but the actual mailbox move failed (a
+misconfigured `trash_mailbox`, a capability the server doesn't advertise),
+the message stays put and is picked up again next run — the cached match is
+reused straight into policy/execution, not re-sent to the model. `--reevaluate`
+bypasses the cache entirely and forces a fresh pass.
+
 ## CLI reference
 
 ```

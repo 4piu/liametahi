@@ -1,10 +1,10 @@
 """Work Unit 3's named acceptance test (spec section 14): 16. Acceptance
 tests 3 and 4 live in `tests/test_evaluate.py`, alongside the rest of
 the response-validation matrix they are part of; this one is kept
-separate because it is specifically about the negative-decision cache
-(spec section 13) across multiple simulated runs, which needs its own
-small harness of repeated `evaluate_candidates()` calls sharing one
-candidate row.
+separate because it is specifically about the LLM decision cache (spec
+section 13) across multiple simulated runs, which needs its own small
+harness of repeated `evaluate_candidates()` calls sharing one candidate
+row.
 """
 
 import sqlite3
@@ -172,31 +172,31 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
     assert fc_4.call_count == 1
     assert result_4.status is None  # accepted match, no longer a no-op
 
-    # --- A match is never cached (spec section 13): the accepted match
-    # from run 4 must not have created a negative cache row for the
-    # edited rule text/input hash. ---------------------------------------
+    # --- A match is cached too, not just a non-match (spec section 13):
+    # run 4's accepted match created a positive cache row for the edited
+    # rule text/input hash. This is what lets a message whose remote
+    # mutation fails (wrong trash_mailbox, an unadvertised capability,
+    # ...) retry that mutation on the next run instead of being
+    # reclassified from scratch every time. -------------------------------
     assert result_4.input_hash is not None
-    assert (
-        state.get_cached_decision(
-            conn,
-            account_id=account_id,
-            fingerprint=cand.fingerprint,
-            rule_id="stale-updates",
-            rule_text_hash=rule_text_hash_v2,
-            input_hash=result_4.input_hash,
-        )
-        is None
+    cached_match = state.get_cached_decision(
+        conn,
+        account_id=account_id,
+        fingerprint=cand.fingerprint,
+        rule_id="stale-updates",
+        rule_text_hash=rule_text_hash_v2,
+        input_hash=result_4.input_hash,
     )
+    assert cached_match is not None
+    assert cached_match["matched"] is True
 
-    # --- Run 5: because run 4's match was never cached, and the model
-    # matched rather than declined, a subsequent run against the same
-    # (now-matched) rule text must still ask the model again -- there is
-    # no negative entry to short-circuit it. -----------------------------
+    # --- Run 5: because run 4's match WAS cached, a subsequent run
+    # against the same (still-live, e.g. its trash action failed) rule
+    # text and input reuses the cached "yes" without asking the model
+    # again, and still produces the same accepted match. ------------------
     run_5 = _run(conn, account_id)
-    fc_5 = FakeClassifier(
-        [outcome_with_matches(matches_by_payload={"c1": ["stale-updates"]})]
-    )
-    evaluate.evaluate_candidates(
+    fc_5 = FakeClassifier([])  # any classify() call would raise -- none expected
+    result_5 = evaluate.evaluate_candidates(
         conn,
         account_id=account_id,
         run_id=run_5,
@@ -207,5 +207,7 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
         candidates=[(cid, cand)],
         now=NOW,
         reevaluate=False,
-    )
-    assert fc_5.call_count == 1
+    ).results[0]
+    assert fc_5.call_count == 0
+    assert result_5.status is None
+    assert [m.rule_id for m in result_5.matches] == ["stale-updates"]
