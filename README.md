@@ -372,6 +372,11 @@ path where message *bodies* reach the model, and that each escalation is
 its own un-batched model call plus a full-message fetch — so enable it on
 the rules that need it, not everywhere.
 
+The verdict is cached like any other, so a message only ever gets escalated
+once: later runs reuse the answer without re-fetching the body or re-asking.
+If the model is *still* unsure even with the excerpt, nothing is cached —
+that is a deferral, not a decision — so it will be retried.
+
 ### Watching a run
 
 At a terminal, `run` draws a live status line on stderr showing the current

@@ -1032,14 +1032,36 @@ def _resolve_escalation_response(
                 continue
             seen.add(rule_id)
             accepted.append(evaluate.ValidatedMatch(rule_id=rule_id))
-        # Unlike the metadata-level pass in `evaluate.py`, this cache
-        # write is not (yet) read back anywhere: escalation is re-driven
-        # from this run's own classification rows (see
-        # `_run_body_excerpt`), not from a cache lookup keyed by
-        # the excerpt-level input hash. Recording it is still correct
-        # bookkeeping and costs nothing; it just doesn't yet save a
-        # re-escalation on a later run the way the metadata-level cache
-        # now avoids a re-classification.
+        # Cache the verdict against the **metadata-level** input hash,
+        # not the excerpt-level one this response was actually produced
+        # from. That looks wrong and is deliberate.
+        #
+        # An excerpt-keyed entry is unusable by construction: computing
+        # that hash requires the excerpt, so finding out an answer is
+        # already known would mean fetching the body first -- the
+        # expensive half of what the cache exists to avoid. Worse, the
+        # metadata pass never caches a `needs_content` verdict (it is a
+        # deferral, not a decision -- see `evaluate._resolve_item`), so
+        # nothing short-circuits the *next* run either: a persistently
+        # unsure message paid a metadata call, a body fetch and its own
+        # un-batched excerpt call on every single run, forever.
+        #
+        # Keying on the metadata hash makes `evaluate.py`'s existing
+        # lookup find it, so the rule resolves from cache and neither the
+        # fetch nor either model call happens again. It is sound because
+        # the cache answers "does this rule apply to this message", and
+        # that answer does not depend on how much context was needed to
+        # reach it. The message itself stays pinned: `fingerprint` is
+        # part of the key, and a changed body changes `rfc822_size`,
+        # which changes the fingerprint.
+        #
+        # `offered` does not participate in `input_hash` (see
+        # `prompt.compute_input_hash`), so rebuilding the payload here
+        # with just the escalated subset yields exactly the hash
+        # `evaluate.py` computed from the full unknown set.
+        metadata_input_hash = prompt.build_candidate_payload(
+            candidate, payload_id="c0", offered=allowed_rules
+        ).input_hash
         for rule_id in offered_set:
             rule_cfg = rules_by_id[rule_id]
             state.record_decision(
@@ -1048,7 +1070,7 @@ def _resolve_escalation_response(
                 fingerprint=candidate.fingerprint,
                 rule_id=rule_id,
                 rule_text_hash=_rule_text_hash(rule_cfg),
-                input_hash=input_hash,
+                input_hash=metadata_input_hash,
                 model_id=model_id,
                 prompt_version=prompt.PROMPT_VERSION,
                 matched=rule_id in seen,
