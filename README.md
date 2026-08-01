@@ -158,34 +158,45 @@ uv run liametahi restore bkp_01J... --mailbox INBOX
 
 ## Configuration reference
 
-### `settings` (all optional)
+`*` marks a required key; every other key is optional and falls back to its
+default.
 
-| Key | Default |
-| --- | --- |
-| `state_db` | `<platform data dir>/liametahi/state.sqlite3` |
-| `backup_dir` | `<platform data dir>/liametahi/backups` |
-| `task_lock_dir` | `<platform data dir>/liametahi/locks` |
-| `log_file` | none (stderr only) |
-| `log_level` | `info` |
-| `candidate_retention_days` | `90` |
+### `settings`
+
+| Key | Description | Default |
+| --- | --- | --- |
+| `state_db` | Path to the SQLite state database | `<platform data dir>/liametahi/state.sqlite3` |
+| `backup_dir` | Directory verified message backups are written to | `<platform data dir>/liametahi/backups` |
+| `task_lock_dir` | Directory for per-task advisory lock files | `<platform data dir>/liametahi/locks` |
+| `log_file` | Also write logs here, in addition to stderr | none (stderr only) |
+| `log_level` | `debug` / `info` / `warning` / `error` | `info` |
+| `candidate_retention_days` | Days before pruned candidates' content (not the row itself) is purged | `90` |
 
 ### `accounts.<name>`
 
-`host`, `port`, `username`, `password`, `trash_mailbox`. `tls_insecure_skip_verify`
-is available for a local development server on loopback only (rejected at
-load time for any other host).
+| Key | Description | Default |
+| --- | --- | --- |
+| `host` * | IMAP server hostname | — |
+| `port` | IMAP port | `993` |
+| `username` * | IMAP login username | — |
+| `password` * | IMAP login password — a literal secret | — |
+| `trash_mailbox` | Required only if a task on this account has a `trash` action | none |
+| `tls_insecure_skip_verify` | Skip certificate verification — loopback hosts only, rejected at load time otherwise | `false` |
 
 ### `models.<name>`
 
-| Key | Notes |
-| --- | --- |
-| `provider` | `openai_compatible` or `anthropic` |
-| `base_url` | required for `openai_compatible`; the complete Chat Completions endpoint URL, posted to as-is |
-| `model` | the provider's model identifier |
-| `api_key` | required for `anthropic`; optional for a local `openai_compatible` server |
-| `structured_output` | `auto` (default) / `json_schema` / `json_object` / `none` |
-| `batch_size` | `10`, range 1–25 |
-| `content_escalation.enabled` | `false` by default — see below |
+| Key | Description | Default |
+| --- | --- | --- |
+| `provider` * | `openai_compatible` or `anthropic` | — |
+| `base_url` * | Required for `openai_compatible`; the complete Chat Completions endpoint URL, posted to as-is | — |
+| `model` * | The provider's model identifier | — |
+| `api_key` | Required for `anthropic`; optional for a local `openai_compatible` server | none |
+| `extra_headers` | Extra HTTP headers merged into every request | `{}` |
+| `structured_output` | `auto` / `json_schema` / `json_object` / `none` | `auto` |
+| `batch_size` | Candidates per classification call, range 1–25 | `10` |
+| `timeout_seconds` | Per-request HTTP timeout | `45` |
+| `max_retries` | Transport-error retries — never a rejected response | `2` |
+| `content_escalation.enabled` | Let an unsure `llm` verdict trigger the bounded body-excerpt second pass — see [Content escalation](#content-escalation) | `false` |
 
 An OpenRouter endpoint is `provider: openai_compatible` with
 `base_url: https://openrouter.ai/api/v1/chat/completions` and `model` set to
@@ -194,25 +205,28 @@ OpenRouter's namespaced id (`vendor/model`). OpenRouter also accepts optional
 
 ### `tasks.<name>`
 
-| Key | Default |
-| --- | --- |
-| `account` / `model` | required, must name entries above |
-| `source_mailboxes` | `[INBOX]` |
-| `protect.flags` / `protect.senders` / `protect.unread` | all off unless set — see [Safety model](#safety-model) |
-| `max_candidates_per_run` | `500` |
-| `max_actions_per_run` | unset — **no cap** unless you set one |
-| `rules` | required, non-empty |
+| Key | Description | Default |
+| --- | --- | --- |
+| `account` * | Must name an entry in `accounts` | — |
+| `model` * | Must name an entry in `models` | — |
+| `source_mailboxes` | Mailboxes to scan, in order | `[INBOX]` |
+| `protect.flags` | IMAP flags that exempt a message — see [Safety model](#safety-model) | `[]` (nothing protected) |
+| `protect.senders` | Sender globs that exempt a message | `[]` |
+| `protect.unread` | Exempt unread messages | `false` |
+| `max_candidates_per_run` | Caps one run's scan; unset scans every eligible candidate in one pass | none (uncapped) |
+| `max_actions_per_run` | Caps one run's mutations | none (uncapped) |
+| `rules` * | Non-empty list — see below | — |
 
 ### `tasks.<name>.rules[]`
 
-| Key | Default |
-| --- | --- |
-| `id` | required, non-empty, unique within the task — this is also the model's output vocabulary |
-| `when` | required — see [Rule conditions](#rule-conditions) below |
-| `actions` | required, non-empty ordered list: `backup`, `trash`, `move_to:<mailbox>`, `label:<keyword>` |
-| `priority` | `0`; higher wins when more than one rule matches the same message (ties break by declaration order — earlier wins) |
-| `allow_content_escalation` | `false` — lets this rule's `llm` condition trigger the bounded body-excerpt second pass (see [Content escalation](#content-escalation)) when the model reports it's unsure |
-| `allow_trash_without_backup` | `false` — see [Safety model](#safety-model); required if `trash` appears with no preceding `backup` in the same action list |
+| Key | Description | Default |
+| --- | --- | --- |
+| `id` * | Unique within the task — also the model's output vocabulary | — |
+| `when` * | A condition tree — see [Rule conditions](#rule-conditions) below | — |
+| `actions` * | Non-empty ordered list: `backup`, `trash`, `move_to:<mailbox>`, `label:<keyword>` | — |
+| `priority` | Higher wins when more than one rule matches the same message (ties break by declaration order — earlier wins) | `0` |
+| `allow_content_escalation` | Let this rule's `llm` condition trigger the bounded body-excerpt second pass (see [Content escalation](#content-escalation)) when the model reports it's unsure | `false` |
+| `allow_trash_without_backup` | Required if `trash` appears with no preceding `backup` in the same action list — see [Safety model](#safety-model) | `false` |
 
 ### Rule conditions
 

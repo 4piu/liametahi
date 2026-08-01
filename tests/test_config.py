@@ -35,7 +35,7 @@ def test_valid_config_loads(config_path: Path) -> None:
     assert task.protect.unread is False
     assert task.protect.flags == []
     assert task.protect.senders == []
-    assert task.max_candidates_per_run == 500
+    assert task.max_candidates_per_run is None  # unset means no cap (spec §6)
     assert task.max_actions_per_run is None  # unset means no cap (spec §6)
 
 

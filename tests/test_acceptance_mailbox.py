@@ -58,6 +58,42 @@ def _setup_run(conn: sqlite3.Connection, *, account_id: int, run_id: str) -> Non
     )
 
 
+def test_max_candidates_per_run_unset_means_uncapped(tmp_path: Path) -> None:
+    """`max_candidates_per_run` is opt-in (spec §9/§4.1 point 6): `None`
+    scans every eligible candidate in one pass rather than stopping."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        internaldate = datetime(2026, 6, 1, tzinfo=UTC)
+        mb = FakeMailbox(
+            messages=[
+                _StoredMessage(
+                    uid=uid,
+                    raw=_raw(f"Subject {uid}", f"<m{uid}@test>"),
+                    flags=set(),
+                    internaldate=internaldate,
+                    mailbox="INBOX",
+                )
+                for uid in range(1, 4)
+            ],
+            uidvalidity={"INBOX": 1000},
+        )
+
+        result = scan(
+            mb,
+            conn,
+            account_id=account_id,
+            source_mailboxes=["INBOX"],
+            fetch_headers=_HEADERS,
+            max_candidates_per_run=None,
+        )
+
+        assert result.candidates_scanned == 3
+        assert result.stopped_at_cap is False
+    finally:
+        state.close_database(conn)
+
+
 # --- Acceptance test 11 (unit tier) --------------------------------------
 
 

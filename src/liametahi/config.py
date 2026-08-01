@@ -632,7 +632,7 @@ class TaskConfig(BaseModel):
     model: str = Field(min_length=1)
     source_mailboxes: list[str] = Field(default_factory=lambda: ["INBOX"])
     protect: ProtectConfig = Field(default_factory=ProtectConfig)
-    max_candidates_per_run: int = Field(default=500, gt=0)
+    max_candidates_per_run: int | None = Field(default=None, gt=0)
     max_actions_per_run: int | None = Field(default=None, gt=0)
     rules: list[RuleConfig] = Field(min_length=1)
 
