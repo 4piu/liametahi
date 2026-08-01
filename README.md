@@ -121,20 +121,18 @@ tasks:
       - id: old-digest
         priority: 100
         when:
-          all:
-            - older-than: 30d
-            - list-id-contains: digest
+          - older-than: 30d
+          - list-id-contains: digest
         actions: [backup, trash]
 
       - id: stale-notifications
         priority: 10
         when:
-          all:
-            - older-than: 7d
-            - llm: >
-                An automated notification, receipt, or update that is safe
-                to discard, except bills, account-security notices, or mail
-                that asks the recipient to act.
+          - older-than: 7d
+          - llm: >
+              An automated notification, receipt, or update that is safe
+              to discard, except bills, account-security notices, or mail
+              that asks the recipient to act.
         actions: [backup, trash]
 ```
 
@@ -205,6 +203,17 @@ namespaced id (`vendor/model`). OpenRouter also accepts optional
 | `max_actions_per_run` | unset — **no cap** unless you set one |
 | `rules` | required, non-empty |
 
+### `tasks.<name>.rules[]`
+
+| Key | Default |
+| --- | --- |
+| `id` | required, non-empty, unique within the task — this is also the model's output vocabulary |
+| `when` | required — see [Rule conditions](#rule-conditions) below |
+| `actions` | required, non-empty ordered list: `backup`, `trash`, `move_to:<mailbox>`, `label:<keyword>` |
+| `priority` | `0`; higher wins when more than one rule matches the same message (ties break by declaration order — earlier wins) |
+| `allow_content_escalation` | `false` — lets this rule's `llm` condition trigger the bounded body-excerpt second pass (see [Content escalation](#content-escalation)) when the model reports it's unsure |
+| `allow_trash_without_backup` | `false` — see [Safety model](#safety-model); required if `trash` appears with no preceding `backup` in the same action list |
+
 ### Rule conditions
 
 | Condition | Plain-form default | Notes |
@@ -223,14 +232,56 @@ namespaced id (`vendor/model`). OpenRouter also accepts optional
 | `auth-result` | `mechanism=result` (`spf=fail`) | see below; mechanism is `spf`, `dkim`, or `dmarc` |
 | `llm` | free-text description | the only condition the model ever sees |
 
+### Combining conditions
+
+`when:` is a list, **implicitly ANDed** — no wrapper keyword needed for the
+common case:
+
+```yaml
+when:
+  - older-than: 30d
+  - sender-match: foo@bar.com
+```
+
+For an exclusion, wrap the excluded condition in `not:`, right in that same
+list:
+
+```yaml
+when:
+  - older-than: 30d
+  - sender-match: foo@bar.com
+  - not:
+      subject-contains: buz
+```
+
+For "either of these," use `any:` — a list item can itself be `{any: [...]}`
+or `{not: {...}}`, nested up to 3 deep. A rule that's fundamentally an OR at
+the top is a one-item list wrapping it: `when: [{any: [...]}]`. A rule
+needing only one condition skips the list entirely — `when: {older-than:
+30d}` is exactly as terse as ever.
+
+There's no top-level `all:` keyword — `when: {all: [A, B]}` and `when: [A,
+B]` meant the same thing, so only the list form is accepted at the top now.
+`all` is still valid *nested*, e.g. inside an `any:`'s list to group several
+conditions as one alternative: `any: [{all: [A, B]}, C]` reads as "(A and B)
+or C".
+
+`not` can't wrap an `llm` condition (spec-enforced) — the payload sent to the
+model carries a description without polarity, so a negated `llm` atom would
+ask the model an un-negated question and then invert the answer, which is
+backwards. Phrase the exclusion in the description text instead: `llm: "safe
+to discard, except anything mentioning buz"`.
+
+### Condition details
+
 `-match` conditions default to **glob**: without a wildcard, the value must
 equal the whole field (`sender-match: bank.example` matches only that exact
 address, not "contains bank.example" — write `*bank.example*` for that).
 `-contains` conditions default to **substring**: the value is checked
 anywhere in the field, no wildcard syntax, always effectively "contains."
-Both accept a `/regex/flags` literal as a third option — combine with
-`all`/`any`/`not`, nesting up to 3 deep. A regex value both starts and ends
-with `/`, e.g. `sender-match: /.+@gmail\.com/i` — supported flags are
+Both accept a `/regex/flags` literal as a third option. A regex value both
+starts and ends with `/`, e.g. `sender-match: /.+@gmail\.com/i` — supported
+flags are
 `i`/`m`/`s`/`g`. Regex is compiled at config-load time (a bad pattern fails
 `config check`, not a run) and is **case-sensitive by default**, unlike the
 plain glob/substring form. These patterns run against sender-controlled

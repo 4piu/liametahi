@@ -15,6 +15,7 @@ from liametahi.config import (
     has_deterministic_atom,
     load_config,
     parse_condition_tree,
+    parse_when,
 )
 from tests.conftest import make_config_dict, write_config
 
@@ -85,42 +86,37 @@ def test_full_spec_example_config_loads(tmp_path: Path) -> None:
         {
             "id": "old-weekly-digest",
             "priority": 100,
-            "when": {"all": [{"older-than": "30d"}, {"list-id-contains": "digest"}]},
+            "when": [{"older-than": "30d"}, {"list-id-contains": "digest"}],
             "actions": ["backup", "trash"],
         },
         {
             "id": "mozmail-notifications",
             "priority": 50,
-            "when": {
-                "all": [
-                    {"recipient-match": "*@mozmail.com"},
-                    {"older-than": "7d"},
-                    {
-                        "llm": (
-                            "Automated, low-priority notification with no "
-                            "requested action."
-                        )
-                    },
-                ]
-            },
+            "when": [
+                {"recipient-match": "*@mozmail.com"},
+                {"older-than": "7d"},
+                {
+                    "llm": (
+                        "Automated, low-priority notification with no requested action."
+                    )
+                },
+            ],
             "allow_content_escalation": True,
             "actions": ["move_to:Archive"],
         },
         {
             "id": "stale-updates",
             "priority": 10,
-            "when": {
-                "all": [
-                    {"older-than": "14d"},
-                    {
-                        "llm": (
-                            "An update or announcement that is safe to discard, "
-                            "except bills, account-security notices, or mail that "
-                            "asks the recipient to act."
-                        )
-                    },
-                ]
-            },
+            "when": [
+                {"older-than": "14d"},
+                {
+                    "llm": (
+                        "An update or announcement that is safe to discard, "
+                        "except bills, account-security notices, or mail that "
+                        "asks the recipient to act."
+                    )
+                },
+            ],
             "actions": ["backup", "trash"],
         },
     ]
@@ -232,9 +228,10 @@ def test_duplicate_rule_id_rejected(tmp_path: Path) -> None:
 
 def test_two_llm_atoms_in_one_rule_rejected(tmp_path: Path) -> None:
     data = make_config_dict()
-    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = {
-        "all": [{"llm": "first"}, {"llm": "second"}]
-    }
+    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
+        {"llm": "first"},
+        {"llm": "second"},
+    ]
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["move_to:Archive"]
     path = write_config(tmp_path / "cfg.yaml", data)
     with pytest.raises(ConfigError, match="at most one 'llm' atom"):
@@ -263,9 +260,10 @@ def test_trash_on_llm_only_rule_rejected(tmp_path: Path) -> None:
 
 def test_trash_with_deterministic_condition_allowed(tmp_path: Path) -> None:
     data = make_config_dict()
-    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = {
-        "all": [{"older-than": "30d"}, {"llm": "safe to discard"}]
-    }
+    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
+        {"older-than": "30d"},
+        {"llm": "safe to discard"},
+    ]
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["backup", "trash"]
     path = write_config(tmp_path / "cfg.yaml", data)
     load_config(path)  # should not raise
@@ -363,6 +361,64 @@ def test_move_to_requires_mailbox(tmp_path: Path) -> None:
     path = write_config(tmp_path / "cfg.yaml", data)
     with pytest.raises(ConfigError, match="move_to"):
         load_config(path)
+
+
+# --- Top-level `when:` shapes (spec §7.2) --------------------------------
+
+
+def test_when_as_a_list_is_implicit_all() -> None:
+    tree = parse_when([{"older-than": "30d"}, {"sender-match": "*@bar.com"}])
+    assert isinstance(tree, rules.AllNode)
+    assert len(tree.children) == 2
+    assert isinstance(tree.children[0], rules.OlderThan)
+    assert isinstance(tree.children[1], rules.SenderMatch)
+
+
+def test_when_as_a_single_atom_still_works() -> None:
+    """A rule that only ever needed one condition loses nothing -- no
+    list wrapper required."""
+    tree = parse_when({"older-than": "30d"})
+    assert isinstance(tree, rules.OlderThan)
+
+
+def test_when_as_a_single_any_still_works() -> None:
+    """A rule that's fundamentally an OR at the top stays a bare `any:`,
+    not `when: [{any: [...]}]`."""
+    tree = parse_when({"any": [{"older-than": "30d"}, {"larger-than": "1M"}]})
+    assert isinstance(tree, rules.AnyNode)
+
+
+def test_when_top_level_all_is_rejected() -> None:
+    """The old top-level `all:` wrapper is gone -- it was purely
+    redundant with the list form, and having two spellings for the same
+    thing was the specific awkwardness this replaces."""
+    with pytest.raises(ConfigError, match="no longer accepted"):
+        parse_when({"all": [{"older-than": "30d"}, {"larger-than": "1M"}]})
+
+
+def test_when_empty_list_rejected() -> None:
+    with pytest.raises(ConfigError):
+        parse_when([])
+
+
+def test_when_nested_all_inside_any_still_works() -> None:
+    """`all:` remains valid as a *nested* keyword -- only the redundant
+    top-level wrapper was removed."""
+    tree = parse_when(
+        [
+            {
+                "any": [
+                    {"all": [{"older-than": "30d"}, {"larger-than": "1M"}]},
+                    {"sender-match": "*@bar.com"},
+                ]
+            }
+        ]
+    )
+    assert isinstance(tree, rules.AllNode)
+    assert len(tree.children) == 1
+    inner = tree.children[0]
+    assert isinstance(inner, rules.AnyNode)
+    assert isinstance(inner.children[0], rules.AllNode)
 
 
 # --- Nesting depth (spec §7.2) ------------------------------------------
@@ -506,9 +562,10 @@ def test_auth_result_fetch_headers_include_authentication_results(
     tmp_path: Path,
 ) -> None:
     data = make_config_dict()
-    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = {
-        "all": [{"auth-result": "spf=fail"}, {"older-than": "1d"}]
-    }
+    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
+        {"auth-result": "spf=fail"},
+        {"older-than": "1d"},
+    ]
     path = write_config(tmp_path / "cfg.yaml", data)
     cfg = load_config(path)
     assert "AUTHENTICATION-RESULTS" in cfg.tasks["inbox-cleanup"].fetch_headers
@@ -631,9 +688,10 @@ def test_fetch_headers_includes_base_set(tmp_path: Path) -> None:
 
 def test_fetch_headers_includes_has_header_names(tmp_path: Path) -> None:
     data = make_config_dict()
-    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = {
-        "all": [{"has-header": "X-Spam-Flag"}, {"older-than": "1d"}]
-    }
+    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
+        {"has-header": "X-Spam-Flag"},
+        {"older-than": "1d"},
+    ]
     path = write_config(tmp_path / "cfg.yaml", data)
     cfg = load_config(path)
     assert "X-SPAM-FLAG" in cfg.tasks["inbox-cleanup"].fetch_headers

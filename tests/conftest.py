@@ -42,12 +42,10 @@ BASE_CONFIG: dict[str, Any] = {
                 {
                     "id": "old-weekly-digest",
                     "priority": 100,
-                    "when": {
-                        "all": [
-                            {"older-than": "30d"},
-                            {"list-id-contains": "digest"},
-                        ]
-                    },
+                    "when": [
+                        {"older-than": "30d"},
+                        {"list-id-contains": "digest"},
+                    ],
                     "actions": ["backup", "trash"],
                 },
             ],

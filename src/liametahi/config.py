@@ -329,6 +329,46 @@ def parse_condition_tree(raw: object, *, depth: int = 0) -> ConditionTree:
     return _parse_atom(key, value)
 
 
+def parse_when(raw: object) -> ConditionTree:
+    """Parse a rule's top-level `when:` value (spec §7.2).
+
+    Two shapes are accepted:
+
+    - **A YAML list** of condition nodes, implicitly ANDed together —
+      `when: [{older-than: 30d}, {sender-match: foo@bar.com}]`. This
+      replaces the old top-level `all:` wrapper for the common
+      match-all-of-these case; a list item is parsed at `depth=1`, the
+      same nesting cost the `all:` wrapper it replaces used to charge.
+    - **A single condition node** — one atom, or an `any`/`not` — exactly
+      as `parse_condition_tree` already handles, unchanged. A rule that
+      only ever needed one condition (`when: {older-than: 30d}`) or is
+      fundamentally an OR/negation at the top (`when: {any: [...]}`)
+      loses nothing and gains no new wrapping to write.
+
+    `all:` is no longer valid as this value's own top-level key — it was
+    purely redundant with the list form (`when: {all: [A, B]}` and
+    `when: [A, B]` meant the same thing) and having two spellings for the
+    same case was the specific awkwardness this replaces. `all:` remains
+    a valid *nested* keyword, e.g. inside an `any:`'s list, to group
+    several conditions as one alternative.
+    """
+    if isinstance(raw, list):
+        if not raw:
+            raise ConfigError(
+                "'when' as a list must be non-empty — a rule needs at "
+                "least one condition"
+            )
+        children = tuple(parse_condition_tree(item, depth=1) for item in raw)
+        return rules.AllNode(children)
+    if isinstance(raw, dict) and len(raw) == 1 and next(iter(raw)) == "all":
+        raise ConfigError(
+            "'when: {all: [...]}' is no longer accepted — write the list "
+            "directly instead: 'when: [...]' (the same conditions, "
+            "without the redundant wrapper)"
+        )
+    return parse_condition_tree(raw, depth=0)
+
+
 def _validate_llm_placement(tree: ConditionTree, *, rule_id: str) -> None:
     """Enforce spec §7.3: at most one `llm` atom per rule, never under `not`."""
     count = 0
@@ -571,7 +611,7 @@ class RuleConfig(BaseModel):
     @field_validator("when", mode="before")
     @classmethod
     def _parse_when(cls, value: object) -> ConditionTree:
-        return parse_condition_tree(value)
+        return parse_when(value)
 
     @model_validator(mode="after")
     def _validate_rule(self) -> Self:

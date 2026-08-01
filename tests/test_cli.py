@@ -92,7 +92,7 @@ def test_acceptance_15_config_check_world_readable_exits_2(tmp_path: Path) -> No
 
 def test_acceptance_14_invalid_rule_configs_exit_2(tmp_path: Path) -> None:
     variants = {
-        "two-llm-atoms": {"all": [{"llm": "a"}, {"llm": "b"}]},
+        "two-llm-atoms": [{"llm": "a"}, {"llm": "b"}],
         "llm-under-not": {"not": {"llm": "a"}},
     }
     for name, when in variants.items():
