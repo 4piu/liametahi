@@ -131,6 +131,7 @@ def write_verified_backup(
     original_flags: Collection[str],
     internaldate: datetime,
     run_id: str,
+    raw: bytes | None = None,
 ) -> BackupResult:
     """spec section 11 / contracts section 10 (concurrency notes):
     fetch raw RFC 822 bytes with `BODY.PEEK[]` (the adapter's job --
@@ -149,13 +150,21 @@ def write_verified_backup(
     method -- if the fetch, write, or verification fails. The caller
     must treat `BackupError` as "the mailbox was not touched, do not
     proceed to the mutation."
+
+    `raw`, when given, is the message's bytes already in hand from an
+    earlier fetch of this same key -- the execute phase pulls metadata
+    and body in one round trip -- and skips the `fetch_raw` below. It
+    changes nothing downstream: the bytes still go through the same
+    write, fsync, and read-back-and-checksum verification, so a caller
+    passing corrupt bytes is caught exactly as a corrupt fetch would be.
     """
-    try:
-        raw = mailbox.fetch_raw(key.uid)
-    except Exception as exc:
-        raise BackupError(
-            f"could not fetch raw message for backup ({key.render()}): {exc}"
-        ) from exc
+    if raw is None:
+        try:
+            raw = mailbox.fetch_raw(key.uid)
+        except Exception as exc:
+            raise BackupError(
+                f"could not fetch raw message for backup ({key.render()}): {exc}"
+            ) from exc
 
     try:
         backup_dir = ensure_backup_dir(backup_dir)

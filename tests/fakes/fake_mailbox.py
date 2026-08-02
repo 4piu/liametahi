@@ -240,6 +240,32 @@ class FakeMailbox:
                 return msg.raw
         raise KeyError(f"no such message: {mailbox}/{uid}")
 
+    def fetch_metadata_and_raw(self, uid: int) -> tuple[RawMetadata, bytes] | None:
+        """The real adapter parses headers out of the fetched message
+        rather than requesting a subset, so every header is present --
+        mirrored here so a caller cannot pass against the fake by
+        relying on a subset the real one would not have restricted."""
+        mailbox = self._require_selected()
+        for msg in self._messages.get(mailbox, []):
+            if msg.uid != uid or msg.vanished:
+                continue
+            parsed = _parsed(msg.raw)
+            headers: dict[str, tuple[str, ...]] = {}
+            for name in {str(k).lower() for k, _ in parsed.items()}:
+                values = _header_values(parsed, name)
+                if values:
+                    headers[name] = values
+            meta = RawMetadata(
+                uid=msg.uid,
+                internaldate=msg.internaldate,
+                rfc822_size=len(msg.raw),
+                flags=frozenset(msg.flags),
+                headers=headers,
+                has_attachment=_has_attachment(parsed),
+            )
+            return meta, msg.raw
+        return None
+
     def move(self, uid: int, destination: str) -> None:
         self._mutation_log.append(f"move uid={uid} destination={destination!r}")
         if "MOVE" not in self._capabilities:

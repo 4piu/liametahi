@@ -50,6 +50,7 @@ from typing import Literal
 from liametahi import backup, rules, state
 from liametahi.backup import (
     MailboxAdapter,
+    MailboxStatus,
     RawMetadata,
     is_unsupported_error,
     is_vanished_error,
@@ -75,6 +76,42 @@ ItemStatus = Literal[
 ]
 
 _ReverifyVerdict = Literal["ok", "vanished", "changed"]
+
+
+class _Selection:
+    """Remembers which mailbox is already selected on `mailbox` so the
+    per-item re-verify below does not re-issue `SELECT` for every one of
+    (in a first run) thousands of messages that all live in the same
+    mailbox. On a remote server that redundant round trip was a fifth of
+    the execute phase's total wire traffic.
+
+    Dropping it does not weaken the re-verify: `SELECT`'s contribution
+    was its `UIDVALIDITY`, and a server that renumbers a mailbox *while
+    it is selected* must, per RFC 3501 §7.1, force the client to
+    reselect rather than silently continue -- so a stale cached value
+    cannot outlive the renumbering. The check that actually protects the
+    mailbox is the fingerprint comparison a few lines further down,
+    which refuses to mutate whenever the UID holds anything other than
+    the exact message that was classified.
+    """
+
+    __slots__ = ("_mailbox", "_status")
+
+    def __init__(self) -> None:
+        self._mailbox: str | None = None
+        self._status: MailboxStatus | None = None
+
+    def status_for(self, mailbox: MailboxAdapter, name: str) -> MailboxStatus:
+        if self._mailbox != name or self._status is None:
+            # Assigned only after select() returns: a raised exception
+            # must leave no mailbox recorded as selected.
+            self._mailbox, self._status = None, None
+            status = mailbox.select(name, readonly=False)
+            self._mailbox, self._status = name, status
+        return self._status
+
+    def invalidate(self) -> None:
+        self._mailbox, self._status = None, None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +177,7 @@ def execute_items(
     actions_done = 0
     reporter = progress or NullProgress()
     reporter.start("executing", total=len(items))
+    selection = _Selection()
 
     for item in items:
         if max_actions is not None and actions_done >= max_actions:
@@ -187,6 +225,7 @@ def execute_items(
             backup_dir=backup_dir,
             protected_flags=protected_flags,
             protect_unread=protect_unread,
+            selection=selection,
         )
         outcomes.append(
             ExecutionOutcome(
@@ -194,6 +233,11 @@ def execute_items(
             )
         )
         reporter.advance()
+        if outcome_status == "failed":
+            # A failure may have been a transport-level one that left the
+            # connection's selected state unreliable; make the next item
+            # re-`SELECT` rather than trust what this one was using.
+            selection.invalidate()
         if outcome_status == "failed" and fail_fast:
             reporter.stop()
             return ExecuteSummary(tuple(outcomes), actions_done, True)
@@ -211,6 +255,7 @@ def _execute_one(
     backup_dir: Path,
     protected_flags: Collection[str],
     protect_unread: bool,
+    selection: _Selection,
 ) -> tuple[ItemStatus, int | None, str | None]:
     # Claim before mutate (spec section 10, section 4.3 point 3): a key
     # held by a different live run is never stolen.
@@ -229,8 +274,18 @@ def _execute_one(
         return "claimed_by_other_run", result_id, None
 
     try:
-        verdict, meta = _reverify(
-            conn, mailbox, key=item.key, expected_fingerprint=item.fingerprint
+        # Fetching the body during re-verify costs nothing extra on the
+        # wire (same round trip) but is wasted download for a message
+        # that turns out `changed`/`protected`, so only ask for it when
+        # this item's action sequence is actually going to back it up.
+        wants_body = any(action.kind == "backup" for action in item.actions)
+        verdict, meta, raw = _reverify(
+            conn,
+            mailbox,
+            key=item.key,
+            expected_fingerprint=item.fingerprint,
+            selection=selection,
+            wants_body=wants_body,
         )
         if verdict != "ok":
             logger.debug(
@@ -302,6 +357,7 @@ def _execute_one(
             result_id=result_id,
             backup_dir=backup_dir,
             meta=meta,
+            raw=raw,
         )
         return final_status, result_id, error
     finally:
@@ -314,9 +370,18 @@ def _reverify(
     *,
     key: MessageKey,
     expected_fingerprint: str,
-) -> tuple[_ReverifyVerdict, RawMetadata | None]:
+    selection: _Selection,
+    wants_body: bool,
+) -> tuple[_ReverifyVerdict, RawMetadata | None, bytes | None]:
     """spec section 4.3 point 4: re-fetch by message key and confirm
     existence and an unchanged fingerprint before any mutation.
+
+    With `wants_body`, the message's raw bytes come back alongside the
+    metadata from a single FETCH and are returned as the third element,
+    for the `backup` action that would otherwise fetch them again. The
+    bytes are returned only on an `"ok"` verdict -- anything else means
+    the message is not the one that was classified, so its bytes are not
+    the ones to back up.
 
     Recomputes `domain.fingerprint` from a freshly re-fetched
     `MESSAGE-ID` header plus the re-fetched `INTERNALDATE`/
@@ -334,22 +399,29 @@ def _reverify(
     path.
     """
     try:
-        status = mailbox.select(key.mailbox, readonly=False)
+        status = selection.status_for(mailbox, key.mailbox)
     except Exception as exc:
         if is_vanished_error(exc):
-            return "vanished", None
+            return "vanished", None, None
         raise
     if status.uidvalidity != key.uidvalidity:
-        return "changed", None
+        return "changed", None, None
 
+    raw: bytes | None = None
+    fetched: tuple[RawMetadata, ...]
     try:
-        fetched = mailbox.fetch_metadata([key.uid], headers=["MESSAGE-ID"])
+        if wants_body:
+            both = mailbox.fetch_metadata_and_raw(key.uid)
+            fetched = () if both is None else (both[0],)
+            raw = None if both is None else both[1]
+        else:
+            fetched = mailbox.fetch_metadata([key.uid], headers=["MESSAGE-ID"])
     except Exception as exc:
         if is_vanished_error(exc):
-            return "vanished", None
+            return "vanished", None, None
         raise
     if not fetched:
-        return "vanished", None
+        return "vanished", None, None
     meta = fetched[0]
 
     # RawMetadata.headers is lowercased-key, multi-valued (contracts
@@ -364,17 +436,21 @@ def _reverify(
             from_address=None,
             subject=None,
         )
-        return ("ok", meta) if fresh == expected_fingerprint else ("changed", None)
+        if fresh != expected_fingerprint:
+            return "changed", None, None
+        return "ok", meta, raw
 
     stored = state.get_candidate(conn, key=key)
     if stored is None:
-        return "changed", None
+        return "changed", None, None
     _, candidate = stored
     unchanged = (
         candidate.rfc822_size == meta.rfc822_size
         and candidate.internaldate == meta.internaldate
     )
-    return ("ok", meta) if unchanged else ("changed", None)
+    if not unchanged:
+        return "changed", None, None
+    return "ok", meta, raw
 
 
 def _run_action_sequence(
@@ -386,6 +462,7 @@ def _run_action_sequence(
     result_id: int,
     backup_dir: Path,
     meta: RawMetadata,
+    raw: bytes | None,
 ) -> tuple[ItemStatus, str | None]:
     """spec section 4.3 points 6-7 / spec's non-negotiables: run actions
     strictly in order; the single remote mutation only after every
@@ -444,6 +521,7 @@ def _run_action_sequence(
                     original_flags=meta.flags,
                     internaldate=meta.internaldate,
                     run_id=run_id,
+                    raw=raw,
                 )
             except backup.BackupError as exc:
                 # Backup verification failed: the mailbox has not been

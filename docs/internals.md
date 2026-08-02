@@ -27,6 +27,17 @@ atomically, re-fetch and re-verify it has not changed, re-check flag-based
 protection against those fresh flags, then run the winning rule's actions in
 order. A `--dry-run` performs every step except the mutations.
 
+The re-fetch is where this phase spends its time — against a remote server
+it is one network round trip multiplied by every matched message — so it is
+kept to the minimum that is still safe. The mailbox is selected once and
+reused for as long as consecutive messages share it, rather than re-selected
+per message; the re-verify fetch also carries the message body when the
+winning rule is going to back it up, instead of downloading it again a moment
+later. What is deliberately *not* skipped is the existence check before a
+`MOVE`: IMAP accepts a `MOVE` against an empty match set without complaint,
+so dropping it would let a message that vanished in the last instant be
+recorded as successfully moved.
+
 ## Why each safety rule exists
 
 - **The LLM never mutates anything.** It classifies; a separate, deterministic

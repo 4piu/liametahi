@@ -85,6 +85,7 @@ class MailboxAdapter(Protocol):
         self, uids: Sequence[int], headers: Sequence[str]
     ) -> tuple[RawMetadata, ...]: ...
     def fetch_raw(self, uid: int) -> bytes: ...
+    def fetch_metadata_and_raw(self, uid: int) -> tuple[RawMetadata, bytes] | None: ...
     def move(self, uid: int, destination: str) -> None: ...
     def add_keyword(self, uid: int, keyword: str) -> None: ...
     def append(
@@ -344,6 +345,17 @@ def _parse_fetch_line(line: bytes, literal: bytes) -> RawMetadata | None:
     )
 
 
+def _header_block(raw: bytes) -> bytes:
+    """The header section of a whole RFC 822 message, so a full-message
+    fetch can reuse `_parse_header_literal` without handing it a
+    multi-megabyte body to walk. The blank line terminating the headers
+    may use either line ending; a message with no blank line at all is
+    all headers."""
+    ends = [raw.find(sep) for sep in (b"\r\n\r\n", b"\n\n")]
+    found = [end for end in ends if end != -1]
+    return raw[: min(found)] if found else raw
+
+
 def _parse_header_literal(literal: bytes) -> Mapping[str, tuple[str, ...]]:
     """Parse a `BODY[HEADER.FIELDS (...)]` literal into a lowercased,
     multi-valued header mapping. `email.message_from_bytes` handles
@@ -555,6 +567,39 @@ class ImapMailbox:
                 if isinstance(body, bytes):
                     return body
         raise KeyError(f"no such message: uid {uid}")
+
+    def fetch_metadata_and_raw(self, uid: int) -> tuple[RawMetadata, bytes] | None:
+        """Everything `fetch_metadata([uid], headers=...)` returns plus
+        everything `fetch_raw(uid)` returns, in a single round trip.
+        `None` means the UID no longer matches a message.
+
+        The execute phase needs both for the same message back to back
+        (re-verify, then back up), and against a remote server the
+        second round trip costs more than the extra data items do.
+
+        Headers come from parsing the raw bytes rather than from a
+        separate `BODY.PEEK[HEADER.FIELDS (...)]` item: two literals in
+        one FETCH response make `imaplib`'s reply shape substantially
+        harder to parse, and the full message already contains every
+        header, so the caller gets *all* of them rather than a
+        requested subset. `BODY.PEEK[]` leaves `\\Seen` untouched, same
+        as `fetch_raw`.
+        """
+        self._require_selected()
+        fetch_items = "(UID INTERNALDATE RFC822.SIZE FLAGS BODYSTRUCTURE BODY.PEEK[])"
+        typ, data = self._conn.uid("FETCH", str(uid), fetch_items)
+        if typ != "OK":
+            raise ImapTransportError("UID FETCH failed")
+        for item in data:
+            if not isinstance(item, tuple) or len(item) != 2:
+                continue
+            line, raw = item
+            if line is None or raw is None:
+                continue
+            parsed = _parse_fetch_line(line, _header_block(raw))
+            if parsed is not None:
+                return parsed, raw
+        return None
 
     def move(self, uid: int, destination: str) -> None:
         self._require_selected()
