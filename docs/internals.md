@@ -22,6 +22,16 @@ three-valued logic: fully true matches immediately, false is eliminated, and
 only `unknown` — meaning an `llm` condition remains — goes to the model, in
 batches, after the decision cache has removed everything already answered.
 
+Those batches are independent of one another, so `max_concurrent_requests` may
+put several in flight at once — on a first run over a large mailbox this is the
+single biggest thing available, since nearly all of the phase's wall clock is
+spent waiting on a provider. It defaults to `1` because the safe value is a
+property of your provider's rate limit, which Liametahi cannot discover. Raising
+it never changes what a run decides: results are recorded in batch order, not
+completion order, and every database write stays on the one thread that owns the
+connection, so the stored rows and the printed report come out identical at any
+setting.
+
 **3. Execute.** Reconnect, and for each matched message: claim its key
 atomically, re-fetch and re-verify it has not changed, re-check flag-based
 protection against those fresh flags, then run the winning rule's actions in

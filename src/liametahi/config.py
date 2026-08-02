@@ -577,6 +577,14 @@ class ModelConfig(BaseModel):
     # enforced -- large batches measurably degrade small local models, but
     # that is guidance for the README, not something to reject outright.
     mails_per_request: int = Field(default=10, ge=1)
+    # How many of those requests may be in flight at once. Defaults to 1
+    # -- fully serial, the behaviour every existing config already has --
+    # because the right value depends on a provider's rate limits, which
+    # this program cannot discover. Raising it is the single largest win
+    # available on a first run over a large mailbox, where classification
+    # is thousands of independent requests whose latency is nearly all
+    # waiting.
+    max_concurrent_requests: int = Field(default=1, ge=1)
     timeout_seconds: int = Field(default=45, gt=0)
     max_retries: int = Field(default=2, ge=0)
     body_excerpt: BodyExcerptConfig = Field(default_factory=BodyExcerptConfig)

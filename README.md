@@ -176,6 +176,7 @@ default.
 | `extra_headers` | Extra HTTP headers merged into every request | `{}` |
 | `structured_output` | `auto` / `json_schema` / `json_object` / `none` | `auto` |
 | `mails_per_request` | Messages sent to the model per classification call. No upper bound is enforced, but large batches measurably degrade small local models | `10` |
+| `max_concurrent_requests` | Classification requests in flight at once. Raising this is the biggest speed-up available on a first run; how far you can raise it is your provider's rate limit to answer | `1` (serial) |
 | `timeout_seconds` | Per-request HTTP timeout | `45` |
 | `max_retries` | Transport-error retries — never a rejected response | `2` |
 | `body_excerpt.format` | Excerpt format offered on escalation | `plain_text_excerpt` |

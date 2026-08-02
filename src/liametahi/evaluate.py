@@ -44,6 +44,7 @@ that exact candidate. See `_resolve_item` below.
 
 import sqlite3
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -120,6 +121,20 @@ class _BatchItem:
     cache_hit: bool
     remaining_rule_ids: tuple[str, ...]
     input_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class _BatchAttempt:
+    """One completed model call and the items it covered -- the whole
+    result of the network half of a batch, carrying everything the
+    bookkeeping half needs so the two can happen on different threads.
+    `outcome is None` means the call failed or came back wholly invalid,
+    with `failure_reason` explaining which."""
+
+    items: tuple[_BatchItem, ...]
+    item_by_payload_id: dict[str, _BatchItem]
+    outcome: ClassifyOutcome | None
+    failure_reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,35 +290,30 @@ def evaluate_candidates(
             llm_items, batch_size=model_config.mails_per_request
         )
         total_batches = len(batches)
+        concurrency = min(model_config.max_concurrent_requests, total_batches)
         logger.info(
-            "run %s: %d mail(s) need an LLM call, in %d batch(es)",
+            "run %s: %d mail(s) need an LLM call, in %d batch(es)%s",
             run_id,
             len(llm_items),
             total_batches,
+            "" if concurrency == 1 else f", {concurrency} at a time",
         )
         reporter.start("classifying", total=len(llm_items))
-        for index, batch in enumerate(batches, start=1):
-            logger.info(
-                "run %s: classifying batch %d/%d (%d mails)",
-                run_id,
-                index,
-                total_batches,
-                len(batch),
-            )
-            batch_stats = _classify_batch(
+        try:
+            stats = _classify_all(
                 conn,
-                batch,
+                batches,
                 rules_by_id=rules_by_id,
                 classifier=classifier,
                 run_id=run_id,
                 account_id=account_id,
                 model_id=model_id,
                 per_candidate=per_candidate,
-                batch_label=f"{index}/{total_batches}",
+                concurrency=concurrency,
+                reporter=reporter,
             )
-            stats = _combine_stats(stats, batch_stats)
-            reporter.advance(len(batch))
-        reporter.stop()
+        finally:
+            reporter.stop()
 
     results = tuple(per_candidate[candidate_id] for candidate_id, _ in candidates)
     return EvaluateOutcome(
@@ -382,9 +392,9 @@ def _llm_description(rule: RuleConfig) -> str:
     return llm_condition.description
 
 
-def _classify_batch(
+def _classify_all(
     conn: sqlite3.Connection,
-    items: Sequence[_BatchItem],
+    batches: Sequence[Sequence[_BatchItem]],
     *,
     rules_by_id: dict[str, RuleConfig],
     classifier: Classifier,
@@ -392,15 +402,110 @@ def _classify_batch(
     account_id: int,
     model_id: str,
     per_candidate: dict[int, CandidateResult],
+    concurrency: int,
+    reporter: Progress,
+) -> _BatchStats:
+    """Classify every batch and record the results.
+
+    The model calls may overlap (`concurrency > 1`); the recording never
+    does. Every write goes through `conn` on this thread, in batch order
+    -- not completion order -- so the database, the audit trail, and the
+    report come out identical no matter what the concurrency is set to
+    or how the provider happened to schedule the requests. The only
+    thing `max_concurrent_requests` is allowed to change is how long the
+    phase takes.
+
+    `sqlite3` connections are not safe to share across threads, and
+    `state.transaction` is explicit that a transaction must never be
+    held open across network I/O; keeping every write on this thread is
+    what satisfies both at once.
+    """
+    total = len(batches)
+
+    def label(index: int) -> str:
+        return f"{index}/{total}"
+
+    def network(index: int, batch: Sequence[_BatchItem]) -> list[_BatchAttempt]:
+        logger.info(
+            "run %s: classifying batch %d/%d (%d mails)",
+            run_id,
+            index,
+            total,
+            len(batch),
+        )
+        return _call_classifier(
+            batch,
+            rules_by_id=rules_by_id,
+            classifier=classifier,
+            run_id=run_id,
+            batch_label=label(index),
+        )
+
+    stats = _BatchStats(llm_calls=0)
+
+    def record(batch: Sequence[_BatchItem], attempts: list[_BatchAttempt]) -> None:
+        nonlocal stats
+        for attempt in attempts:
+            stats = _combine_stats(
+                stats,
+                _apply_attempt(
+                    conn,
+                    attempt,
+                    rules_by_id=rules_by_id,
+                    run_id=run_id,
+                    account_id=account_id,
+                    model_id=model_id,
+                    per_candidate=per_candidate,
+                ),
+            )
+        reporter.advance(len(batch))
+
+    if concurrency <= 1:
+        for index, batch in enumerate(batches, start=1):
+            record(batch, network(index, batch))
+        return stats
+
+    # `executor.map` yields in submission order, which is what keeps the
+    # recording deterministic. Interrupting mid-phase still has to wait
+    # for the requests already in flight to come back -- there is no way
+    # to abandon a socket a worker thread is blocked on -- but the ones
+    # merely queued are dropped rather than started.
+    executor = ThreadPoolExecutor(
+        max_workers=concurrency, thread_name_prefix="lia-classify"
+    )
+    try:
+        results = executor.map(network, range(1, total + 1), batches)
+        for batch, attempts in zip(batches, results, strict=True):
+            record(batch, attempts)
+    except BaseException:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+    return stats
+
+
+def _call_classifier(
+    items: Sequence[_BatchItem],
+    *,
+    rules_by_id: dict[str, RuleConfig],
+    classifier: Classifier,
+    run_id: str,
     allow_retry: bool = True,
     batch_label: str = "1/1",
-) -> _BatchStats:
-    """Classify one batch. If the response is unparseable or wholly
-    invalid (spec §5.4 point 2), split the batch in half and retry each
-    half exactly once (`allow_retry=False` on the recursive call
-    prevents a second split). Items still invalid after that retry are
-    `invalid_response`; a well-formed response missing some ids
-    finalises those as `no_llm_response`."""
+) -> list[_BatchAttempt]:
+    """The network half of classifying one batch, and nothing else.
+
+    Touches no database and no shared mutable state, which is what makes
+    it safe to run for several batches at once (see
+    `_classify_concurrently`). Everything that has to be *written* comes
+    back in the returned attempts for the caller to apply.
+
+    If the response is unparseable or wholly invalid (spec §5.4 point 2),
+    the batch is split in half and each half retried exactly once
+    (`allow_retry=False` on the recursive call prevents a second split),
+    which is why this returns a list rather than a single attempt.
+    """
     payloads, item_by_payload_id, offered_rules = _build_batch_request(
         items, rules_by_id
     )
@@ -444,38 +549,56 @@ def _classify_batch(
             len(items),
         )
         midpoint = len(items) // 2
-        left = _classify_batch(
-            conn,
-            items[:midpoint],
-            rules_by_id=rules_by_id,
-            classifier=classifier,
-            run_id=run_id,
-            account_id=account_id,
-            model_id=model_id,
-            per_candidate=per_candidate,
-            allow_retry=False,
-            batch_label=f"{batch_label} (retry 1/2)",
-        )
-        right = _classify_batch(
-            conn,
-            items[midpoint:],
-            rules_by_id=rules_by_id,
-            classifier=classifier,
-            run_id=run_id,
-            account_id=account_id,
-            model_id=model_id,
-            per_candidate=per_candidate,
-            allow_retry=False,
-            batch_label=f"{batch_label} (retry 2/2)",
-        )
-        return _combine_stats(left, right)
+        halves = []
+        for half_index, half in enumerate(
+            (items[:midpoint], items[midpoint:]), start=1
+        ):
+            halves.extend(
+                _call_classifier(
+                    half,
+                    rules_by_id=rules_by_id,
+                    classifier=classifier,
+                    run_id=run_id,
+                    allow_retry=False,
+                    batch_label=f"{batch_label} (retry {half_index}/2)",
+                )
+            )
+        return halves
 
-    # From here on it is all bookkeeping: the model call above already
-    # happened, so these writes go in one transaction per batch rather
-    # than one fsync per row (see `state.transaction`). The classify()
-    # call is deliberately *outside* it -- a write transaction held open
-    # across a minute-long model call would block every other writer.
-    if wholly_invalid:
+    return [
+        _BatchAttempt(
+            items=tuple(items),
+            item_by_payload_id=item_by_payload_id,
+            outcome=None if wholly_invalid else outcome,
+            failure_reason=failure_reason,
+        )
+    ]
+
+
+def _apply_attempt(
+    conn: sqlite3.Connection,
+    attempt: _BatchAttempt,
+    *,
+    rules_by_id: dict[str, RuleConfig],
+    run_id: str,
+    account_id: int,
+    model_id: str,
+    per_candidate: dict[int, CandidateResult],
+) -> _BatchStats:
+    """The bookkeeping half: record what `_call_classifier` came back
+    with. Pure local work -- one transaction per batch rather than one
+    fsync per row (see `state.transaction`) -- and always on the thread
+    that owns `conn`, never inside a worker.
+
+    Items the model answered invalidly are `invalid_response`; a
+    well-formed response missing some ids finalises those as
+    `no_llm_response`."""
+    items = attempt.items
+    outcome = attempt.outcome
+    item_by_payload_id = attempt.item_by_payload_id
+
+    if outcome is None:
+        failure_reason = attempt.failure_reason
         with state.transaction(conn):
             for item in items:
                 _mark_invalid(item, per_candidate, error=failure_reason)
@@ -495,7 +618,6 @@ def _classify_batch(
                 )
         return _BatchStats(llm_calls=1)
 
-    assert outcome is not None
     with state.transaction(conn):
         _apply_outcome(
             conn,
