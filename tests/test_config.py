@@ -720,24 +720,43 @@ def test_has_deterministic_atom() -> None:
 # --- File permission/ownership checks (spec §12; acceptance test 15) -----
 
 
-def test_acceptance_15_world_readable_config_rejected(tmp_path: Path) -> None:
+def test_acceptance_15_world_readable_config_warns_but_loads(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     path = write_config(tmp_path / "cfg.yaml", make_config_dict())
     path.chmod(0o644)
-    with pytest.raises(ConfigFilePermissionError):
-        load_config(path)
+    load_config(path)  # should not raise
+    stderr = capsys.readouterr().err
+    assert "warning" in stderr
+    assert str(path) in stderr
 
 
-def test_group_readable_config_rejected(tmp_path: Path) -> None:
+def test_group_readable_config_warns(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     path = write_config(tmp_path / "cfg.yaml", make_config_dict())
     path.chmod(0o640)
-    with pytest.raises(ConfigFilePermissionError):
-        check_file_permissions(path)
+    check_file_permissions(path)  # should not raise
+    assert "warning" in capsys.readouterr().err
 
 
 def test_owner_only_config_accepted(tmp_path: Path) -> None:
     path = write_config(tmp_path / "cfg.yaml", make_config_dict())
     path.chmod(0o600)
     check_file_permissions(path)  # should not raise
+
+
+def test_config_owned_by_another_user_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ownership stays a hard failure even though loose mode bits (above)
+    now only warn: a file owned by someone else may already have been
+    tampered with (spec §12)."""
+    path = write_config(tmp_path / "cfg.yaml", make_config_dict())
+    path.chmod(0o600)
+    monkeypatch.setattr("os.getuid", lambda: path.stat().st_uid + 1)
+    with pytest.raises(ConfigFilePermissionError):
+        check_file_permissions(path)
 
 
 def test_missing_config_file_rejected(tmp_path: Path) -> None:

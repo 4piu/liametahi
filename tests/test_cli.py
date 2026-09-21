@@ -112,12 +112,15 @@ def test_config_check_unwritable_log_file_exits_2_not_a_traceback(
     assert "settings.log_file" in result.output
 
 
-def test_acceptance_15_config_check_world_readable_exits_2(tmp_path: Path) -> None:
+def test_acceptance_15_config_check_world_readable_warns_but_exits_0(
+    tmp_path: Path,
+) -> None:
     path = write_config(tmp_path / "cfg.yaml", make_config_dict())
     path.chmod(0o644)
     result = runner.invoke(app, ["config", "check", "--config", str(path)])
-    assert result.exit_code == 2
-    assert "config error" in result.output
+    assert result.exit_code == 0, result.output
+    assert "warning" in result.output
+    assert "config OK" in result.output
 
 
 def test_acceptance_14_invalid_rule_configs_exit_2(tmp_path: Path) -> None:
@@ -306,6 +309,40 @@ def test_config_path_resolution_prefers_env_over_default(
     """`--config` wins; else `$LIAMETAHI_CONFIG`; else the default (spec §9)."""
     path = write_config(tmp_path / "from-env.yaml", make_config_dict())
     monkeypatch.setenv("LIAMETAHI_CONFIG", str(path))
+    result = runner.invoke(app, ["config", "check"])
+    assert result.exit_code == 0, result.output
+    assert "from-env.yaml" in result.output
+
+
+def test_project_config_in_cwd_supersedes_user_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `./config.yaml` in the current directory is used ahead of the
+    user-level default when neither `--config` nor `$LIAMETAHI_CONFIG` is
+    given (spec §9)."""
+    monkeypatch.delenv("LIAMETAHI_CONFIG", raising=False)
+    write_config(tmp_path / "config.yaml", make_config_dict())
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["config", "check"])
+    assert result.exit_code == 0, result.output
+    assert str(tmp_path / "config.yaml") in result.output
+
+
+def test_project_config_does_not_override_explicit_flag_or_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both `--config` and `$LIAMETAHI_CONFIG` outrank a project-level
+    `./config.yaml`, even when one is present in the cwd (spec §9)."""
+    write_config(tmp_path / "config.yaml", make_config_dict())
+    monkeypatch.chdir(tmp_path)
+
+    explicit = write_config(tmp_path / "explicit.yaml", make_config_dict())
+    result = runner.invoke(app, ["config", "check", "--config", str(explicit)])
+    assert result.exit_code == 0, result.output
+    assert "explicit.yaml" in result.output
+
+    from_env = write_config(tmp_path / "from-env.yaml", make_config_dict())
+    monkeypatch.setenv("LIAMETAHI_CONFIG", str(from_env))
     result = runner.invoke(app, ["config", "check"])
     assert result.exit_code == 0, result.output
     assert "from-env.yaml" in result.output

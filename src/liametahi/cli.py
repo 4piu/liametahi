@@ -6,8 +6,9 @@ process exit codes, and printing; every decision of substance belongs to
 `backup.py` (restore). Nothing here reimplements policy.
 
 Config path resolution (spec §9): `--config PATH`, else `$LIAMETAHI_CONFIG`,
-else `~/.config/liametahi/config.yaml`. A missing file is exit 2 naming
-the path that was tried.
+else `./config.yaml` in the current directory (a project-level config), else
+`~/.config/liametahi/config.yaml`. A missing file is exit 2 naming the path
+that was tried.
 
 Exit codes (spec §9):
     0  success
@@ -102,8 +103,20 @@ def _handle_termination() -> Iterator[None]:
         signal.signal(signal.SIGTERM, previous)
 
 
+#: A project-level config in the current directory (spec §9): checked after
+#: `--config`/`$LIAMETAHI_CONFIG` and before the user-level default, so a
+#: repo- or directory-scoped config.yaml supersedes the one in
+#: `~/.config/liametahi` without needing an explicit flag on every
+#: invocation from that directory. Cwd-only, deliberately: walking up parent
+#: directories could pick up an unrelated config.yaml from an ancestor
+#: project, which is worse here than in most tools because this file holds
+#: literal credentials.
+PROJECT_CONFIG_NAME = "config.yaml"
+
+
 def _resolve_config_path(supplied: Path | None) -> Path:
-    """`--config PATH`, else `$LIAMETAHI_CONFIG`, else the default
+    """`--config PATH`, else `$LIAMETAHI_CONFIG`, else `./config.yaml` in
+    the current directory if one exists, else the user-level default
     (spec §9).
 
     `None` — not a sentinel path — means "the flag was not given". A
@@ -116,6 +129,9 @@ def _resolve_config_path(supplied: Path | None) -> Path:
     from_env = os.environ.get("LIAMETAHI_CONFIG")
     if from_env:
         return Path(from_env).expanduser()
+    project_config = Path.cwd() / PROJECT_CONFIG_NAME
+    if project_config.is_file():
+        return project_config
     return DEFAULT_CONFIG_PATH
 
 

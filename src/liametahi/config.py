@@ -25,6 +25,7 @@ import hashlib
 import os
 import re
 import stat
+import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import Literal, Self, cast
@@ -715,14 +716,26 @@ class Config(BaseModel):
 # Any bit here on a config file (which contains literal credentials, per
 # spec §12) means it is readable, writable, or executable by someone other
 # than its owner. The spec's minimum bar is "group- or world-readable"; we
-# reject the broader set deliberately, as the more conservative check.
+# warn on the broader set deliberately, as the more conservative check.
 _UNSAFE_MODE_BITS = stat.S_IRWXG | stat.S_IRWXO
 
 
 def check_file_permissions(path: Path) -> None:
-    """Enforce spec §12: the config file must be owned by the invoking
-    user and inaccessible to anyone else. Raises `ConfigFilePermissionError`
-    otherwise (the caller maps this to exit code 2)."""
+    """Enforce spec §12's ownership requirement and warn about loose mode
+    bits on the config file.
+
+    Ownership is a hard failure (`ConfigFilePermissionError`, exit code 2):
+    a config file owned by someone else may already have been read or
+    tampered with by that other user, so refusing to load it is the only
+    safe choice.
+
+    Group- or world-readable mode bits are, deliberately, only a printed
+    warning: the file still loads. Logging isn't configured yet at this
+    point in `load_config`, so this prints directly to stderr rather than
+    going through `liametahi.logging` — a narrow, intentional exception to
+    this module otherwise only raising and leaving printing to the CLI
+    layer.
+    """
     st = path.stat()
     invoking_uid = os.getuid()
     if st.st_uid != invoking_uid:
@@ -734,10 +747,11 @@ def check_file_permissions(path: Path) -> None:
         )
     mode = stat.S_IMODE(st.st_mode)
     if mode & _UNSAFE_MODE_BITS:
-        raise ConfigFilePermissionError(
-            f"config file {path} has mode {oct(mode)}, which grants group "
-            "or other access; it contains literal credentials (spec §12) — "
-            f"run 'chmod 600 {path}'"
+        print(
+            f"warning: config file {path} has mode {oct(mode)}, which "
+            "grants group or other access; it contains literal credentials "
+            f"(spec §12) — run 'chmod 600 {path}'",
+            file=sys.stderr,
         )
 
 

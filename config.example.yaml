@@ -1,0 +1,55 @@
+# Liametahi example config. Copy this file, fill in your own account/model
+# details, and set restrictive permissions before pointing liametahi at it:
+#
+#   mkdir -p ~/.config/liametahi && chmod 700 ~/.config/liametahi
+#   cp config.example.yaml ~/.config/liametahi/config.yaml
+#   chmod 600 ~/.config/liametahi/config.yaml
+#
+# This file holds literal credentials once filled in, so it must never be
+# committed — the default .gitignore already excludes config.yaml,
+# liametahi.yaml/.yml, and *.local.yaml for this reason.
+#
+# Full reference for every key: README.md "Configuration reference".
+
+version: 1
+
+accounts:
+  personal:
+    host: imap.gmail.com
+    port: 993
+    username: you@gmail.com
+    password: "an app password, not your real one"
+    trash_mailbox: "[Gmail]/Trash"
+
+models:
+  local:
+    provider: openai_compatible
+    base_url: http://127.0.0.1:8080/v1/chat/completions
+    model: qwen2.5-7b-instruct
+
+tasks:
+  inbox-cleanup:
+    account: personal
+    model: local
+    source_mailboxes: [INBOX]
+    # No implicit protection: list every flag/sender you want exempt.
+    protect:
+      flags: ['\Flagged', '\Answered']
+      unread: true
+    rules:
+      - id: old-digest
+        priority: 100
+        when:
+          - older-than: 30d
+          - list-id-contains: digest
+        actions: [backup, trash]
+
+      - id: stale-notifications
+        priority: 10
+        when:
+          - older-than: 7d
+          - llm: >
+              An automated notification, receipt, or update that is safe
+              to discard, except bills, account-security notices, or mail
+              that asks the recipient to act.
+        actions: [backup, trash]

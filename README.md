@@ -37,19 +37,34 @@ uv run liametahi --help
 
 ## Quickstart
 
-Liametahi reads a single YAML config file, by default from
-`~/.config/liametahi/config.yaml` (`~/Library/Application Support/liametahi/`
-on macOS, `%LOCALAPPDATA%\liametahi\` on Windows). Override with
-`--config PATH` or `$LIAMETAHI_CONFIG`.
+Liametahi reads a single YAML config file. It is located, in order:
 
-**The file holds literal credentials** and must be readable only by you —
-`config check` refuses a world- or group-readable file.
+1. `--config PATH`
+2. `$LIAMETAHI_CONFIG`
+3. `./config.yaml` in the current directory — a **project-level** config,
+   useful for a per-repo or per-checkout profile that should take priority
+   without passing a flag every time
+4. `~/.config/liametahi/config.yaml` (`~/Library/Application Support/liametahi/`
+   on macOS, `%LOCALAPPDATA%\liametahi\` on Windows) — the user-level default
+
+Whichever file is found first is used as-is; there is no merging between a
+project-level and a user-level config.
+
+**The file holds literal credentials.** It must be owned by you —
+`config check` refuses a file owned by another user outright — and it
+should be readable only by you: a world- or group-readable file still
+loads, but prints a warning on every run until you fix its permissions.
+
+Copy the example and fill in your account, model, and rules:
 
 ```sh
 mkdir -p ~/.config/liametahi && chmod 700 ~/.config/liametahi
-$EDITOR ~/.config/liametahi/config.yaml
+cp config.example.yaml ~/.config/liametahi/config.yaml
 chmod 600 ~/.config/liametahi/config.yaml
+$EDITOR ~/.config/liametahi/config.yaml
 ```
+
+`config.example.yaml` (at the repo root) looks like this:
 
 ```yaml
 version: 1
