@@ -63,30 +63,23 @@ interrupted, `4` auth failure, `5` task already running — cron-safe:
 
 ## Quickstart
 
-Config file, checked in this order: `--config PATH`, `$LIAMETAHI_CONFIG`,
-`./config.yaml`, then `~/.config/liametahi/config.yaml`. First match wins,
-no merging between them.
-
 ```sh
-mkdir -p ~/.config/liametahi
-cp config.example.yaml ~/.config/liametahi/config.yaml
-$EDITOR ~/.config/liametahi/config.yaml
-```
+cp config.example.yaml config.yaml
+$EDITOR config.yaml    # at least an account and a model
+chmod 600 config.yaml  # it holds literal credentials once filled in
 
-Fill in an account, a model, and at least one task — see
-[`config.example.yaml`](config.example.yaml) for a full two-task example
-using a `jev` model and `task:` routing, and
-[docs/configuration.md](docs/configuration.md) for the full key reference.
-The config file holds literal credentials: it must be owned by you, and
-`config check` warns if its permissions are group/world-readable.
-
-```sh
 uv run liametahi config check --connect
-uv run liametahi run inbox-cleanup --dry-run --verbose   # preview, no mutation
-uv run liametahi run inbox-cleanup                       # for real
+uv run liametahi run inbox-classify --dry-run --verbose  # preview, no mutation
+uv run liametahi run inbox-classify                      # for real
 uv run liametahi report                                  # review the last run
 uv run liametahi restore 4w8w --mailbox INBOX            # undo a trash
 ```
+
+`./config.yaml` in the current directory is picked up automatically — no
+flag needed. The example ships two tasks wired together with a `jev` model
+and `task:` routing; see [docs/configuration.md](docs/configuration.md) for
+every key, other config locations (`--config`, `$LIAMETAHI_CONFIG`,
+`~/.config/liametahi/config.yaml`), and how conditions/rules compose.
 
 ## Documentation
 

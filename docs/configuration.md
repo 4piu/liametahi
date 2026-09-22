@@ -3,7 +3,22 @@
 Full key-by-key reference for `config.yaml`. See the [README](../README.md)
 for how to bootstrap one and the CLI to run it.
 
-`*` marks a required key; everything else falls back to its default.
+## File location
+
+Checked in this order; the first one found is used as-is, with no merging
+between them:
+
+1. `--config PATH`
+2. `$LIAMETAHI_CONFIG`
+3. `./config.yaml` — a project-level config for a per-checkout profile
+4. `~/.config/liametahi/config.yaml` (platform-appropriate equivalent
+   elsewhere) — the user-level default
+
+The file holds literal credentials: it must be owned by you (a hard
+failure otherwise), and `config check` warns — but still loads — if it's
+group- or world-readable.
+
+`*` marks a required key below; everything else falls back to its default.
 
 ## `settings`
 

@@ -1,6 +1,7 @@
-# Copy this to your platform config path (see the README's Quickstart) and
-# fill in real credentials. This file holds secrets once you do: chmod it
-# 600, and `liametahi config check` will refuse to load it otherwise.
+# Copy this to `config.yaml` (see the README's Quickstart) and fill in real
+# credentials. This file holds secrets once you do -- chmod it 600.
+# `liametahi config check` only warns about a group/world-readable file
+# (it still loads); it refuses outright only if you don't own the file.
 #
 # This example screens every inbox message with a fast decision model
 # (jev); anything it's confident is spam gets trashed, and anything it's
@@ -73,10 +74,15 @@ tasks:
           - processor: "spam-category.confidence < 0.85"
         actions: [task:inbox-review]
 
-      # Plain cleanup rule, no model involved.
+      # Plain cleanup rule, no model involved -- OR via `any:`, exclusion
+      # via `not:`, alongside the implicit AND of the surrounding list.
       - when:
           - older-than: 30d
-          - list-id-contains: digest
+          - any:
+              - list-id-contains: digest
+              - list-id-contains: newsletter
+          - not:
+              subject-contains: urgent
         actions: [backup, trash]
 
   # Reached only via inbox-classify's task: action above -- no mailbox
