@@ -16,6 +16,8 @@ truth.
 | `docs/development.md` | Checks to run, test tiers, live-mailbox testing workflow | Dev workflow |
 | `dev-notes/specification.md` | Full product/behavior spec, numbered acceptance criteria (§14), resolved decisions (§15) | **What** the tool does and why — read this first for any behavior question |
 | `dev-notes/implementation-contracts.md` | Toolchain, SQLite DDL, module signatures, work-unit boundaries, test-gate commands | **Shape** of the implementation — read this first for any "how is this wired together" question |
+| `dev-notes/jev-provider-plan.md` | The `processors`/Jev redesign brief (chat + Jev classification unified, `task:<id>` routing) | Authoritative for that redesign's shape until folded fully into `specification.md` (in progress — §2/§3/§11/§13–§15 of the spec still describe the pre-redesign `llm:`/rule-id model) |
+| `dev-notes/jev-provider-design-history.md` | Alternatives considered and rejected during that redesign, with reasons | Background only — nothing here is current design |
 | `dev-notes/*.md` (others) | Historical/working notes; `mailbox-cleanup-cli.md` is explicitly superseded by `specification.md` | Background only |
 | `src/liametahi/` | The package (see module map below) | — |
 | `tests/` | Unit tests (default), integration tests (`-m integration`, needs Docker/Dovecot), live tests (`-m live`, opt-in, real mailbox, never in CI) | — |
@@ -32,12 +34,17 @@ shape (stated explicitly at the top of the contracts file).
   printing. Delegates every decision of substance elsewhere.
 - `config.py` — Pydantic v2 models, YAML load-time validation, config file
   ownership/permission checks, condition-tree (`when:`) grammar parsing.
-- `rules.py` / `policy.py` — condition tree types and rule-matching/priority
-  ("winner takes all", `shadowed` reporting) semantics.
+- `rules.py` / `policy.py` — condition tree types (including `processor:`
+  atoms and the `all`/`any`/`none`/`not` composition keywords) and
+  rule-matching ("winner takes all" by plain list order — rules have no id
+  or priority field; the first matching rule wins) semantics.
 - `imap_adapter.py` — IMAP protocol wrapper (fetch, claim, mutate).
-- `classifier/` — `anthropic.py` and `openai_compatible.py` adapters behind a
-  shared interface in `__init__.py`; the LLM only ever answers
-  yes/no/unsure against an offered, closed vocabulary.
+- `classifier/` — `anthropic.py`, `openai_compatible.py`, and `jev.py`
+  adapters behind a shared interface in `__init__.py`. A model only ever
+  answers a named **processor**'s declared question (`noul`/`choice`/
+  `score`) against its own closed vocabulary of options/levels — never
+  free-form, never widening what a rule may act on. See
+  `dev-notes/jev-provider-plan.md` for the full design.
 - `evaluate.py` / `execute.py` — the two run phases: evaluate (classify,
   decide, cache) and execute (backup, mutate).
 - `runner.py` — orchestrates a full task run across both phases, locking,
@@ -68,13 +75,17 @@ shape (stated explicitly at the top of the contracts file).
   `tests/corpus/synthetic/`) are gitignored on purpose — don't work around it.
 - The config file is a secret (spec §12): wrong ownership is a hard failure
   (exit 2); group/world-readable mode bits print a warning but still load.
-- Safety properties from the spec (backup-before-trash, `BODY.PEEK`
-  everywhere, one remote mutation per message, claim-before-mutate,
-  protected senders/flags re-checked immediately before mutation,
-  verify-then-act) are non-negotiable — implement them exactly even where a
-  simpler shape would pass the tests. The LLM's output is untrusted,
-  attacker-influenced input: validate every response against the offered
-  vocabulary, never let it widen what an action may do.
+- Safety properties from the spec (`BODY.PEEK` everywhere, one remote
+  mutation per message, claim-before-mutate, protected senders/flags
+  re-checked immediately before mutation, verify-then-act, and `trash`
+  always requiring at least one deterministic — non-`processor:` —
+  condition) are non-negotiable — implement them exactly even where a
+  simpler shape would pass the tests. (Backup-before-trash is *not* in this
+  list: it's deliberately no longer required, per
+  `dev-notes/jev-provider-plan.md` §8 — `backup` is still available and
+  freely composable, just optional.) A model's output is untrusted,
+  attacker-influenced input: validate every processor answer against its
+  own declared options/levels, never let it widen what an action may do.
 
 ## Specialized agents in this repo
 
