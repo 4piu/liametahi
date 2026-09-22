@@ -1,9 +1,17 @@
 # Liametahi
 
-A local, cron-friendly CLI that cleans up an IMAP mailbox. Rules match on
-IMAP metadata plus **processors** — a structured question ("is this spam?")
-answered by a chat model or a `jev` decision endpoint. The model only
-answers a closed-vocabulary question; deterministic rules decide and act.
+An AI-powered mailbox cleanup tool for IMAP. Point it at an inbox and it
+can:
+
+- Trash, move, label, or route mail using both plain conditions (sender,
+  age, size, headers) and an AI's answer to a question you write ("is this
+  spam?", "how urgent is this?")
+- Preview any run with `--dry-run`, back up before deleting, and restore
+  anytime
+- Run unattended on a schedule — locking, crash recovery, and a report of
+  every past run
+- Mix a fast/cheap model with a slower one, only escalating the mail the
+  first pass is unsure about
 
 ```yaml
 processors:
