@@ -240,7 +240,7 @@ and, for cross-task pipelines, the `task:<id>` action below.
 | --- | --- | --- |
 | `model` * | Must name an entry in `models` | — |
 | `type` * | `noul` (boolean), `choice` (one of several named options), or `score` (one of an ordered list of levels) | — |
-| `question` | Shorthand for a `noul` processor: implies `criteria: {"true": question}` | — |
+| `question` | Natural-language framing sent to the model alongside `criteria`/`options`/`levels`. For `noul` it doubles as shorthand: a plain `question` with no `criteria` implies `criteria: {"true": question}` | — |
 | `criteria` | Required for `noul` unless `question` is used; exactly the keys `"true"` and `"false"` | — |
 | `options` | Required for `choice`; a map of option name to its description, at most 255 entries | — |
 | `levels` | Required for `score`; an ordered list of level names, 2 to 10 entries | — |
