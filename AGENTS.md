@@ -11,7 +11,8 @@ truth.
 
 | Path | What it is | Authoritative for |
 | --- | --- | --- |
-| `README.md` | User-facing install/quickstart/config reference/safety model | End-user behavior and docs |
+| `README.md` | User-facing install/quickstart/CLI usage | End-user behavior and docs |
+| `docs/configuration.md` | Full `config.yaml` key reference: accounts, models, processors, tasks, rule conditions | Config file shape and defaults |
 | `docs/internals.md` | Expanded reasoning behind each safety-model bullet | Why the safety properties exist |
 | `docs/development.md` | Checks to run, test tiers, live-mailbox testing workflow | Dev workflow |
 | `dev-notes/specification.md` | Full product/behavior spec, numbered acceptance criteria (§14), resolved decisions (§15) | **What** the tool does and why — read this first for any behavior question |
