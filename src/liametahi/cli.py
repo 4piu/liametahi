@@ -231,7 +231,7 @@ def config_check(
     ] = False,
 ) -> None:
     """Validate the config file, its ownership/permissions, and its
-    cross-references, without contacting anything (spec §9)."""
+    cross-references, without contacting anything."""
     cfg, path = _load(config)
 
     typer.echo(f"config OK: {path}")
@@ -290,7 +290,7 @@ def run(
         ),
     ] = False,
 ) -> None:
-    """Evaluate and, unless `--dry-run`, act on a task's mailbox (spec §4).
+    """Evaluate and, unless `--dry-run`, act on a task's mailbox.
 
     High-level phase/batch progress is logged at `info` regardless of
     `--verbose` (scan/evaluate/execute boundaries); `--verbose` escalates
@@ -357,7 +357,7 @@ def report(
     verbose: Annotated[bool, typer.Option("--verbose")] = False,
 ) -> None:
     """Retrieve a stored run report. Never contacts the mailbox or the
-    model (spec §9)."""
+    model."""
     if format_ not in ("table", "json"):
         typer.echo(f"--format must be 'table' or 'json', got {format_!r}", err=True)
         raise typer.Exit(code=EXIT_BAD_CONFIG)
@@ -404,7 +404,7 @@ def restore(
     config: ConfigOption = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
-    """Verify a backup's checksum and APPEND it to a mailbox (spec §4.4).
+    """Verify a backup's checksum and APPEND it to a mailbox.
 
     Restore is best-effort: it cannot recreate provider-specific labels
     or thread identity, and it does not detect that the message is
