@@ -1,7 +1,6 @@
-"""Tests for the `include_body` processor path (spec §4.2 step 7, §5.1;
-jev-provider-plan §2, §6).
+"""Tests for the `include_body` processor path.
 
-jev-provider-plan §2 replaces the old dynamic "the model reports unsure,
+This replaces the old dynamic "the model reports unsure,
 fetch a body excerpt and re-ask" escalation with a static per-processor
 switch: `include_body: true` means this processor's request always
 carries a body excerpt, decided purely from which processors a
@@ -103,7 +102,7 @@ def test_include_body_processor_gets_the_excerpt_fetched_up_front(
     )
 
     assert clf.call_count == 1
-    # The one call must have carried the body excerpt (spec §5.1's
+    # The one call must have carried the body excerpt (the
     # excerpt-level field), proving the fetch actually happened before
     # the ask rather than being skipped.
     payloads, _processors = clf.calls[0]
@@ -167,7 +166,7 @@ def test_include_body_verdict_is_cached_so_a_rerun_asks_nothing(
 def test_a_failed_classify_call_is_not_cached(tmp_path: Path) -> None:
     """A genuine transport/parse failure is not a decision -- it must
     stay uncached so the next run retries it, unlike a resolved answer
-    (spec §13's "genuine transport/parse failure... is uncached")."""
+    ("genuine transport/parse failure... is uncached")."""
     path = _config_with_state(tmp_path)
     cfg = load_config(path)
 

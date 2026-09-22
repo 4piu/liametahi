@@ -1,4 +1,4 @@
-"""Work Unit 4's named acceptance tests (spec section 14): 1, 5, 6, 7, 8,
+"""Work Unit 4's named acceptance tests: 1, 5, 6, 7, 8,
 10, 13. These exercise `policy.py`, `backup.py`, and `execute.py`
 together against `FakeMailbox`, the way Unit 5's orchestrator will once
 it lands -- entirely at the unit tier (no network, no Docker).
@@ -293,7 +293,7 @@ def test_acceptance_06_simulated_backup_write_failure_leaves_message_untouched(
 def test_acceptance_07_rerun_produces_no_duplicate_backup(tmp_path: Path) -> None:
     """The first half of test 7: re-running a completed backup action
     (e.g. a retried step, or a re-run whose scan re-surfaced the same
-    key) commits no second manifest row (contracts section 4's
+    key) commits no second manifest row (the manifest's own
     uniqueness constraint plus `write_verified_backup`'s dedup path)."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
@@ -553,7 +553,7 @@ def test_acceptance_10_two_concurrent_runs_only_one_claims_and_mutates(
 
 
 def test_acceptance_13_two_rules_match_first_listed_wins_other_shadowed() -> None:
-    """jev-provider-plan §9: a matching rule's rank is simply its
+    """A matching rule's rank is simply its
     position in `task.rules` -- the first-listed rule wins, no separate
     `priority` number."""
     from liametahi.config import RuleConfig

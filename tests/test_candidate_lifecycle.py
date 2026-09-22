@@ -1,6 +1,8 @@
-"""End-to-end regression tests for the sync-fix-brief's Fix C (candidate
-retirement, Finding 2) and Fix D (skip a restored message, Finding 3),
-run through the real orchestrator (`runner.run_task`) against
+"""End-to-end regression tests for candidate retirement (once a message
+is actually moved/vanished, its row stops coming back) and for skipping
+a restored message (a cached positive decision must not re-trash a
+message the user has already restored), run through the real
+orchestrator (`runner.run_task`) against
 `FakeMailbox`/`FakeClassifier` so the whole scan -> evaluate -> execute
 pipeline is exercised, not just the module each fix touches directly.
 """
@@ -62,11 +64,11 @@ def _mailbox() -> FakeMailbox:
     )
 
 
-# --- Fix C: a completed trash retires the candidate row -------------------
+# --- A completed trash retires the candidate row ---------------------------
 
 
 def test_completed_trash_excludes_candidate_from_future_runs(tmp_path: Path) -> None:
-    """sync-fix-brief Finding 2 / Fix C: once a message is actually
+    """Once a message is actually
     trashed, it must not come back as a live candidate on a later run --
     not even to a zero-cost cache hit. The second run's classifier is
     scripted to raise on any call, so a regression here fails loudly."""
@@ -125,11 +127,11 @@ def test_completed_trash_excludes_candidate_from_future_runs(tmp_path: Path) -> 
     assert outcome_2.report_data.items == ()
 
 
-# --- Fix D: a restored message is skipped and reported, not re-trashed ---
+# --- A restored message is skipped and reported, not re-trashed -----------
 
 
 def test_restored_message_is_skipped_not_re_trashed(tmp_path: Path) -> None:
-    """sync-fix-brief Finding 3 / Fix D: a message trashed in run 1 and
+    """A message trashed in run 1 and
     then moved back to its source mailbox (a user restore, from Trash or
     from any other client) must not be re-trashed by a cached positive
     decision with no model call and no signal to the user -- it must be
@@ -200,9 +202,9 @@ def test_restored_message_is_retired_so_it_is_skipped_only_once(
     """Skipping is a terminal decision, so the candidate is retired at
     the same time. Without that it would stay live and be re-evaluated
     and re-reported on every subsequent run forever -- the same
-    never-retires waste Fix C exists to end, reached by a different path
-    (skipping means `_reverify` never runs, so nothing can retire it as
-    `vanished` either)."""
+    never-retires waste candidate retirement exists to end, reached by a
+    different path (skipping means `_reverify` never runs, so nothing
+    can retire it as `vanished` either)."""
     path = _config_with_state(tmp_path)
     cfg = load_config(path)
 
@@ -264,11 +266,12 @@ def test_restored_message_is_retired_so_it_is_skipped_only_once(
 
 
 def test_stale_candidate_for_an_already_gone_message_retires(tmp_path: Path) -> None:
-    """The pre-Fix-C cohort: a candidate row left live by an older
-    liametahi version, whose message really was trashed and is gone from
-    the source mailbox. It must be retired rather than re-reported every
-    run -- reached via the Fix D skip path, since the fingerprint carries
-    a completed trash from the earlier run."""
+    """The pre-retirement-logic cohort: a candidate row left live by an
+    older liametahi version, whose message really was trashed and is
+    gone from the source mailbox. It must be retired rather than
+    re-reported every run -- reached via the restored-message skip path,
+    since the fingerprint carries a completed trash from the earlier
+    run."""
     path = _config_with_state(tmp_path)
     cfg = load_config(path)
 
@@ -333,10 +336,10 @@ def test_stale_candidate_for_an_already_gone_message_retires(tmp_path: Path) -> 
 
 
 def test_restored_message_reevaluate_does_not_override_fix_d(tmp_path: Path) -> None:
-    """`--reevaluate` governs the LLM cache, a different concern (spec
-    §9, §13) -- it must not become an escape hatch for Fix D. Even with
-    a fresh (non-cached) classification that matches again, a restored
-    message is still skipped."""
+    """`--reevaluate` governs the LLM cache, a different concern -- it
+    must not become an escape hatch for skipping a restored message.
+    Even with a fresh (non-cached) classification that matches again, a
+    restored message is still skipped."""
     path = _config_with_state(tmp_path)
     cfg = load_config(path)
 

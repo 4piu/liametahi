@@ -1,4 +1,4 @@
-"""Tests for `tests/fakes/` themselves (contracts §6.3)."""
+"""Tests for `tests/fakes/` themselves."""
 
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,7 +57,7 @@ def test_fetch_metadata_returns_only_requested_headers_present() -> None:
     meta = results[0]
     assert meta.uid == 101
     # Keys are lowercased, values multi-valued -- matches the real
-    # imap_adapter.RawMetadata shape exactly (contracts §5.4).
+    # imap_adapter.RawMetadata shape exactly.
     assert "from" in meta.headers
     assert "list-id" in meta.headers  # list_digest.eml has List-Id
     assert "x-not-present" not in meta.headers
@@ -123,8 +123,7 @@ def test_add_keyword_requires_custom_keyword_support() -> None:
 
 def test_mutations_log_is_empty_for_read_only_calls() -> None:
     """`select`, `search_uids`, `fetch_metadata`, and `fetch_raw` never
-    append to `mutations` -- only `move`/`add_keyword`/`append` do
-    (contracts §6.2, §6.3)."""
+    append to `mutations` -- only `move`/`add_keyword`/`append` do."""
     mailbox = FakeMailbox.from_corpus(CORPUS_MANIFEST)
     mailbox.select("INBOX", readonly=True)
     uids = mailbox.search_uids()

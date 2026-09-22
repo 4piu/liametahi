@@ -1,10 +1,9 @@
-"""Acceptance test 11 (specification §14.11), integration half: a
+"""Acceptance test 11, integration half: a
 metadata fetch does not set `\\Seen` on any message, verified against a
 real IMAP server. The unit-tier half (against `FakeMailbox`) lives in
 `tests/test_acceptance_mailbox.py::test_acceptance_11_metadata_fetch_does_not_set_seen`;
 this is the one property in the whole spec explicitly called out as
-needing a real server, not just a fake proving it (spec §14 preamble to
-this unit's task description).
+needing a real server, not just a fake proving it.
 
 The mailbox is selected **read-write** (`readonly=False`), not
 `EXAMINE`d, so this test actually exercises `BODY.PEEK` doing its job --
@@ -41,7 +40,7 @@ def test_acceptance_11_metadata_fetch_does_not_set_seen_integration(
         adapter.append("INBOX", _RAW, [], datetime(2026, 1, 1, tzinfo=UTC))
 
         # Read-write select, exactly as the execute phase's re-verify
-        # step does (spec §4.3 point 4) -- this is the codepath where a
+        # step does -- this is the codepath where a
         # missing PEEK modifier would actually bite.
         adapter.select("INBOX", readonly=False)
         uid = adapter.search_uids()[0]

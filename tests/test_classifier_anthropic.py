@@ -1,5 +1,4 @@
-"""Tests for `liametahi.classifier.anthropic` (spec section 8.2;
-contracts section 5.3).
+"""Tests for `liametahi.classifier.anthropic`.
 
 Uses the real `anthropic.Anthropic` client wired to `httpx.MockTransport`
 via its `http_client` constructor argument, so no network or Docker is
@@ -77,7 +76,7 @@ def test_wrong_provider_rejected() -> None:
         AnthropicClassifier(cfg)
 
 
-# --- Request shape (spec section 8.2) -----------------------------------
+# --- Request shape --------------------------------------------------------
 
 
 def test_system_prompt_is_top_level_not_a_message() -> None:
@@ -112,7 +111,7 @@ def test_max_tokens_always_sent() -> None:
 
 
 def test_temperature_is_never_sent() -> None:
-    """spec section 8.2: temperature is rejected with a 400 on current
+    """Temperature is rejected with a 400 on current
     Anthropic models, so this adapter must never send it, unlike
     `openai_compatible` which may."""
     bodies: list[dict[str, object]] = []
@@ -142,7 +141,7 @@ def test_user_content_carries_the_canonical_request_payload() -> None:
     assert user_content["processors"]["spam-category"]["type"] == "choice"
 
 
-# --- Structured-output degradation ladder (spec section 8.1, 8.2) ---------
+# --- Structured-output degradation ladder ----------------------------------
 
 
 def test_auto_tries_schema_first_and_succeeds() -> None:
@@ -179,7 +178,7 @@ def test_auto_degrades_to_unstructured_when_schema_rejected() -> None:
 def test_fixed_json_schema_does_not_fall_back_on_rejection() -> None:
     """Unlike `auto`, a pinned `structured_output: json_schema` must not
     be silently downgraded on rejection -- that would defeat the point
-    of pinning it (spec section 8.1: the ladder is what `auto` means).
+    of pinning it (the ladder is what `auto` means).
     A rejection here is a hard failure, mirroring
     `openai_compatible`'s fixed-level behaviour."""
     attempts = 0
@@ -246,8 +245,7 @@ def test_usage_extracted_from_message() -> None:
 def test_response_content_passed_through_to_structural_parser_unvalidated() -> None:
     """As with the openai_compatible adapter, semantic validation must
     not happen here -- an unoffered processor name must survive intact
-    into the returned `ClassifyOutcome` for `evaluate.py` to reject
-    (contracts section 5.3)."""
+    into the returned `ClassifyOutcome` for `evaluate.py` to reject."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return _ok_response(

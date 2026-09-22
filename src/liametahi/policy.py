@@ -1,13 +1,11 @@
-"""Guardrails, winner-takes-all rule selection, and action resolution
-(spec section 7.4; contracts section 5 work-unit table;
-jev-provider-plan §7, §8, §9).
+"""Guardrails, winner-takes-all rule selection, and action resolution.
 
 Pure, no I/O -- this module is a primary property-testing target
 alongside `rules.py`. It never touches the mailbox, the model, or
 SQLite; it only turns "which rules matched this candidate" into "which
 single rule wins, and what does its action list concretely mean."
 
-A rule has no `id` and no `priority` any more (jev-provider-plan §9): a
+A rule has no `id` and no `priority` any more: a
 matching rule's rank is simply its position in `task.rules` -- the
 first-listed match wins outright, not merely a tiebreaker under a
 separate priority number.
@@ -19,13 +17,13 @@ the specification is explicit that a rule can never override them:
   matched. `decide()` takes `protected` as an explicit argument and
   short-circuits before looking at any match, so a caller cannot
   accidentally launder a protected candidate through rule matching.
-- `resolve_actions` always sets `requires_prior_backup=False`
-  (jev-provider-plan §8 removes backup-before-trash entirely -- there is
-  no more `allow_trash_without_backup` config field to read); the field
+- `resolve_actions` always sets `requires_prior_backup=False` --
+  backup-before-trash has been removed entirely, so there is no more
+  `allow_trash_without_backup` config field to read; the field
   is kept on `ResolvedAction` rather than removed so the execute phase's
   check remains in place as a defensive backstop, not because anything
   can set it `True` any more.
-- `task:<id>` (jev-provider-plan §7) resolves to a non-remote-mutation
+- `task:<id>` resolves to a non-remote-mutation
   `ResolvedAction` whose `destination` is the target task id -- never an
   IMAP mutation, so it never contends for the "one remote mutation per
   action list" slot (already enforced at config load).
@@ -34,7 +32,7 @@ The run-wide action cap (`max_actions`) is the third guardrail
 the specification names, but it is inherently a cross-candidate,
 stateful concern (how many messages this run has already mutated), so
 it is enforced by the execute phase, not here. It is opt-in: a task with
-no configured cap runs uncapped (spec §6).
+no configured cap runs uncapped.
 """
 
 from collections.abc import Sequence
@@ -48,7 +46,7 @@ DecisionStatus = Literal["protected", "no_match", "matched"]
 
 
 def rule_label(index: int, total: int) -> str:
-    """jev-provider-plan §9: a rule has no name of its own, so reports
+    """A rule has no name of its own, so reports
     identify it by a stable positional reference instead -- `index` is
     0-based, `total` is `len(task.rules)`."""
     return f"rule #{index + 1} of {total}"
@@ -56,14 +54,14 @@ def rule_label(index: int, total: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class MatchedRule:
-    """One rule that fully matched a candidate (spec section 4.2 step 8's
-    input): the deterministic tree resolved to TRUE, or every
+    """One rule that fully matched a candidate: the deterministic tree
+    resolved to TRUE, or every
     still-`UNKNOWN` atom was resolved to TRUE by a validated processor
-    answer (jev-provider-plan §6).
+    answer.
     """
 
     rule_index: int  # position within task.rules; also the tie-break order
-    label: str  # stable rendering for reports (jev-provider-plan §9)
+    label: str  # stable rendering for reports
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +79,7 @@ class ResolvedAction:
 @dataclass(frozen=True, slots=True)
 class PolicyDecision:
     status: DecisionStatus
-    winning_rule: str | None  # rendered label (jev-provider-plan §9), not an id
+    winning_rule: str | None  # rendered label, not an id
     shadowed: tuple[str, ...]  # other matched rules' labels, shadowed by the winner
     actions: tuple[ResolvedAction, ...]
 
@@ -89,16 +87,15 @@ class PolicyDecision:
 class PolicyConfigError(Exception):
     """A resolved rule requires configuration that isn't present (for
     example `trash` with no account `trash_mailbox`). Config-load-time
-    validation (spec section 6) should make this unreachable in
+    validation should make this unreachable in
     practice; this exists as a defensive backstop, not a normal
     control-flow path."""
 
 
 def select_winner(matches: Sequence[MatchedRule]) -> MatchedRule | None:
-    """spec section 7.4 (reinterpreted per jev-provider-plan §9): matching
-    rules are ordered by plain config order -- the first-listed match
-    wins outright, with no separate priority number. Returns None if
-    `matches` is empty."""
+    """Matching rules are ordered by plain config order -- the
+    first-listed match wins outright, with no separate priority number.
+    Returns None if `matches` is empty."""
     if not matches:
         return None
     return min(matches, key=lambda m: m.rule_index)
@@ -107,7 +104,7 @@ def select_winner(matches: Sequence[MatchedRule]) -> MatchedRule | None:
 def resolve_actions(
     rule: RuleConfig, *, trash_mailbox: str | None
 ) -> tuple[ResolvedAction, ...]:
-    """Expand a rule's validated action-token list (spec section 7.4)
+    """Expand a rule's validated action-token list
     into concrete `ResolvedAction`s. `config.py` has already validated
     every token at load time (unknown actions, malformed
     `move_to:`/`label:`/`task:`, more than one remote mutation), so any
@@ -133,14 +130,14 @@ def resolve_actions(
                 raise PolicyConfigError(
                     "a rule has a 'trash' action but no account "
                     "trash_mailbox is configured; config.py's cross-reference "
-                    "check (spec section 6) should have rejected this at load time"
+                    "check should have rejected this at load time"
                 )
             resolved.append(
                 ResolvedAction(
                     action=action,
                     kind="trash",
                     destination=trash_mailbox,
-                    # jev-provider-plan §8: backup-before-trash is no
+                    # Backup-before-trash is no
                     # longer mandatory -- there is no config field left
                     # that could ever make this True.
                     requires_prior_backup=False,
@@ -189,16 +186,15 @@ def decide(
     rules_by_index: Sequence[RuleConfig],
     trash_mailbox: str | None,
 ) -> PolicyDecision:
-    """spec section 4.2 step 8 / section 7.4: resolve the winning rule
-    (if any) into permitted actions.
+    """Resolve the winning rule (if any) into permitted actions.
 
     A protected candidate always resolves to `status="protected"` with
     no actions, regardless of `matches` -- this is the guardrail that a
-    rule can never override protected senders, flags, or unread state
-    (spec section 7.4). Callers are expected to never call `decide()`
+    rule can never override protected senders, flags, or unread state.
+    Callers are expected to never call `decide()`
     for a protected candidate's rule matches in the first place
-    (protection is checked before any rule reaches evaluation, spec
-    section 4.2 step 1); this is a second, independent check so the
+    (protection is checked before any rule reaches evaluation); this is
+    a second, independent check so the
     guarantee does not rest solely on call-site discipline.
     """
     if protected:

@@ -1,7 +1,6 @@
 """Message, key, and candidate domain models.
 
-Frozen dataclasses for internal domain values (implementation-contracts.md
-§2, §5.1). No I/O in this module.
+Frozen dataclasses for internal domain values. No I/O in this module.
 """
 
 import hashlib
@@ -23,7 +22,7 @@ class MessageKey:
     uid: int
 
     def render(self) -> str:
-        """Render as ``account/mailbox/uidvalidity/uid`` (contracts §5.5)."""
+        """Render as ``account/mailbox/uidvalidity/uid``."""
         return f"{self.account_id}/{self.mailbox}/{self.uidvalidity}/{self.uid}"
 
 
@@ -57,7 +56,7 @@ def fingerprint(
     from_address: str | None,
     subject: str | None,
 ) -> str:
-    """Compute the server-independent message fingerprint (spec §11).
+    """Compute the server-independent message fingerprint.
 
     ``sha256(message_id|internaldate|size)`` when a ``Message-ID`` is
     present, otherwise ``sha256(from|subject|internaldate|size)``. This is

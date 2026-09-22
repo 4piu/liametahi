@@ -1,4 +1,4 @@
-"""Official `anthropic` SDK adapter (spec §8.2).
+"""Official `anthropic` SDK adapter.
 
 This needs its own adapter because the Anthropic Messages API is not
 Chat-Completions-shaped:
@@ -80,7 +80,7 @@ class AnthropicClassifier:
         configured = self._config.structured_output
         want_schema = configured in ("auto", "json_schema")
         # The ladder (try schema, degrade on rejection) is specifically
-        # what `structured_output: auto` means (spec §8.1). A *fixed*
+        # what `structured_output: auto` means. A *fixed*
         # `json_schema` is an explicit user request for validated output;
         # silently downgrading it on rejection would defeat the point of
         # pinning it, so a fixed level that gets rejected is a hard
@@ -98,7 +98,7 @@ class AnthropicClassifier:
             if not want_schema or not allow_fallback:
                 raise TransportError(str(exc)) from exc
             # The provider rejected structured output for this model;
-            # degrade to an unstructured request (spec §8.1's ladder,
+            # degrade to an unstructured request (the same ladder,
             # applied to the one structured level Anthropic offers).
             logger.debug("classify: structured_output=json_schema rejected: %s", exc)
             try:
@@ -143,7 +143,7 @@ class AnthropicClassifier:
         """One Messages request.
 
         Deliberately no `temperature`: current Anthropic models reject it
-        with a 400 (spec §8.2). Sampling parameters are per-adapter and
+        with a 400. Sampling parameters are per-adapter and
         never live in the shared request builder. `system` is a top-level
         parameter here, not a message role.
         """

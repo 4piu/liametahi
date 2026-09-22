@@ -1,17 +1,16 @@
-"""The evaluate phase (spec §4.2, steps 2-6; jev-provider-plan §6, §10):
-three-valued rule evaluation against the LLM decision cache, batched
-processor classification, response validation, and split-and-retry
-failure handling.
+"""The evaluate phase: three-valued rule evaluation against the LLM
+decision cache, batched processor classification, response validation,
+and split-and-retry failure handling.
 
 This module is the callable `runner.py` sequences for phase 2.
 `evaluate_candidates()` consumes already-scanned candidates plus a task's
 configuration and produces, per candidate, either a set of validated
 matched rules (deterministic and/or processor-backed, ready for the
 policy engine to pick a winner) or a terminal no-op status drawn from the
-spec §9 vocabulary (`no_match`/`cached_no_match`/`invalid_response`/
+fixed vocabulary (`no_match`/`cached_no_match`/`invalid_response`/
 `no_llm_response`).
 
-jev-provider-plan §6 generalises the old "the one `llm` atom, ask once,
+This generalises the old "the one `llm` atom, ask once,
 finalize" loop into: collect the distinct **processor names** referenced
 by any still-`Tri.UNKNOWN` rule (`rules.processor_names`), resolve as many
 as possible from the decision cache, group whatever remains by the model
@@ -22,8 +21,8 @@ processor invoke it once), merge every answer into one per-candidate
 processor_values=...)` to finalize. A processor with `include_body: true`
 needs an excerpt this module has no mailbox access to fetch; `runner.py`
 fetches it up front (a static, always-needed fetch now, not a dynamic
-"escalation" -- jev-provider-plan §6's history doc explicitly rejects a
-`when:`-gated processor) and passes the text in via `excerpts`. A
+"escalation" -- there is deliberately no `when:`-gated processor) and
+passes the text in via `excerpts`. A
 candidate whose only unresolved processor needs a body that was not
 available this round (fetch failed, or `runner.py` never called for it)
 simply stays unresolved for whatever rules reference that processor --
@@ -34,8 +33,7 @@ Safety-critical property enforced here, not in any adapter: a
 `Classification` returned by a `Classifier` is untrusted until every
 field has been checked against what was actually offered for that exact
 candidate and processor -- including that an answer's `value` is one of
-the processor's declared options/levels (contracts §5.3's rule, extended
-per jev-provider-plan's classifier docstring: never let an adapter
+the processor's declared options/levels (never let an adapter
 response widen what an action may do). See `_validate_answer` below.
 """
 
@@ -68,7 +66,7 @@ from liametahi.rules import ProcessorAnswer
 logger = get_logger(__name__)
 
 #: Cap on a model-reported `reason`, written to the audit table only and
-#: never read by policy (spec §5.3).
+#: never read by policy.
 _REASON_CAP = 200
 
 ClassifierFactory = Callable[[ModelConfig], Classifier]
@@ -78,7 +76,7 @@ ClassifierFactory = Callable[[ModelConfig], Classifier]
 class ValidatedMatch:
     """One rule (identified by its position in `task.rules`) that matched
     a candidate: the tree resolved to TRUE against the accumulated
-    `processor_values` (jev-provider-plan §6)."""
+    `processor_values`."""
 
     rule_index: int
 
@@ -89,7 +87,7 @@ class CandidateResult:
 
     `matches` non-empty means "hand this to the policy engine"; `status`
     is set exactly when `matches` is empty, explaining why (one of the
-    no-op statuses in spec §9).
+    no-op statuses in the fixed vocabulary).
     """
 
     candidate_id: int
@@ -119,8 +117,8 @@ class _CandidateState:
     processor_values: dict[str, ProcessorAnswer] = field(default_factory=dict)
     used_cache: bool = False
     # A classify() call that raised, or a response item that failed
-    # structural validation, for a job this candidate was part of (spec
-    # §5.4 points 2-3): distinct from simply not having a match, and from
+    # structural validation, for a job this candidate was part of:
+    # distinct from simply not having a match, and from
     # `saw_missing` below (a well-formed response that just never
     # mentioned this candidate).
     saw_invalid: bool = False
@@ -172,7 +170,7 @@ def processors_needed_for_candidate(
     candidate, with no prior processor knowledge -- exactly pass 1 of
     `evaluate_candidates`, exposed so `runner.py` can decide which
     candidates need a body excerpt fetched *before* evaluation starts at
-    all (jev-provider-plan §2: `include_body` is a static per-processor
+    all (`include_body` is a static per-processor
     switch, not a dynamically-triggered second pass)."""
     _, needed = _evaluate_rules(task_rules, candidate, now, {})
     return frozenset(needed)
@@ -180,7 +178,7 @@ def processors_needed_for_candidate(
 
 def _finalize(state_item: _CandidateState, matches: list[ValidatedMatch]) -> None:
     """Priority mirrors the old per-rule `_mark_invalid`/`_mark_missing`
-    semantics (spec §5.4 points 2-3), generalised to processors: a match
+    semantics, generalised to processors: a match
     always reaches policy regardless of an unrelated processor's failure
     elsewhere, but `valid`/`error` on the row still records that failure
     for audit; a candidate with no match is `invalid_response` if any
@@ -248,11 +246,11 @@ def evaluate_candidates(
     excerpts: Mapping[int, str] | None = None,
     progress: Progress | None = None,
 ) -> EvaluateOutcome:
-    """Run spec §4.2 steps 2-6 over already-scanned, already
-    protected-filtered candidates (jev-provider-plan §6).
+    """Run the evaluate phase over already-scanned, already
+    protected-filtered candidates.
 
     `excerpts` maps a candidate id to already-fetched, already-cleaned
-    plain text (spec §5.1) for any candidate that needs one of this
+    plain text for any candidate that needs one of this
     task's `include_body: true` processors answered -- `runner.py`'s
     job, since this module has no mailbox access. Absent from the map
     means "no excerpt available this round"; a processor that needs one
@@ -373,8 +371,8 @@ def _consult_cache(
     needed: set[str],
     excerpts: Mapping[int, str],
 ) -> set[str]:
-    """Resolve as many of `needed` as possible from the decision cache
-    (spec §13), writing hits into `item.processor_values`. Returns the
+    """Resolve as many of `needed` as possible from the decision cache,
+    writing hits into `item.processor_values`. Returns the
     subset that still needs a live ask this round (excludes anything
     resolved from cache and anything that cannot be asked this round at
     all, e.g. a body-needing processor with no excerpt available)."""
@@ -407,7 +405,7 @@ def _consult_cache(
     return ask_now
 
 
-# --- Batching and classification (spec §5.4; jev-provider-plan §6) ------
+# --- Batching and classification ----------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,7 +441,7 @@ def _group_by_model(
     needing exactly that set from that model. A candidate whose needed
     processors span two models appears once in each model's grouping,
     with only that model's share of its needed names -- two independent
-    asks, exactly as jev-provider-plan §6 describes."""
+    asks."""
     grouped: dict[str, dict[frozenset[str], list[int]]] = {}
     for candidate_id, names in to_ask.items():
         by_model: dict[str, set[str]] = {}
@@ -601,7 +599,7 @@ class _NetworkAttempt:
     it safe to run for several batches at once (see `_classify_all`).
     `outcome is None` means the call failed or came back wholly invalid;
     a wholly-invalid attempt has already been split-and-retried once by
-    the time this is returned (spec section 5.4), so the caller never
+    the time this is returned, so the caller never
     retries it again."""
 
     candidate_ids: tuple[int, ...]
@@ -812,8 +810,7 @@ def _record_attempt(
     )
 
 
-# --- Response validation (spec §5.2, §5.3; jev-provider-plan's untrusted-
-# --- boundary note) -------------------------------------------------------
+# --- Response validation (the untrusted-adapter-response boundary) --------
 
 
 def _validate_answer(cfg: ProcessorConfig, answer: ProcessorAnswer) -> bool:
@@ -822,8 +819,8 @@ def _validate_answer(cfg: ProcessorConfig, answer: ProcessorAnswer) -> bool:
     `classifier/__init__.py`'s module docstring requires: never let an
     adapter response widen what an action may do.
 
-    `confidence` gets the same treatment: it is a calibrated probability
-    (jev-provider-plan §5), so anything outside `[0, 1]` is not a value
+    `confidence` gets the same treatment: it is a calibrated probability,
+    so anything outside `[0, 1]` is not a value
     jev or a well-formed chat schema would ever produce -- a malformed
     or hostile `confidence` (e.g. `999.0`) must not be allowed to make a
     `processor: "name.confidence >= 0.85"` condition spuriously TRUE for

@@ -1,4 +1,4 @@
-"""Tests for `liametahi.locks` (spec §10)."""
+"""Tests for `liametahi.locks`."""
 
 import multiprocessing
 import time
@@ -113,7 +113,7 @@ def test_wait_acquires_after_holder_releases(tmp_path: Path) -> None:
 
 def test_lock_released_on_holder_crash(tmp_path: Path) -> None:
     """OS advisory locks release automatically on process exit, including
-    a crash — no stale-lock cleanup is implemented or needed (spec §10)."""
+    a crash — no stale-lock cleanup is implemented or needed."""
     lock_dir = tmp_path / "locks"
     config = tmp_path / "config.yaml"
     config.write_text("x", encoding="utf-8")

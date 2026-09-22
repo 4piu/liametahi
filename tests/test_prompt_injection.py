@@ -1,7 +1,6 @@
 """Prompt-injection tests against the committed hostile corpus message
-(`tests/corpus/synthetic/messages/...hostile_subject...eml`, contracts
-section 6.2), covering both halves of the architecture's defence
-(spec section 5.2):
+(`tests/corpus/synthetic/messages/...hostile_subject...eml`), covering
+both halves of the architecture's defence:
 
 (a) the rendered payload neutralises the hostile text at the
     serialisation boundary (`liametahi.prompt`) -- no raw newlines, no
@@ -51,8 +50,8 @@ HOSTILE_SUBJECT = _corpus_subject()
 
 
 def test_corpus_message_is_actually_a_prompt_injection_attempt() -> None:
-    """Sanity check on the fixture itself: it must be the message
-    contracts section 6.2 describes ("a message with a hostile subject
+    """Sanity check on the fixture itself: it must be the message the
+    corpus documentation describes ("a message with a hostile subject
     line attempting prompt injection") and must literally try to name a
     rule id and a confidence, or this whole test file is checking
     nothing."""

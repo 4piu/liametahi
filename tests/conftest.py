@@ -61,7 +61,7 @@ def make_config_dict(**overrides: Any) -> dict[str, Any]:
 
 def write_config(path: Path, data: Mapping[str, Any]) -> Path:
     """Write `data` as YAML to `path` with owner-only permissions, as
-    spec §12 requires."""
+    the config file's secret status requires."""
     path.write_text(yaml.safe_dump(dict(data), sort_keys=False), encoding="utf-8")
     path.chmod(0o600)
     return path

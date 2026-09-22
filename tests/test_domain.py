@@ -1,4 +1,4 @@
-"""Tests for `liametahi.domain` (contracts §5.1, spec §11)."""
+"""Tests for `liametahi.domain`."""
 
 from datetime import UTC, datetime
 
@@ -54,7 +54,7 @@ def test_fingerprint_falls_back_when_message_id_absent() -> None:
         from_address="x@example.com",
         subject="s",
     )
-    # Different formulas (spec §11) must not coincidentally collide here.
+    # Different formulas must not coincidentally collide here.
     assert with_id != without_id
 
 

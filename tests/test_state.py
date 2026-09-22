@@ -1,4 +1,4 @@
-"""Tests for `liametahi.state` (contracts §4)."""
+"""Tests for `liametahi.state`."""
 
 import sqlite3
 from datetime import UTC, datetime
@@ -91,7 +91,7 @@ def test_newer_schema_version_raises_clear_error(tmp_path: Path) -> None:
 
 
 def test_migrations_upgrade_a_v2_database_in_place(tmp_path: Path) -> None:
-    """sync-fix-brief Deliverable 2: build a v2 database directly from
+    """Build a v2 database directly from
     the migration files (mirroring the ad-hoc check used for migration
     0002), open it through `state.open_database`, and confirm it lands
     on version 3 with `retired_at`/`retired_reason` added and every
@@ -153,7 +153,7 @@ def test_migrations_upgrade_a_v2_database_in_place(tmp_path: Path) -> None:
         assert row["retired_reason"] is None
 
         # The upgraded row participates normally in the new schema's
-        # functions (Fix C).
+        # functions.
         state.retire_candidate(
             conn, candidate_id=int(row["candidate_id"]), reason="moved"
         )
@@ -263,7 +263,7 @@ def test_find_candidates_by_fingerprint(tmp_path: Path) -> None:
 
 
 def test_update_candidate_flags_refreshes_stored_flags(tmp_path: Path) -> None:
-    """sync-fix-brief Fix B, Finding 1: a batched flags refresh updates
+    """A batched flags refresh updates
     the stored `flags` column for an already-known candidate."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
@@ -288,8 +288,8 @@ def test_update_candidate_flags_refreshes_stored_flags(tmp_path: Path) -> None:
 
 
 def test_update_candidate_flags_skips_retired_rows(tmp_path: Path) -> None:
-    """Fix C's retirement and Fix B's flags refresh compose correctly: a
-    retired candidate's stored flags are left alone."""
+    """Candidate retirement and the batched flags refresh compose
+    correctly: a retired candidate's stored flags are left alone."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
         account_id = state.upsert_account(conn, name="personal", host="h", username="u")
@@ -314,7 +314,7 @@ def test_update_candidate_flags_skips_retired_rows(tmp_path: Path) -> None:
 
 
 def test_retire_candidate_is_idempotent(tmp_path: Path) -> None:
-    """sync-fix-brief Fix C, Finding 2: a second retirement call does not
+    """A second retirement call does not
     overwrite the original reason/timestamp."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
@@ -341,7 +341,7 @@ def test_retire_candidate_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_fingerprints_with_completed_destructive_action(tmp_path: Path) -> None:
-    """sync-fix-brief Fix D, Finding 3: a `trash`/`move_to:*` action
+    """A `trash`/`move_to:*` action
     `completed` in an earlier run is found; a `label:*` or `backup`
     action, an incomplete state, or the excluded (current) run id are
     not."""
@@ -928,7 +928,7 @@ def test_processor_cached_decision_is_scoped_to_the_prompt_version(
         state.close_database(conn)
 
 
-# --- Task routing (jev-provider-plan §7) -----------------------------------
+# --- Task routing ------------------------------------------------------
 
 
 def test_task_route_round_trip(tmp_path: Path) -> None:
@@ -950,7 +950,7 @@ def test_task_route_round_trip(tmp_path: Path) -> None:
 
 
 def test_task_route_is_idempotent_on_repeated_insert(tmp_path: Path) -> None:
-    """jev-provider-plan §7's contract: exactly once per (candidate,
+    """Task routing's contract: exactly once per (candidate,
     target task), even if the same rule matches again for the same
     candidate on a later run."""
     conn = state.open_database(tmp_path / "state.sqlite3")

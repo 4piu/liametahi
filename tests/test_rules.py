@@ -1,8 +1,8 @@
-"""Tests for `liametahi.rules` (spec §7.1, §7.2; contracts §5.2).
+"""Tests for `liametahi.rules`.
 
 The Kleene three-valued logic tests are exhaustive over every
 TRUE/FALSE/UNKNOWN combination for 1-3 children (property-style testing
-without adding a dependency not listed in contracts §1) rather than
+without adding a new dependency) rather than
 sampled, since the truth table is small and finite.
 """
 
@@ -177,7 +177,7 @@ def test_kleene_any_three_children(values: tuple[Tri, Tri, Tri]) -> None:
 
 @pytest.mark.parametrize("values", list(itertools.product(TRI_VALUES, repeat=2)))
 def test_kleene_none_two_children(values: tuple[Tri, Tri]) -> None:
-    """jev-provider-plan §4: `none:`'s truth table is the exact De Morgan
+    """`none:`'s truth table is the exact De Morgan
     mirror of `any:`'s -- TRUE iff every child is FALSE, FALSE iff any
     child is TRUE, else UNKNOWN."""
     children = [_FixedAtom(v) for v in values]
@@ -239,7 +239,7 @@ def test_evaluate_never_raises_on_well_typed_tree() -> None:
         evaluate(tree, candidate, now=NOW)  # must not raise
 
 
-# --- Atomic condition semantics (spec §7.1) -------------------------------
+# --- Atomic condition semantics --------------------------------------------
 
 
 def test_older_than_true_and_false() -> None:
@@ -484,7 +484,7 @@ def test_auth_result_case_insensitive_on_mechanism_and_result_tokens() -> None:
     assert evaluate(_auth_result_atom("spf", "fail"), candidate, now=NOW) == Tri.TRUE
 
 
-# --- `processor:` atom (jev-provider-plan §3, §6) --------------------------
+# --- `processor:` atom -------------------------------------------------
 
 
 def test_processor_atom_is_unknown_when_unresolved() -> None:
@@ -520,7 +520,7 @@ def test_processor_atom_resolves_against_confidence_field() -> None:
 def test_processor_atom_unknown_when_field_never_populated() -> None:
     """A chat-backed processor whose compiled schema never asked for
     `confidence` reports `None` for it -- reading that field is UNKNOWN,
-    never a type error (jev-provider-plan §3)."""
+    never a type error."""
     candidate = make_candidate()
     atom = ProcessorCondition(name="vibe-check", field="confidence", op=">=", value=0.5)
     answers = {"vibe-check": ProcessorAnswer(value=True, confidence=None)}
@@ -585,15 +585,15 @@ def test_processor_names_empty_when_no_processor_atom() -> None:
     assert processor_names(tree) == frozenset()
 
 
-# --- is_protected() (spec §4.2 point 1; acceptance test 2, rules half) ----
+# --- is_protected() (acceptance test 2, rules half) ------------------------
 
 
 def test_acceptance_02_protected_excluded_without_llm_call() -> None:
-    """spec §14 #2 (rules/config half): a protected sender, a `\\Flagged`
-    message, and an unread message are each excluded by the deterministic
-    `is_protected` prefilter alone — no rule tree is evaluated and no
-    `llm` atom is ever consulted for them, because this check runs before
-    rule evaluation begins (spec §4.2 point 1) and is itself pure/
+    """Acceptance test 2 (rules/config half): a protected sender, a
+    `\\Flagged` message, and an unread message are each excluded by the
+    deterministic `is_protected` prefilter alone — no rule tree is
+    evaluated and no `llm` atom is ever consulted for them, because this
+    check runs before rule evaluation begins and is itself pure/
     synchronous with no path to a classifier.
     """
     protected_flags = ["\\Flagged", "\\Answered"]
@@ -657,7 +657,7 @@ def test_is_protected_sender_domain_suffix_does_not_match_unrelated_domain() -> 
     )
 
 
-# --- is_protected_by_flags() (sync-fix-brief Fix A, Finding 1) ------------
+# --- is_protected_by_flags() -----------------------------------------------
 
 
 def test_is_protected_by_flags_matches_system_flag_case_insensitively() -> None:
@@ -693,7 +693,7 @@ def test_is_protected_by_flags_nothing_configured_is_never_protected() -> None:
 def test_is_protected_delegates_flags_to_is_protected_by_flags() -> None:
     """`is_protected` must agree with `is_protected_by_flags` on the
     flags/unread axes -- it delegates rather than duplicating the
-    `_SYSTEM_FLAGS` casefold logic (sync-fix-brief Fix A)."""
+    `_SYSTEM_FLAGS` casefold logic."""
     candidate = make_candidate(from_address="nobody@nowhere.example", flags=frozenset())
     assert is_protected_by_flags(
         candidate.flags, protected_flags=[], protect_unread=True

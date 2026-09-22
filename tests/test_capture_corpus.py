@@ -1,9 +1,9 @@
-"""Tests for `tools/capture_corpus.py` (contracts §6.2).
+"""Tests for `tools/capture_corpus.py`.
 
 The most important test in this file is
 `test_capture_corpus_performs_no_mutating_calls`: it is the mechanical
-proof, driven against `FakeMailbox`'s mutation-recording hook (contracts
-§6.3), that the read-only-by-construction claim in the tool's module
+proof, driven against `FakeMailbox`'s mutation-recording hook, that the
+read-only-by-construction claim in the tool's module
 docstring actually holds.
 """
 

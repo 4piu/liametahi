@@ -1,7 +1,5 @@
 """Tests for `liametahi.prompt`: payload construction, capping,
-sanitisation, hashing, and the canonical request/response wire shape
-(spec section 5.1, 5.2, 5.3; contracts section 5.3, section 7;
-jev-provider-plan §5, §10).
+sanitisation, hashing, and the canonical request/response wire shape.
 """
 
 from typing import Any, cast
@@ -19,7 +17,7 @@ def _nested(obj: object, *keys: str) -> Any:  # noqa: ANN401 - test-only navigat
     return current
 
 
-# --- Sanitisation (spec section 5.2) -------------------------------------
+# --- Sanitisation -----------------------------------------------------
 
 
 def test_sanitize_text_replaces_newlines_with_single_space() -> None:
@@ -51,7 +49,7 @@ def test_sanitize_text_leaves_ordinary_text_untouched() -> None:
     assert prompt.sanitize_text(ordinary) == ordinary
 
 
-# --- Caps (spec section 5.2) ----------------------------------------------
+# --- Caps -------------------------------------------------------------
 
 
 def test_subject_over_cap_is_truncated_and_flagged() -> None:
@@ -147,12 +145,12 @@ def test_excerpt_under_cap_not_truncated_and_metadata_fields_preserved() -> None
     assert built.truncated is False
 
 
-# --- Fixed metadata field set (spec section 5.1) --------------------------
+# --- Fixed metadata field set -----------------------------------------
 
 
 def test_metadata_field_set_is_exactly_fixed() -> None:
-    """The field set must be exactly what spec section 5.1 lists -- no
-    dates, ages, or flags -- because it is what keeps the section 13
+    """The field set must be exactly what the specification lists -- no
+    dates, ages, or flags -- because it is what keeps the decision
     cache's input_hash stable."""
     candidate = make_candidate()
     built = prompt.build_candidate_payload(candidate, payload_id="c1")
@@ -197,7 +195,7 @@ def test_excerpt_payload_adds_exactly_one_field_to_the_fixed_set() -> None:
     }
 
 
-# --- Input hash stability (spec section 5.2, section 13) ------------------
+# --- Input hash stability ---------------------------------------------
 
 
 def test_input_hash_stable_for_identical_content() -> None:
@@ -228,7 +226,7 @@ def test_input_hash_changes_when_input_level_differs() -> None:
 
 
 def test_truncation_flag_participates_in_input_hash() -> None:
-    """spec section 5.2: 'truncation participates in the input hash.' A
+    """'Truncation participates in the input hash.' A
     manually constructed pair of otherwise-identical field sets must hash
     differently purely because of the truncation flag."""
     fields = {"subject": "x"}
@@ -257,7 +255,7 @@ def test_truncated_and_untruncated_candidate_with_same_final_field_differ() -> N
     assert built_exact.input_hash != built_over.input_hash
 
 
-# --- Processor identity hash (jev-provider-plan §10) -----------------------
+# --- Processor identity hash ------------------------------------------------
 
 
 def _choice_processor(name: str = "spam-category") -> OfferedProcessor:
@@ -308,7 +306,7 @@ def test_processor_hash_ignores_name() -> None:
     assert prompt.compute_processor_hash(a) == prompt.compute_processor_hash(b)
 
 
-# --- Canonical request shape (spec section 5.3; jev-provider-plan §5) ------
+# --- Canonical request shape -------------------------------------------
 
 
 def test_build_request_payload_includes_every_offered_processor() -> None:
@@ -335,7 +333,7 @@ def test_build_request_payload_includes_candidate_id_field() -> None:
 
 
 def test_build_request_payload_includes_question_for_choice_and_score() -> None:
-    """jev-provider-plan §2's own worked examples set `question:` on a
+    """The worked examples set `question:` on a
     `choice` and a `score` processor alongside `options`/`levels` -- it
     is framing text, not shorthand only meaningful for `noul`, so a chat
     request must actually carry it through to the model."""
@@ -372,7 +370,7 @@ def test_build_request_payload_omits_question_when_unset() -> None:
     assert "question" not in offered["urgency"]
 
 
-# --- Response schema (jev-provider-plan §5) --------------------------------
+# --- Response schema --------------------------------------------------------
 
 
 def test_response_schema_contains_exactly_declared_fields_noul() -> None:
@@ -434,7 +432,7 @@ def test_response_schema_score_enumerates_levels() -> None:
     assert value_schema["enum"] == ["low", "medium", "high"]
 
 
-# --- Response parsing (spec section 5.3, section 5.4) ----------------------
+# --- Response parsing --------------------------------------------------
 
 
 def test_parse_valid_response() -> None:
@@ -546,7 +544,7 @@ def test_parse_partial_batch_one_invalid_rest_valid() -> None:
     assert parsed.missing == ()
 
 
-# --- System prompt content (spec section 5.2) -------------------------------
+# --- System prompt content ---------------------------------------------------
 
 
 def test_system_prompt_declares_data_untrusted_and_restricts_vocabulary() -> None:

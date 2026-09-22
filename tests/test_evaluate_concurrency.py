@@ -422,8 +422,8 @@ def test_a_failing_batch_does_not_take_down_its_neighbours(tmp_path: Path) -> No
 def test_split_and_retry_survives_any_concurrency(
     tmp_path: Path, concurrency: int
 ) -> None:
-    """A wholly-invalid batch splits in half and retries each half once
-    (spec section 5.4). Those retries are extra calls made *inside* one
+    """A wholly-invalid batch splits in half and retries each half once.
+    Those retries are extra calls made *inside* one
     worker, so the total call count must not shift with the pool size."""
     conn, account_id = _open(tmp_path, f"c{concurrency}.sqlite3")
     try:

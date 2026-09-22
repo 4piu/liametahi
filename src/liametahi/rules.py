@@ -1,7 +1,6 @@
-"""Three-valued condition tree evaluator (spec §7.1, §7.2;
-jev-provider-plan §3, §4, §6). Pure, no I/O.
+"""Three-valued condition tree evaluator. Pure, no I/O.
 
-`config.py` parses the value grammars (contracts §3 — durations, sizes,
+`config.py` parses the value grammars (durations, sizes,
 globs) at load time and constructs the atomic-condition dataclasses
 defined here; this module never parses a raw string. It is the primary
 property-testing target: `all`/`any`/`none`/`not` must satisfy Kleene
@@ -9,8 +8,7 @@ three-valued logic for every combination of TRUE/FALSE/UNKNOWN children,
 and `evaluate` must never raise on a well-typed tree.
 
 The old single-`llm`-atom mechanism (`LlmCondition`/`llm_atom()`) is
-retired by the `processors:` redesign (jev-provider-plan, whole
-document): a rule may now reference any number of named `processor:`
+retired: a rule may now reference any number of named `processor:`
 atoms, each `UNKNOWN` until `evaluate()` is given a resolved
 `ProcessorAnswer` for it via `processor_values`. See `processor_names()`
 for how a caller discovers which processors a still-`UNKNOWN` rule needs.
@@ -28,7 +26,7 @@ from typing import Any, Literal
 
 from liametahi.domain import Candidate
 
-# IMAP system flags (compared case-insensitively per spec §7.1).
+# IMAP system flags (compared case-insensitively).
 _SYSTEM_FLAGS = frozenset(
     {"\\seen", "\\answered", "\\flagged", "\\deleted", "\\draft", "\\recent"}
 )
@@ -61,7 +59,7 @@ class NewerThan:
 @dataclass(frozen=True, slots=True)
 class LiteralPattern:
     """A glob or plain-substring value, per the owning condition's default
-    mode (spec §7.1). Already lowercased; matched against a lowercased
+    mode. Already lowercased; matched against a lowercased
     candidate field, so this form is always case-insensitive."""
 
     text: str
@@ -69,7 +67,7 @@ class LiteralPattern:
 
 @dataclass(frozen=True, slots=True)
 class RegexPattern:
-    """A `/pattern/flags` literal (spec §7.1). Compiled at config load, so
+    """A `/pattern/flags` literal. Compiled at config load, so
     a malformed pattern is a config error, never a runtime one. Matched
     against the candidate field's original casing — regex mode is
     case-*sensitive* by default, the opposite of `LiteralPattern`, unless
@@ -138,8 +136,8 @@ class LargerThan:
     size_bytes: int
 
 
-#: `recipient-count`'s comparison operators (spec §7.1; contracts §3).
-#: Also reused, unchanged, by `ProcessorCondition` (jev-provider-plan §3).
+#: `recipient-count`'s comparison operators.
+#: Also reused, unchanged, by `ProcessorCondition`.
 ComparisonOp = Literal["==", "!=", ">=", "<=", ">", "<"]
 
 _COMPARATORS: dict[ComparisonOp, Callable[[Any, Any], bool]] = {
@@ -161,20 +159,20 @@ class RecipientCount:
 @dataclass(frozen=True, slots=True)
 class HasAttachment:
     """A presence check with a fixed `true` value, validated entirely at
-    config-parse time (spec §7.1); nothing left to carry at eval time."""
+    config-parse time; nothing left to carry at eval time."""
 
 
 @dataclass(frozen=True, slots=True)
 class AuthResult:
-    """`auth-result: mechanism=result` (spec §7.1). `regex` is a single
+    """`auth-result: mechanism=result`. `regex` is a single
     precompiled pattern built by `config.py` from the parsed mechanism and
-    result words (contracts §3), never re-built per candidate at eval
+    result words, never re-built per candidate at eval
     time -- mirroring `RegexPattern`'s precompile-once discipline."""
 
     regex: re.Pattern[str]
 
 
-#: `processor: "name.field op value"` (jev-provider-plan §3). `field` is a
+#: `processor: "name.field op value"`. `field` is a
 #: closed set (`"value"` or `"confidence"`), validated by `config.py`'s
 #: parser -- nothing else is a legal field name. `value` is the parsed
 #: comparand: a bool, a float, or a plain string (a declared choice/level
@@ -187,8 +185,8 @@ class ProcessorCondition:
     value: bool | float | str
 
 
-#: One processor's resolved answer for one candidate this round
-#: (jev-provider-plan §3, §6). `confidence` is `None` for a chat-backed
+#: One processor's resolved answer for one candidate this round.
+#: `confidence` is `None` for a chat-backed
 #: processor whose declared schema does not include it (jev always
 #: populates it) -- reading a `None` field via `processor:` is `UNKNOWN`,
 #: never a type error.
@@ -232,7 +230,7 @@ class AnyNode:
 @dataclass(frozen=True, slots=True)
 class NoneNode:
     """True if every child is FALSE, false if any child is TRUE, else
-    UNKNOWN -- the De Morgan mirror of `AnyNode` (jev-provider-plan §4)."""
+    UNKNOWN -- the De Morgan mirror of `AnyNode`."""
 
     children: tuple[ConditionTree, ...]
 
@@ -304,7 +302,7 @@ def _eval_atom(
 def _eval_processor_condition(
     atom: ProcessorCondition, processor_values: Mapping[str, ProcessorAnswer]
 ) -> Tri:
-    """jev-provider-plan §3, §6: `UNKNOWN` until the named processor has
+    """`UNKNOWN` until the named processor has
     answered this candidate this round; `UNKNOWN` again if the field it
     asks about (`confidence` on a chat processor that never declared it)
     was never populated. `evaluate()`'s docstring promises it never
@@ -365,10 +363,10 @@ def evaluate(
     - `any` is TRUE if any child is TRUE, FALSE if every child is FALSE,
       else UNKNOWN.
     - `none` is TRUE if every child is FALSE, FALSE if any child is TRUE,
-      else UNKNOWN -- the De Morgan mirror of `any` (jev-provider-plan §4).
+      else UNKNOWN -- the De Morgan mirror of `any`.
     - `not` swaps TRUE/FALSE and leaves UNKNOWN unchanged.
     - A `processor:` atom is UNKNOWN until `processor_values` carries a
-      resolved answer for its processor name (jev-provider-plan §6);
+      resolved answer for its processor name;
       every other atom is deterministic. Omitting `processor_values`
       entirely (the default) is exactly equivalent to no processor having
       answered yet -- every `ProcessorCondition` atom evaluates UNKNOWN.
@@ -418,8 +416,8 @@ def evaluate(
 
 
 def processor_names(tree: ConditionTree) -> frozenset[str]:
-    """Every distinct processor name referenced anywhere in `tree`
-    (jev-provider-plan §6), replacing the old single-`llm`-atom
+    """Every distinct processor name referenced anywhere in `tree`,
+    replacing the old single-`llm`-atom
     `llm_atom()` walk now that a rule may reference several named
     processors, shared freely with other rules. `evaluate.py` uses this
     to know which processors a still-`UNKNOWN` rule needs answered."""
@@ -436,7 +434,7 @@ def processor_names(tree: ConditionTree) -> frozenset[str]:
 
 
 def _sender_matches_protect_entry(address: str, entry: str) -> bool:
-    """spec §6: `protect.senders` entries match case-insensitively as
+    """`protect.senders` entries match case-insensitively as
     either an exact address or a domain suffix (`bank.example` matches
     `alerts@bank.example` and `x.bank.example`)."""
     address = address.lower()
@@ -455,16 +453,16 @@ def is_protected_by_flags(
     protected_flags: Collection[str],
     protect_unread: bool,
 ) -> bool:
-    """The flags-only half of `is_protected` (sync-fix-brief Fix A): a
+    """The flags-only half of `is_protected`: a
     protected flag, or (when `protect_unread`) the absence of `\\Seen`.
 
     Deliberately takes a bare `flags` collection rather than a
     `Candidate`, so this can be re-checked against a *freshly fetched*
-    flag set at execute time (spec §4.3 point 4's re-verify step) without
+    flag set at execute time's re-verify step without
     needing a full `Candidate` rebuild. `protect.senders` has no
     equivalent narrow helper: it keys off `from_address`, which
     `domain.fingerprint()` already covers, so it cannot go stale between
-    scan and execute the way flags can (sync-fix-brief Finding 1).
+    scan and execute the way flags can.
     """
     flags_lower = {f.lower() for f in flags}
     for flag in protected_flags:
@@ -484,7 +482,7 @@ def is_protected(
     protect_unread: bool,
 ) -> bool:
     """The deterministic exclusion applied before any rule is evaluated
-    or any candidate is offered to a classifier (spec §4.2 point 1): a
+    or any candidate is offered to a classifier: a
     protected flag, a protected sender, or (when `protect_unread`) the
     absence of `\\Seen`. Pure and synchronous — nothing here can reach a
     model, which is exactly what guarantees a protected message never

@@ -1,13 +1,12 @@
-"""Verified `.eml` backup and restore (spec section 11, section 4.4;
-contracts section 4 backup manifest DDL).
+"""Verified `.eml` backup and restore.
 
 `MailboxAdapter`, `MailboxStatus`, `RawMetadata`, `UnsupportedCapability`,
 and `MessageVanished` were originally reproduced locally in this module,
 exactly as `tests/fakes/fake_mailbox.py` used to: `imap_adapter.py`
 (Unit 2) was being built concurrently and this unit could not import or
-create it (work-unit boundary, contracts section 7). Now that
+create it (a work-unit boundary). Now that
 `imap_adapter.py` has landed, this module imports the real definitions
-per contracts section 5.4's instruction ("Units 2 and 3 must move the
+per the explicit instruction ("Units 2 and 3 must move the
 real definitions into `imap_adapter.py` ... and change the fakes to
 import them, deleting the local copies") -- the same cleanup already
 applied to `tests/fakes/fake_mailbox.py`. `MailboxAdapter` is a
@@ -67,11 +66,11 @@ def is_unsupported_error(exc: Exception) -> bool:
     return type(exc).__name__ == "UnsupportedCapability"
 
 
-# --- Verified backup write (spec section 11) ------------------------------
+# --- Verified backup write --------------------------------------------
 
 
 class BackupError(Exception):
-    """Backup could not be written and verified. Per spec section 11:
+    """Backup could not be written and verified. Per the specification:
     'If backup verification fails, record the failure and do not modify
     the mailbox' -- callers must not proceed to a mutation when this is
     raised."""
@@ -94,7 +93,7 @@ def backup_relative_path(sha256: str) -> Path:
 
 def ensure_backup_dir(backup_dir: Path) -> Path:
     """Create the backup directory (and its `.tmp` staging
-    subdirectory) with mode 0700 (spec section 12)."""
+    subdirectory) with mode 0700."""
     backup_dir = backup_dir.expanduser()
     backup_dir.mkdir(parents=True, exist_ok=True)
     backup_dir.chmod(0o700)
@@ -133,8 +132,7 @@ def write_verified_backup(
     run_id: str,
     raw: bytes | None = None,
 ) -> BackupResult:
-    """spec section 11 / contracts section 10 (concurrency notes):
-    fetch raw RFC 822 bytes with `BODY.PEEK[]` (the adapter's job --
+    """Fetch raw RFC 822 bytes with `BODY.PEEK[]` (the adapter's job --
     this function only calls `fetch_raw`, never touching `\\Seen`),
     write to a unique temporary file in the backup filesystem, fsync,
     checksum the bytes actually on disk, atomically rename to the
@@ -142,7 +140,7 @@ def write_verified_backup(
 
     Idempotent under a retry with the same key: if a manifest row for
     this exact `(account_id, mailbox, uidvalidity, uid, sha256)`
-    already exists (contracts section 4's uniqueness constraint), that
+    already exists (the manifest's own uniqueness constraint), that
     existing row's `backup_id` is returned rather than raising a
     `sqlite3.IntegrityError` or writing a duplicate.
 
@@ -183,7 +181,7 @@ def write_verified_backup(
         tmp_path.chmod(0o600)
         # Checksum the bytes actually on disk, not the in-memory
         # buffer, so a write-time corruption is caught rather than
-        # silently backed up (spec section 11: "fsync, checksum" as a
+        # silently backed up ("fsync, checksum" as a
         # distinct step after the write).
         sha256 = _sha256_of_file(tmp_path)
         byte_count = tmp_path.stat().st_size
@@ -199,7 +197,7 @@ def write_verified_backup(
         final_path.parent.chmod(0o700)
 
         if final_path.exists():
-            # Content-addressed dedup (spec section 11): identical
+            # Content-addressed dedup: identical
             # bytes already backed up (possibly for a different
             # message). Verify the existing file still matches before
             # trusting it.
@@ -256,7 +254,7 @@ def write_verified_backup(
         )
     except sqlite3.IntegrityError:
         # Lost a race against a concurrent insert of the same natural
-        # key (contracts section 10): re-read rather than fail.
+        # key: re-read rather than fail.
         existing = _find_existing_backup(
             conn,
             account_id=key.account_id,
@@ -288,12 +286,12 @@ def _find_existing_backup(
 ) -> sqlite3.Row | None:
     """A natural-key lookup `state.py` does not expose (it only offers
     `get_backup(backup_id)`; its insert-only surface for backups was
-    not extended with this query, contracts section 5). This is the one
+    not extended with this query). This is the one
     read this module cannot route through `state.py`'s typed surface
     without a change to a file this unit does not own (Unit 1's
-    file-ownership boundary, contracts section 7); it is read-only,
-    scoped to exactly the manifest's own uniqueness constraint
-    (contracts section 4), and called out in the final report as a gap
+    file-ownership boundary); it is read-only,
+    scoped to exactly the manifest's own uniqueness constraint, and
+    called out in the final report as a gap
     Unit 1 should close by adding this query to `state.py` itself.
     """
     return conn.execute(  # type: ignore[no-any-return]
@@ -322,7 +320,7 @@ def find_backups_by_key(
     ).fetchall()
 
 
-# --- Restore (spec section 4.4) -------------------------------------------
+# --- Restore -----------------------------------------------------------
 
 
 class RestoreError(Exception):
@@ -348,14 +346,14 @@ def restore_backup(
     destination_mailbox: str,
     dry_run: bool,
 ) -> RestoreResult:
-    """spec section 4.4: verify the backup's checksum against its file,
+    """Verify the backup's checksum against its file,
     then `APPEND` it to `destination_mailbox`, preserving the original
     `INTERNALDATE` and flags minus `\\Deleted` and `\\Recent`. Records
     the new server identity on the manifest row. `--dry-run` verifies
     the checksum and reports what would be appended without calling
     `append`.
 
-    Restore is best-effort (spec section 4.4): it does not detect that
+    Restore is best-effort: it does not detect that
     the message already exists in the destination, so restoring an
     already-present message produces a duplicate.
     """

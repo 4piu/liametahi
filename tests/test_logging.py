@@ -1,4 +1,4 @@
-"""Tests for `liametahi.logging` (spec §12: redaction)."""
+"""Tests for `liametahi.logging` (redaction)."""
 
 import logging
 from collections.abc import Generator

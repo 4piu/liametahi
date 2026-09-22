@@ -1,4 +1,4 @@
-"""Work Unit 2's named acceptance tests (spec section 14): 11 (unit
+"""Work Unit 2's named acceptance tests: 11 (unit
 tier -- see `tests/integration/test_acceptance_11_seen_flag.py` for the
 integration-tier half against a real server) and 12. Both exercise
 `imap_adapter.scan()` against `FakeMailbox`, plus `execute.py` (Unit 4,
@@ -58,7 +58,7 @@ def _setup_run(conn: sqlite3.Connection, *, account_id: int, run_id: str) -> Non
 
 
 def test_max_new_mails_unset_means_uncapped(tmp_path: Path) -> None:
-    """`max_new_mails` is opt-in (spec §9/§4.1 point 6): `None`
+    """`max_new_mails` is opt-in: `None`
     scans every eligible candidate in one pass rather than stopping."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
@@ -93,7 +93,7 @@ def test_max_new_mails_unset_means_uncapped(tmp_path: Path) -> None:
         state.close_database(conn)
 
 
-# --- Fix B (sync-fix-brief Finding 1): per-scan flags refresh -------------
+# --- Per-scan flags refresh --------------------------------------------
 
 
 def test_scan_refreshes_flags_for_already_known_candidates(tmp_path: Path) -> None:
@@ -134,7 +134,7 @@ def test_scan_refreshes_flags_for_already_known_candidates(tmp_path: Path) -> No
 
         # The user flags the message important from another IMAP client,
         # between the two scans -- no re-fetch of full metadata happens
-        # for an already-tracked UID, only this Fix B flags refresh.
+        # for an already-tracked UID, only this batched flags refresh.
         mb._messages["INBOX"][0].flags.add("\\Flagged")
 
         second = scan(
@@ -160,7 +160,8 @@ def test_scan_refreshes_flags_for_already_known_candidates(tmp_path: Path) -> No
 
 
 def test_scan_flags_refresh_skips_retired_candidates(tmp_path: Path) -> None:
-    """sync-fix-brief Fix B composes with Fix C: a retired candidate's
+    """The per-scan flags refresh composes with candidate retirement: a
+    retired candidate's
     stored flags are not overwritten by the per-scan refresh, even if
     its message somehow still shows up in `search_uids()`."""
     conn = state.open_database(tmp_path / "state.sqlite3")
@@ -216,8 +217,8 @@ def test_scan_flags_refresh_skips_retired_candidates(tmp_path: Path) -> None:
 
 
 def test_acceptance_11_metadata_fetch_does_not_set_seen(tmp_path: Path) -> None:
-    """A metadata fetch does not set `\\Seen` on any message (spec §14.11,
-    §4.1 point 4). Exercised through the real scan-phase entry point
+    """A metadata fetch does not set `\\Seen` on any message. Exercised
+    through the real scan-phase entry point
     (`imap_adapter.scan`), not just a direct `fetch_metadata` call, so
     the whole read path -- `EXAMINE`, `SEARCH`, then `BODY.PEEK` fetch --
     is covered end to end."""
@@ -273,7 +274,7 @@ def test_acceptance_12_uidvalidity_change_reidentifies_by_fingerprint(
 ) -> None:
     """A UIDVALIDITY change re-identifies existing candidates by
     fingerprint and does not produce duplicate candidates or re-action
-    an already-actioned message (spec §14.12, §4.1 point 2, §11)."""
+    an already-actioned message."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
         account_id = state.upsert_account(conn, name="a", host="h", username="u")

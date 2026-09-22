@@ -1,4 +1,4 @@
-"""Tests for `liametahi.cli` (spec §9)."""
+"""Tests for `liametahi.cli`."""
 
 import os
 import signal
@@ -52,7 +52,7 @@ def test_config_check_connect_surfaces_auth_failure_as_exit_4(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`--connect` verifies IMAP auth; an auth failure is exit 4, not the
-    generic runtime-failure exit 1 (spec §9)."""
+    generic runtime-failure exit 1."""
     path = write_config(tmp_path / "cfg.yaml", make_config_dict())
 
     def fake_connect_check(
@@ -76,7 +76,7 @@ def test_config_check_connect_surfaces_auth_failure_as_exit_4(
 def test_config_check_connect_not_called_without_flag(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plain `config check` contacts nothing (spec §9)."""
+    """Plain `config check` contacts nothing."""
     path = write_config(tmp_path / "cfg.yaml", make_config_dict())
 
     def explode(*_: object, **__: object) -> None:
@@ -163,7 +163,7 @@ def test_run_unwritable_task_lock_dir_exits_2_not_a_traceback(tmp_path: Path) ->
     """`task_lock` creates `task_lock_dir`; when it can't, this must be a
     clean exit-2 config error, not an unhandled OSError -- and it must
     happen before any mailbox/model factory is ever called, since lock
-    acquisition comes first (spec §10)."""
+    acquisition comes first."""
     data = make_config_dict()
     data["settings"] = {
         "log_level": "info",
@@ -222,7 +222,7 @@ def test_report_unwritable_state_db_exits_2_not_a_traceback(tmp_path: Path) -> N
 def test_report_never_contacts_mailbox_or_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """spec §9: `report` reads stored state only."""
+    """`report` reads stored state only."""
 
     def explode(*_: object, **__: object) -> None:
         raise AssertionError("report must not open a mailbox or a classifier")
@@ -278,7 +278,7 @@ def test_restore_unwritable_state_db_exits_2_not_a_traceback(tmp_path: Path) -> 
 def test_restore_dry_run_opens_no_connection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """spec §4.4: a dry run verifies the checksum and reports what it
+    """A dry run verifies the checksum and reports what it
     would append, without connecting."""
 
     def explode(*_: object, **__: object) -> None:
@@ -306,7 +306,7 @@ def test_restore_dry_run_opens_no_connection(
 def test_config_path_resolution_prefers_env_over_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--config` wins; else `$LIAMETAHI_CONFIG`; else the default (spec §9)."""
+    """`--config` wins; else `$LIAMETAHI_CONFIG`; else the default."""
     path = write_config(tmp_path / "from-env.yaml", make_config_dict())
     monkeypatch.setenv("LIAMETAHI_CONFIG", str(path))
     result = runner.invoke(app, ["config", "check"])
@@ -319,7 +319,7 @@ def test_project_config_in_cwd_supersedes_user_default(
 ) -> None:
     """A `./config.yaml` in the current directory is used ahead of the
     user-level default when neither `--config` nor `$LIAMETAHI_CONFIG` is
-    given (spec §9)."""
+    given."""
     monkeypatch.delenv("LIAMETAHI_CONFIG", raising=False)
     write_config(tmp_path / "config.yaml", make_config_dict())
     monkeypatch.chdir(tmp_path)
@@ -332,7 +332,7 @@ def test_project_config_does_not_override_explicit_flag_or_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Both `--config` and `$LIAMETAHI_CONFIG` outrank a project-level
-    `./config.yaml`, even when one is present in the cwd (spec §9)."""
+    `./config.yaml`, even when one is present in the cwd."""
     write_config(tmp_path / "config.yaml", make_config_dict())
     monkeypatch.chdir(tmp_path)
 
@@ -358,8 +358,8 @@ def test_missing_config_exits_2_and_names_the_path(tmp_path: Path) -> None:
 def test_acceptance_09_second_run_while_locked_exits_5(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """spec §14.9 / §10: a second invocation of the same task while one is
-    active exits 5 and performs no mailbox, model, or SQLite run work.
+    """Acceptance test 9: a second invocation of the same task while one
+    is active exits 5 and performs no mailbox, model, or SQLite run work.
     """
     path = _config_with_state(tmp_path)
     cfg = load_config(path)
@@ -375,7 +375,7 @@ def test_acceptance_09_second_run_while_locked_exits_5(
         result = runner.invoke(app, ["run", "inbox-cleanup", "--config", str(path)])
 
     assert result.exit_code == 5, result.output
-    # No run report was created (spec §10).
+    # No run report was created.
     assert not Path(cfg.settings.state_db).exists() or _run_count(cfg) == 0
 
 
@@ -383,7 +383,7 @@ def test_acceptance_09_wait_times_out_and_still_exits_5(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With `--wait SECONDS`, a run that never acquires the lock still
-    exits 5 once the deadline passes (spec §10)."""
+    exits 5 once the deadline passes."""
     path = _config_with_state(tmp_path)
     cfg = load_config(path)
 
@@ -402,7 +402,7 @@ def test_acceptance_09_wait_times_out_and_still_exits_5(
 
 
 def test_handle_termination_turns_sigterm_into_keyboard_interrupt() -> None:
-    """spec §10: SIGTERM must reach `runner.py` as the same
+    """SIGTERM must reach `runner.py` as the same
     `KeyboardInterrupt` Python already raises for SIGINT (Ctrl+C)."""
     with pytest.raises(KeyboardInterrupt), _handle_termination():
         os.kill(os.getpid(), signal.SIGTERM)

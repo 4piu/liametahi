@@ -5,7 +5,7 @@ Bookkeeping writes (candidate upserts, classifications, decision-cache
 entries, no-op result items) are batched into one transaction per phase
 so a run costs a handful of fsyncs instead of hundreds. The
 `action_attempts` state machine is deliberately excluded: the reconcile
-pass (spec §4.0) can only tell how far a crashed run got because each
+pass can only tell how far a crashed run got because each
 step was committed as it happened. `test_action_attempt_writes_stay_...`
 below is the regression guard for that -- it fails if anyone ever wraps
 `execute.execute_items` in a transaction for symmetry.
@@ -88,7 +88,7 @@ def _raw() -> bytes:
 
 
 def test_action_attempt_writes_stay_individually_durable(tmp_path: Path) -> None:
-    """spec §4.0: reconcile closes out rows a crashed run left
+    """Reconcile closes out rows a crashed run left
     `pending`/`in_flight`, which only works if each state transition was
     committed as it happened. This asserts durability the way a crash
     would observe it -- from a *separate connection* -- at every single
@@ -115,7 +115,7 @@ def test_action_attempt_writes_stay_individually_durable(tmp_path: Path) -> None
             raise AssertionError(
                 "action_attempts row was not readable from a second "
                 f"connection ({exc}) -- execute_items must not hold a "
-                "transaction open across its writes (spec §4.0)"
+                "transaction open across its writes"
             ) from exc
         finally:
             other.close()

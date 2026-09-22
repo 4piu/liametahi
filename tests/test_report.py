@@ -1,4 +1,4 @@
-"""Tests for `liametahi.report` (spec section 9; contracts section 5.5)."""
+"""Tests for `liametahi.report`."""
 
 import json
 import sqlite3
@@ -174,7 +174,7 @@ def test_quiet_statuses_hidden_by_default_and_shown_verbose(tmp_path: Path) -> N
 
 
 def test_restored_status_is_quiet(tmp_path: Path) -> None:
-    """sync-fix-brief Fix D, Finding 3: skipping a previously-trashed
+    """Skipping a previously-trashed
     message is routine bookkeeping, not an anomaly worth interrupting a
     cron user over -- and because the candidate is retired at the same
     time (see `runner.py`), it is reported at most once ever. So
@@ -386,7 +386,7 @@ def test_display_time_trims_to_whole_seconds() -> None:
 
 
 def test_display_time_normalises_an_offset_to_utc() -> None:
-    """Storage is always UTC (contracts §2), but the parser must not
+    """Storage is always UTC, but the parser must not
     silently render a non-UTC offset as though it were UTC."""
     assert report._display_time("2026-08-01T22:43:22+02:00") == "2026-08-01T20:43:22Z"
 
@@ -399,8 +399,8 @@ def test_yes_no_replaces_python_booleans() -> None:
 def test_rendered_output_trims_time_but_json_keeps_full_precision(
     tmp_path: Path,
 ) -> None:
-    """The JSON document is the machine-readable shape pinned by
-    contracts §5.5 -- trimming it would discard real data. Only the
+    """The JSON document is the machine-readable shape pinned by the
+    fixed report interface -- trimming it would discard real data. Only the
     human-facing tables shorten."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:

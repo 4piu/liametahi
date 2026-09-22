@@ -1,19 +1,17 @@
-"""`FakeMailbox`: an in-memory stand-in for `imap_adapter.MailboxAdapter`
-(contracts §5.4, §6.3).
+"""`FakeMailbox`: an in-memory stand-in for `imap_adapter.MailboxAdapter`.
 
 `MailboxStatus`, `RawMetadata`, `UnsupportedCapability`, and
 `MessageVanished` are imported from `liametahi.imap_adapter`, which is
-Unit 2's fixed cross-unit interface (contracts §5.4) — this file used to
+Unit 2's fixed cross-unit interface — this file used to
 hold verbatim local copies because that module did not exist yet when
-Unit 1 landed; now that it does, per contracts §5.4's explicit
+Unit 1 landed; now that it does, per the explicit
 instruction ("Units 2 and 3 must move the real definitions ... and
 change the fakes to import them, deleting the local copies") this file
 imports from it. `MailboxAdapter` is a `Protocol`, so `FakeMailbox` keeps
 satisfying it structurally without any change to the class below.
 
 Every fetch method is `PEEK`-only by construction: nothing in this class
-ever mutates `\\Seen`, matching the real adapter's contractual guarantee
-(contracts §5.4).
+ever mutates `\\Seen`, matching the real adapter's contractual guarantee.
 """
 
 import json
@@ -56,14 +54,14 @@ def _parsed(raw: bytes) -> Message:
 
 def _header_values(msg: Message, name: str) -> tuple[str, ...]:
     """All non-empty values of `name` (case-insensitive), matching the
-    real adapter's multi-valued, lowercased-key header mapping (contracts
-    §5.4: `Mapping[str, tuple[str, ...]]`)."""
+    real adapter's multi-valued, lowercased-key header mapping
+    (`Mapping[str, tuple[str, ...]]`)."""
     return tuple(str(v).strip() for v in msg.get_all(name, []) if str(v).strip())
 
 
 def _has_attachment(msg: Message) -> bool:
     """A simpler, stdlib-based equivalent of the real adapter's
-    BODYSTRUCTURE-parsing heuristic (spec §7.1): this fake already has
+    BODYSTRUCTURE-parsing heuristic: this fake already has
     the full parsed message in hand, so it walks every part directly
     rather than replicating wire-level parsing. True if any part is
     marked `Content-Disposition: attachment` or carries a filename."""
@@ -79,7 +77,7 @@ class FakeMailbox:
     """An in-memory mailbox implementing the `MailboxAdapter`-shaped
     protocol over a small in-memory message store.
 
-    Failure switches (contracts §6.3):
+    Failure switches:
         - `capabilities`: pass `capabilities=frozenset()` at construction
           to simulate a server with no `MOVE` support.
         - `accepts_custom_keywords`: per-mailbox, passed at construction.
@@ -90,7 +88,7 @@ class FakeMailbox:
           IMAP FETCH-of-nonexistent-UID behaviour) and `move`/
           `add_keyword` raise `MessageVanished`.
 
-    `mutations` (contracts §6.2, §6.3) records every call to a mutating
+    `mutations` records every call to a mutating
     method -- `move`, `add_keyword`, `append` -- regardless of whether it
     succeeded, raised, or was a no-op, so a caller that must prove it is
     read-only (e.g. `tools/capture_corpus.py`) can assert the log stayed
@@ -124,7 +122,7 @@ class FakeMailbox:
 
     @classmethod
     def from_corpus(cls, manifest_path: Path, **kwargs: object) -> FakeMailbox:
-        """Load a corpus in the format documented at contracts §6.2:
+        """Load a corpus in the documented format:
         `manifest.json` plus `messages/<sha256>.eml`, relative to
         `manifest_path`'s parent directory."""
         base = manifest_path.parent
@@ -170,7 +168,7 @@ class FakeMailbox:
     @property
     def mutations(self) -> tuple[str, ...]:
         """Every call made to `move`, `add_keyword`, or `append`, in call
-        order, regardless of outcome (contracts §6.2, §6.3). A read-only
+        order, regardless of outcome. A read-only
         code path must leave this empty."""
         return tuple(self._mutation_log)
 
@@ -207,7 +205,7 @@ class FakeMailbox:
     ) -> tuple[RawMetadata, ...]:
         mailbox = self._require_selected()
         # Lowercased keys, multi-valued: matches imap_adapter.RawMetadata
-        # exactly (contracts §5.4) so normalize() works identically
+        # exactly so normalize() works identically
         # whether it is handed a real or a fake RawMetadata.
         wanted = {h.lower() for h in headers}
         results = []
@@ -230,7 +228,7 @@ class FakeMailbox:
                     has_attachment=_has_attachment(parsed),
                 )
             )
-        # \Seen is never touched by a metadata fetch (spec §4.1, §12).
+        # \Seen is never touched by a metadata fetch.
         return tuple(results)
 
     def fetch_raw(self, uid: int) -> bytes:
@@ -334,8 +332,8 @@ class FakeMailbox:
         mailbox that emptied out and then received something new (e.g. a
         restored message moved/appended back) silently reuse a UID a
         still-referenced candidate row already claims, which is exactly
-        the identity collision Fix D's restore scenario needs to be able
-        to *not* rely on to reproduce (sync-fix-brief Finding 3)."""
+        the identity collision the restored-message-skip scenario needs
+        to be able to *not* rely on to reproduce."""
         current = self._next_uid_counter.get(mailbox, 0)
         new_uid = current + 1
         self._next_uid_counter[mailbox] = new_uid

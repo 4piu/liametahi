@@ -1,5 +1,5 @@
-"""End-to-end regression test for the LLM decision cache (spec §13)
-caching a match, not just a non-match: a message that the model matched
+"""End-to-end regression test for the LLM decision cache caching a
+match, not just a non-match: a message that the model matched
 but whose remote mutation then failed (wrong `trash_mailbox`, a
 capability the server doesn't advertise, ...) stays a live candidate and
 must retry that mutation on the next run without being reclassified.

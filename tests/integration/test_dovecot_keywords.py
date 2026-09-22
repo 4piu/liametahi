@@ -1,5 +1,4 @@
-"""Custom-keyword (`label:<keyword>`) support against a real server
-(spec §7.5, contracts §6.2 point 3)."""
+"""Custom-keyword (`label:<keyword>`) support against a real server."""
 
 from datetime import UTC, datetime
 

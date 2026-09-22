@@ -1,4 +1,4 @@
-"""Tests for `liametahi.execute` (spec section 4.3, section 4.0) beyond
+"""Tests for `liametahi.execute` beyond
 what `tests/test_acceptance.py` already exercises: vanished, changed,
 unsupported, capped, and `--fail-fast` handling."""
 
@@ -149,7 +149,7 @@ def test_vanished_message_reported_and_not_mutated(tmp_path: Path) -> None:
 
 
 def test_vanished_reverify_retires_candidate(tmp_path: Path) -> None:
-    """sync-fix-brief Fix C, Finding 2: `_reverify` reporting `vanished`
+    """`_reverify` reporting `vanished`
     retires the candidate row so it stops coming back as a live
     candidate forever."""
     conn = state.open_database(tmp_path / "state.sqlite3")
@@ -182,7 +182,7 @@ def test_vanished_reverify_retires_candidate(tmp_path: Path) -> None:
 
 
 def test_protected_flag_added_since_scan_blocks_mutation(tmp_path: Path) -> None:
-    """sync-fix-brief Fix A, Finding 1: a flag added server-side after
+    """A flag added server-side after
     scan (e.g. the user flags the message important from another
     client) is caught by the immediate pre-mutation re-check against
     freshly re-fetched flags, even though the stored candidate row was
@@ -284,7 +284,7 @@ def test_protected_flags_default_to_nothing_protected(tmp_path: Path) -> None:
 
 
 def test_completed_move_retires_candidate(tmp_path: Path) -> None:
-    """sync-fix-brief Fix C, Finding 2: a completed `move_to`/`trash`
+    """A completed `move_to`/`trash`
     retires the candidate row."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
@@ -318,7 +318,7 @@ def test_completed_move_retires_candidate(tmp_path: Path) -> None:
 
 
 def test_completed_label_does_not_retire_candidate(tmp_path: Path) -> None:
-    """sync-fix-brief Fix C, Finding 2: `label:*` is deliberately
+    """`label:*` is deliberately
     excluded from retirement -- the message stays in place and may
     legitimately match other rules on a later run."""
     conn = state.open_database(tmp_path / "state.sqlite3")
@@ -555,7 +555,7 @@ def test_max_actions_caps_remaining_items(tmp_path: Path) -> None:
 
 
 def test_max_actions_none_means_uncapped(tmp_path: Path) -> None:
-    """spec §6: an unset `max_actions` (`None`) means no cap at
+    """An unset `max_actions` (`None`) means no cap at
     all -- every item must run, none reported `capped`."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:

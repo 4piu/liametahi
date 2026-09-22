@@ -1,5 +1,5 @@
-"""`APPEND` round-tripping flags and `INTERNALDATE` (contracts §6.2
-point 3), plus seeding a container from the committed synthetic corpus
+"""`APPEND` round-tripping flags and `INTERNALDATE`, plus seeding a
+container from the committed synthetic corpus
 and confirming `imap_adapter.scan()` recovers every message end to end
 against a real server."""
 
@@ -55,7 +55,7 @@ def test_seed_corpus_via_append_and_scan_recovers_every_message(
     """Seeding (`ImapMailbox.append`, the same method `restore` uses)
     and the scan phase (`imap_adapter.scan`) are both production code;
     this is the closest thing in this suite to an end-to-end smoke test
-    against a real server (contracts §6.2 point 2)."""
+    against a real server."""
     seed_adapter = dovecot_server.connect()
     try:
         seeded = seed_corpus(seed_adapter)

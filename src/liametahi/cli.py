@@ -1,16 +1,16 @@
-"""Typer CLI (spec §9).
+"""Typer CLI.
 
 All four commands are functional. This module owns argument parsing,
 process exit codes, and printing; every decision of substance belongs to
 `runner.py` (phase orchestration), `report.py` (rendering), or
 `backup.py` (restore). Nothing here reimplements policy.
 
-Config path resolution (spec §9): `--config PATH`, else `$LIAMETAHI_CONFIG`,
+Config path resolution: `--config PATH`, else `$LIAMETAHI_CONFIG`,
 else `./config.yaml` in the current directory (a project-level config), else
 `~/.config/liametahi/config.yaml`. A missing file is exit 2 naming the path
 that was tried.
 
-Exit codes (spec §9):
+Exit codes:
     0  success
     1  runtime or partial failure
     2  bad invocation or configuration
@@ -51,7 +51,7 @@ EXIT_INTERRUPTED = 3
 EXIT_AUTH_FAILURE = 4
 EXIT_TASK_RUNNING = 5
 
-#: Same per-platform resolution as `config.py`'s data directory (spec §9):
+#: Same per-platform resolution as `config.py`'s data directory:
 #: `~/.config/liametahi` on Linux, `~/Library/Application Support/liametahi`
 #: on macOS, `%LOCALAPPDATA%\liametahi` on Windows.
 DEFAULT_CONFIG_PATH = (
@@ -91,7 +91,7 @@ def _interactive_progress() -> Iterator[Progress]:
 def _handle_termination() -> Iterator[None]:
     """Make SIGTERM raise the same `KeyboardInterrupt` Python already
     raises for SIGINT (Ctrl+C), so `runner.py` has exactly one signal to
-    catch and finish the run gracefully with (spec §10: exit code 3).
+    catch and finish the run gracefully with (exit code 3).
     Scoped to `run` alone and restored on exit, since `signal.signal` is
     process-global and this same process handles every CLI invocation in
     a test run.
@@ -103,7 +103,7 @@ def _handle_termination() -> Iterator[None]:
         signal.signal(signal.SIGTERM, previous)
 
 
-#: A project-level config in the current directory (spec §9): checked after
+#: A project-level config in the current directory: checked after
 #: `--config`/`$LIAMETAHI_CONFIG` and before the user-level default, so a
 #: repo- or directory-scoped config.yaml supersedes the one in
 #: `~/.config/liametahi` without needing an explicit flag on every
@@ -116,8 +116,7 @@ PROJECT_CONFIG_NAME = "config.yaml"
 
 def _resolve_config_path(supplied: Path | None) -> Path:
     """`--config PATH`, else `$LIAMETAHI_CONFIG`, else `./config.yaml` in
-    the current directory if one exists, else the user-level default
-    (spec §9).
+    the current directory if one exists, else the user-level default.
 
     `None` — not a sentinel path — means "the flag was not given". A
     sentinel `Path` does not survive Click's own path conversion, and
@@ -138,7 +137,7 @@ def _resolve_config_path(supplied: Path | None) -> Path:
 def _load(config: Path | None) -> tuple[Config, Path]:
     """Resolve, load, and validate the config, then register its secrets
     with the log redactor before anything can log. Exits 2 on any config
-    problem, including a missing file (spec §9)."""
+    problem, including a missing file."""
     path = _resolve_config_path(config)
     if not path.is_file():
         typer.echo(f"config error: no config file at {path}", err=True)
@@ -241,7 +240,7 @@ def config_check(
     typer.echo(f"  tasks:      {', '.join(sorted(cfg.tasks))}")
     for task_name in sorted(cfg.tasks):
         task = cfg.tasks[task_name]
-        # jev-provider-plan §9: a rule has no id and a task has no single
+        # A rule has no id and a task has no single
         # `model:` any more -- report a rule count and source mailboxes
         # instead.
         typer.echo(
@@ -326,7 +325,7 @@ def run(
             on_run_created=lambda run_id: typer.echo(f"run {run_id} started"),
         )
 
-    # spec §10: a lock-contended run writes one line to stderr and no
+    # A lock-contended run writes one line to stderr and no
     # report at all, so there is nothing to render.
     if outcome.diagnostic is not None:
         typer.echo(outcome.diagnostic, err=True)
@@ -437,7 +436,7 @@ def restore(
             noun="backup",
         )
         # A dry run verifies the checksum and reports what it would
-        # append; it must not open a connection to do that (spec §4.4).
+        # append; it must not open a connection to do that.
         adapter = None
         if not dry_run:
             mailbox_conn = runner.default_mailbox_factory(cfg.accounts[account_name])

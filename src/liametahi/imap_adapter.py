@@ -1,4 +1,4 @@
-"""IMAP mailbox adapter and the scan phase (spec §4.1, §11; contracts §5.4).
+"""IMAP mailbox adapter and the scan phase.
 
 `MailboxAdapter` is the read/search/fetch/move/append abstraction every
 other unit programs against; `ImapMailbox` is its `imaplib`-backed
@@ -32,12 +32,12 @@ from liametahi.progress import NullProgress, Progress
 
 logger = get_logger(__name__)
 
-# --- Exceptions (contracts §5.4) -------------------------------------------
+# --- Exceptions -------------------------------------------------------------
 
 
 class UnsupportedCapability(Exception):
     """Raised when an action requires an IMAP capability the server does
-    not advertise (spec §7.5): `MOVE` for `move`, `PERMANENTFLAGS \\*` for
+    not advertise: `MOVE` for `move`, `PERMANENTFLAGS \\*` for
     `add_keyword`. No COPY/STORE/EXPUNGE emulation is ever attempted --
     that fallback is non-atomic and can expunge unrelated messages."""
 
@@ -45,7 +45,7 @@ class UnsupportedCapability(Exception):
 class MessageVanished(Exception):
     """Raised by a mutating call (`move`, `add_keyword`) against a UID
     that no longer matches any message on the server, e.g. removed by
-    another process between the scan and execute phases (spec §4.3)."""
+    another process between the scan and execute phases."""
 
 
 class ImapTransportError(Exception):
@@ -53,7 +53,7 @@ class ImapTransportError(Exception):
     is not one of the two typed exceptions above."""
 
 
-# --- Data shapes (contracts §5.4, verbatim) ---------------------------------
+# --- Data shapes --------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +74,7 @@ class RawMetadata:
     rfc822_size: int
     flags: frozenset[str]
     headers: Mapping[str, tuple[str, ...]]  # lowercased name -> all values
-    has_attachment: bool  # derived from BODYSTRUCTURE (spec §7.1)
+    has_attachment: bool  # derived from BODYSTRUCTURE
 
 
 class MailboxAdapter(Protocol):
@@ -114,7 +114,7 @@ def _parse_internaldate(raw: bytes) -> datetime:
     return datetime.strptime(text, _INTERNALDATE_FORMAT).astimezone(UTC)
 
 
-# --- BODYSTRUCTURE parsing and the has-attachment heuristic (spec §7.1) ----
+# --- BODYSTRUCTURE parsing and the has-attachment heuristic -----------------
 #
 # `BODYSTRUCTURE`'s value appears inline in the FETCH response's non-literal
 # `line` bytes (not as a separate literal), so this is a small,
@@ -203,7 +203,7 @@ def _parse_scalar(cursor: _Cursor) -> str:
         return _parse_quoted_string(cursor)
     if ch == b"{":
         # The one grammar construct this simple parser deliberately does
-        # not support (spec §7.1) -- an IMAP literal-length marker.
+        # not support -- an IMAP literal-length marker.
         raise _BodystructureParseError("literal marker '{' is not supported")
     return _parse_atom_token(cursor)
 
@@ -230,7 +230,7 @@ def _parse_list(cursor: _Cursor) -> list[object]:
 
 def _flatten_bodystructure_tokens(value: object) -> list[str]:
     """Depth-first flatten of a parsed `BODYSTRUCTURE` list into every
-    string/atom leaf token (spec §7.1); numbers and `NIL` are harmless to
+    string/atom leaf token; numbers and `NIL` are harmless to
     include since they never match the marker vocabulary below."""
     if isinstance(value, list):
         tokens: list[str] = []
@@ -247,7 +247,7 @@ def _find_bodystructure_value_start(line: bytes) -> int | None:
     when `BODYSTRUCTURE` names a top-level FETCH data item -- not when
     that literal token happens to appear as a keyword *value* nested
     inside another data item. This matters concretely: `label:<keyword>`
-    (spec §7.3) has no reason to forbid the keyword `BODYSTRUCTURE`, so a
+    has no reason to forbid the keyword `BODYSTRUCTURE`, so a
     message can legitimately carry an IMAP keyword flag with that exact
     name, and our own FETCH command always requests `FLAGS` before
     `BODYSTRUCTURE`. A naive `bytes.find` on the whole line would then
@@ -298,7 +298,7 @@ def _find_bodystructure_value_start(line: bytes) -> int | None:
 
 
 def _bodystructure_has_attachment(line: bytes) -> bool:
-    """The flatten-and-scan attachment heuristic (spec §7.1): true if any
+    """The flatten-and-scan attachment heuristic: true if any
     token in the parsed `BODYSTRUCTURE` case-insensitively equals
     `ATTACHMENT`, `NAME`, or `FILENAME`. `False` if `BODYSTRUCTURE ` is
     absent from `line`, or parsing fails for any reason -- never raises."""
@@ -361,7 +361,7 @@ def _parse_header_literal(literal: bytes) -> Mapping[str, tuple[str, ...]]:
     multi-valued header mapping. `email.message_from_bytes` handles
     folding and RFC 2047 decoding for us; only headers whose (stripped)
     value is non-empty are included, matching the `has-header` semantics
-    of spec §7.1 ("present and non-empty")."""
+    ("present and non-empty")."""
     parsed: Message = message_from_bytes(literal)
     collected: dict[str, list[str]] = {}
     for name, value in parsed.items():
@@ -508,8 +508,8 @@ class ImapMailbox:
     def fetch_metadata(
         self, uids: Sequence[int], headers: Sequence[str]
     ) -> tuple[RawMetadata, ...]:
-        """`headers=()` (used by the reconcile pass and by `scan()`'s Fix
-        B flags-only refresh, sync-fix-brief Finding 1) omits the
+        """`headers=()` (used by the reconcile pass and by `scan()`'s
+        flags-only refresh) omits the
         `BODY.PEEK[HEADER.FIELDS (...)]` data item entirely rather than
         sending it with an empty field list: RFC 3501's grammar for
         `header-fld-name` is `1#header-fld-name` (one or more), so
@@ -650,19 +650,20 @@ class ImapMailbox:
         IMAP silently accepts MOVE/STORE against an empty match set (no
         error), so this explicit pre-check is what makes a vanished
         message observable as `MessageVanished` rather than a silent
-        no-op (spec §4.3 step 4 expects the caller to detect this)."""
+        no-op (the execute phase's re-verify step expects the caller to
+        detect this)."""
         typ, data = self._conn.uid("SEARCH", "UID", str(uid))
         if typ != "OK" or not data or not data[0]:
             raise MessageVanished(f"uid {uid} no longer exists in the selected mailbox")
 
 
-# --- Normalisation: RawMetadata -> domain.Candidate (spec §4.1, §11) -------
+# --- Normalisation: RawMetadata -> domain.Candidate -------------------------
 
 
 def _list_id_identifier(raw_value: str) -> str | None:
     """Extract the RFC 2919 identifier from a List-Id header value,
     e.g. `Mozilla announcements <announce.mozilla.org>` ->
-    `announce.mozilla.org` (spec §7.1). `None` if the value is not
+    `announce.mozilla.org`. `None` if the value is not
     well-formed (no angle-bracketed identifier)."""
     match = re.search(r"<([^<>]+)>", raw_value)
     return match.group(1) if match else None
@@ -677,8 +678,8 @@ def _recipient_addresses(
     headers: Mapping[str, tuple[str, ...]], names: Sequence[str]
 ) -> list[str]:
     """Addresses (not display names) from every value of every named
-    header, in encounter order, deduplicated (spec §7.1 recipient-match:
-    union of To, Cc, Delivered-To, X-Original-To)."""
+    header, in encounter order, deduplicated (the recipient-match
+    condition's union of To, Cc, Delivered-To, X-Original-To)."""
     raw_values: list[str] = []
     for name in names:
         raw_values.extend(headers.get(name, ()))
@@ -699,7 +700,7 @@ def normalize(
 
     Address parsing, `List-Id` RFC 2919 extraction, and header-presence
     filtering happen here -- `imap_adapter`'s wire-level fetch does no
-    more than unfold and RFC 2047-decode header values (contracts §5.4).
+    more than unfold and RFC 2047-decode header values.
     """
     from_value = _first(raw.headers, "from")
     from_display, from_address = (None, None)
@@ -750,7 +751,7 @@ def normalize(
     )
 
 
-# --- Scan phase (spec §4.1) -------------------------------------------------
+# --- Scan phase ---------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -786,7 +787,7 @@ def scan(
     max_new_mails: int | None,
     progress: Progress | None = None,
 ) -> ScanResult:
-    """Run the scan phase (spec §4.1) across every configured source
+    """Run the scan phase across every configured source
     mailbox of one task, in order, stopping once `max_new_mails`
     candidate rows have been saved in total. `max_new_mails` is
     opt-in: `None` (the default) means no cap at all and every eligible
@@ -797,30 +798,29 @@ def scan(
 
     - **Unchanged** (or first-ever scan): already-tracked UIDs are
       excluded locally before any fetch (IMAP `SEARCH` cannot express
-      "not in my database" -- spec §4.1 point 3), so metadata is fetched
+      "not in my database"), so metadata is fetched
       only for genuinely new UIDs.
     - **Changed**: every UID's key is new by definition (the server
       renumbered), so metadata is fetched for the whole mailbox and each
       candidate is re-identified by `fingerprint()` against prior rows
-      for that account/mailbox (spec §11) rather than treated as fresh.
+      for that account/mailbox rather than treated as fresh.
       A candidate row's `uidvalidity` column no longer matching the
       current `mailbox_state.uidvalidity` for that mailbox is what marks
-      it stale -- there is no separate stale flag in the schema
-      (contracts §4 DDL is fixed).
+      it stale -- there is no separate stale flag in the schema.
 
     Within each mailbox, candidates are ordered by `INTERNALDATE`
-    ascending before the cap is applied (spec §4.1 point 5), so a
+    ascending before the cap is applied, so a
     repeated run makes deterministic forward progress.
 
-    Fix B (sync-fix-brief Finding 1): for a mailbox whose `UIDVALIDITY`
+    For a mailbox whose `UIDVALIDITY`
     is unchanged, already-known UIDs still present on the server also
     get their stored `flags` refreshed, in one additional batched
     `fetch_metadata` call (not per UID) covering every already-known
     live UID -- without this, a message's stored flags are frozen at
     whatever they were the first time it was seen, so `has-flag` and
-    flag-based protection (spec §4.2 step 1) can silently go stale for
+    flag-based protection can silently go stale for
     as long as the message stays unactioned. `execute._reverify`'s
-    immediate-pre-mutation re-check (Fix A) is the second, independent
+    immediate-pre-mutation re-check is the second, independent
     line of defense this complements, not a replacement for it: this
     keeps ordinary runs honest cheaply; that one guarantees the
     destructive path cannot act on stale protection even if a flag
@@ -881,7 +881,7 @@ def scan(
 
         # Apply the cap *before* fetching, not while saving.
         #
-        # Spec §4.1 point 5 wants the oldest candidates first, and
+        # The scan wants the oldest candidates first, and
         # `INTERNALDATE` is the natural key for that -- but it only
         # arrives *with* the metadata, so honouring it literally meant
         # fetching every new message in the mailbox and then keeping N of
@@ -949,7 +949,7 @@ def scan(
 
         flags_refreshed = 0
         if known_uids:
-            # Fix B: one batched flags-only fetch for every already-known,
+            # One batched flags-only fetch for every already-known,
             # still-present UID -- `headers=()` requests no header fields
             # at all (the same "no headers wanted" shape the reconcile
             # pass already uses via `fetch_metadata([...], headers=[])`),

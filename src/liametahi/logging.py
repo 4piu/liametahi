@@ -1,4 +1,4 @@
-"""Configured logging with redaction (spec §12).
+"""Configured logging with redaction.
 
 Account passwords, model API keys, message subjects, and message bodies
 must never appear in log output at any level. Two complementary
@@ -115,7 +115,7 @@ def configure_logging(
 ) -> logging.Logger:
     """Configure the named logger with a redacting stderr handler and, if
     `log_file` is given, a redacting file handler. Sets file mode 0600 on
-    a created log file (spec §12)."""
+    a created log file."""
     logger = logging.getLogger(logger_name)
     logger.setLevel(_LEVELS.get(level, logging.INFO))
     for handler in list(logger.handlers):

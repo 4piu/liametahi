@@ -1,5 +1,4 @@
-"""Tests for `liametahi.classifier.jev` (jev-provider-plan §1, §5, §10,
-§11).
+"""Tests for `liametahi.classifier.jev`.
 
 All tests use `httpx.MockTransport`: no network, no Docker.
 """
@@ -94,7 +93,7 @@ def test_confidence_and_value_pass_through_untouched_for_each_type() -> None:
 
 
 def test_question_included_in_request_body_when_set() -> None:
-    """jev-provider-plan §2's own worked examples set `question:` on a
+    """The worked examples set `question:` on a
     `choice`/`score` processor alongside `options`/`levels` -- it must
     reach the wire, not be silently dropped."""
     captured: dict[str, object] = {}

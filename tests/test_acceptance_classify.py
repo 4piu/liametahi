@@ -1,12 +1,12 @@
-"""Work Unit 3's named acceptance test (spec section 14): 16. Acceptance
+"""Work Unit 3's named acceptance test 16. Acceptance
 tests 3 and 4 live in `tests/test_evaluate.py`, alongside the rest of
 the response-validation matrix they are part of; this one is kept
-separate because it is specifically about the LLM decision cache (spec
-section 13) across multiple simulated runs, which needs its own small
+separate because it is specifically about the LLM decision cache across
+multiple simulated runs, which needs its own small
 harness of repeated `evaluate_candidates()` calls sharing one candidate
 row.
 
-jev-provider-plan §0, §10: the cache is now keyed on processor identity
+The cache is now keyed on processor identity
 (`processor_hash`, analogous to the old `rule_text_hash`) rather than a
 rule id -- editing a processor's own definition (its `question`, in this
 test) invalidates its cached decisions exactly the way editing a rule's
@@ -97,7 +97,7 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
     cid = state.upsert_candidate(conn, cand)
 
     # --- Run 1: the model confidently declines (answers false) -> the
-    # negative decision must be cached (spec section 13). ---------------
+    # negative decision must be cached. -----------------------------------
     run_1 = _run(conn, account_id)
     fc_1 = FakeClassifier(
         [
@@ -217,7 +217,7 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
     assert fc_4.call_count == 1
     assert result_4.status is None  # accepted match, no longer a no-op
 
-    # --- A match is cached too, not just a non-match (spec section 13):
+    # --- A match is cached too, not just a non-match:
     # run 4's accepted match created a positive cache row for the edited
     # processor/input hash. This is what lets a message whose remote
     # mutation fails (wrong trash_mailbox, an unadvertised capability,

@@ -1,4 +1,4 @@
-"""Advisory per-task run lock (spec §10).
+"""Advisory per-task run lock.
 
 One task has at most one active `run` process. The lock file name is the
 SHA-256 of the symlink-resolved config path plus the task name, so the

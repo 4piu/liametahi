@@ -1,4 +1,4 @@
-"""Tests for `liametahi.config` (spec §6, §7.3, §12; contracts §3)."""
+"""Tests for `liametahi.config`."""
 
 import copy
 from collections.abc import Mapping
@@ -32,12 +32,12 @@ def test_valid_config_loads(config_path: Path) -> None:
     task = cfg.tasks["inbox-cleanup"]
     assert task.source_mailboxes == ["INBOX"]
     # No `protect` block in BASE_CONFIG: nothing is protected by default
-    # (spec §6) -- a user must opt in explicitly.
+    # -- a user must opt in explicitly.
     assert task.protect.unread is False
     assert task.protect.flags == []
     assert task.protect.senders == []
-    assert task.max_new_mails is None  # unset means no cap (spec §6)
-    assert task.max_actions is None  # unset means no cap (spec §6)
+    assert task.max_new_mails is None  # unset means no cap
+    assert task.max_actions is None  # unset means no cap
 
 
 def test_explicit_max_actions_is_honoured(tmp_path: Path) -> None:
@@ -57,7 +57,7 @@ def test_max_actions_must_be_positive(tmp_path: Path) -> None:
 
 
 def test_explicit_protect_block_is_honoured(tmp_path: Path) -> None:
-    """spec §6: protection is opt-in, but an explicit `protect` block
+    """Protection is opt-in, but an explicit `protect` block
     still takes effect exactly as configured."""
     data = make_config_dict()
     data["tasks"]["inbox-cleanup"]["protect"] = {
@@ -80,9 +80,8 @@ def test_settings_defaults_applied(config_path: Path) -> None:
 
 
 def test_full_jev_provider_plan_example_config_loads(tmp_path: Path) -> None:
-    """The two-task, two-processor worked example from
-    jev-provider-plan §11 (trimmed to what this config already has:
-    account/model names, trash_mailbox)."""
+    """The two-task, two-processor worked example (trimmed to what this
+    config already has: account/model names, trash_mailbox)."""
     data = make_config_dict()
     data["models"]["local"]["provider"] = "openai_compatible"
     data["processors"] = {
@@ -114,9 +113,9 @@ def test_full_jev_provider_plan_example_config_loads(tmp_path: Path) -> None:
         "account": "personal",
         "rules": [
             {
-                # jev-provider-plan §11's own worked example pairs `trash`
+                # The original worked example pairs `trash`
                 # with only a `processor:` atom, which actually violates
-                # its own §3 safety invariant ("a processor: atom never
+                # the safety invariant ("a processor: atom never
                 # counts as deterministic... a trash rule still needs at
                 # least one non-processor atom") -- see the final report.
                 # `in-mailbox` supplies the required deterministic atom.
@@ -245,7 +244,7 @@ def test_trash_mailbox_not_required_when_unused(tmp_path: Path) -> None:
 
 
 def test_rule_id_is_rejected_as_an_unknown_key(tmp_path: Path) -> None:
-    """jev-provider-plan §9: a rule has no `id` any more -- nothing
+    """A rule has no `id` any more -- nothing
     references a rule by name, so the field is simply gone, and
     `extra="forbid"` rejects it like any other unknown key."""
     data = make_config_dict()
@@ -256,7 +255,7 @@ def test_rule_id_is_rejected_as_an_unknown_key(tmp_path: Path) -> None:
 
 
 def test_rule_priority_is_rejected_as_an_unknown_key(tmp_path: Path) -> None:
-    """jev-provider-plan §9: a matching rule's rank is simply its
+    """A matching rule's rank is simply its
     position in `rules:` -- there is no separate `priority:` field any
     more."""
     data = make_config_dict()
@@ -277,11 +276,11 @@ def test_duplicate_rules_are_simply_allowed_now(tmp_path: Path) -> None:
     assert len(cfg.tasks["inbox-cleanup"].rules) == 2
 
 
-# --- Rule constraints (spec §7.3; jev-provider-plan §3, §8) ------------
+# --- Rule constraints ---------------------------------------------------
 
 
 def test_multiple_processor_atoms_in_one_rule_allowed(tmp_path: Path) -> None:
-    """jev-provider-plan §3: no per-rule count cap on `processor:` atoms
+    """No per-rule count cap on `processor:` atoms
     -- the old `llm:` atom's "at most one" restriction is gone."""
     data = make_config_dict()
     data["processors"] = {
@@ -298,7 +297,7 @@ def test_multiple_processor_atoms_in_one_rule_allowed(tmp_path: Path) -> None:
 
 
 def test_processor_atom_under_not_is_allowed(tmp_path: Path) -> None:
-    """jev-provider-plan §3: unlike the old `llm:` atom, `not` around a
+    """Unlike the old `llm:` atom, `not` around a
     `processor:` atom is fine -- the payload no longer carries an
     un-negatable free-form description."""
     data = make_config_dict()
@@ -314,7 +313,7 @@ def test_processor_atom_under_not_is_allowed(tmp_path: Path) -> None:
 
 
 def test_trash_on_processor_only_rule_rejected(tmp_path: Path) -> None:
-    """spec §5.2's deterministic-atom requirement for `trash` is
+    """The deterministic-atom requirement for `trash` is
     unchanged by the redesign -- a `processor:` atom never counts as
     deterministic regardless of processor type or backend."""
     data = make_config_dict()
@@ -343,7 +342,7 @@ def test_trash_with_deterministic_condition_allowed(tmp_path: Path) -> None:
 
 
 def test_trash_without_backup_is_now_valid(tmp_path: Path) -> None:
-    """jev-provider-plan §8: backup-before-trash is no longer required
+    """Backup-before-trash is no longer required
     -- 'trash' with no preceding 'backup' must load cleanly."""
     data = make_config_dict()
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["trash"]
@@ -352,7 +351,7 @@ def test_trash_without_backup_is_now_valid(tmp_path: Path) -> None:
 
 
 def test_allow_trash_without_backup_is_an_unknown_field_error(tmp_path: Path) -> None:
-    """jev-provider-plan §8: the flag itself is gone, not merely
+    """The flag itself is gone, not merely
     deprecated -- setting it is a config error, not a silent no-op."""
     data = make_config_dict()
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["trash"]
@@ -363,7 +362,7 @@ def test_allow_trash_without_backup_is_an_unknown_field_error(tmp_path: Path) ->
 
 
 def test_allow_body_excerpt_is_an_unknown_field_error(tmp_path: Path) -> None:
-    """jev-provider-plan §2: body-excerpt opt-in moved to
+    """Body-excerpt opt-in moved to
     `ProcessorConfig.include_body`; the old per-rule flag is gone."""
     data = make_config_dict()
     data["tasks"]["inbox-cleanup"]["rules"][0]["allow_body_excerpt"] = True
@@ -435,7 +434,7 @@ def test_move_to_requires_mailbox(tmp_path: Path) -> None:
         load_config(path)
 
 
-# --- Top-level `when:` shapes (spec §7.2) --------------------------------
+# --- Top-level `when:` shapes -----------------------------------------
 
 
 def test_when_as_a_list_is_implicit_all() -> None:
@@ -493,7 +492,7 @@ def test_when_nested_all_inside_any_still_works() -> None:
     assert isinstance(inner.children[0], rules.AllNode)
 
 
-# --- Nesting depth (spec §7.2) ------------------------------------------
+# --- Nesting depth -------------------------------------------------------
 
 
 def test_nesting_depth_3_allowed() -> None:
@@ -525,7 +524,7 @@ def test_unknown_condition_key_rejected() -> None:
         parse_condition_tree({"bogus-condition": "x"})
 
 
-# --- Value grammars (contracts §3) --------------------------------------
+# --- Value grammars --------------------------------------------------------
 
 
 @pytest.mark.parametrize("value", ["30d", "12h", "2w", "1s", "999m"])
@@ -587,7 +586,7 @@ def test_invalid_recipient_count_comparisons_rejected(value: str) -> None:
         parse_condition_tree({"recipient-count": value})
 
 
-# --- has-attachment (spec §7.1; contracts §3) -----------------------------
+# --- has-attachment ----------------------------------------------------
 
 
 def test_has_attachment_true_boolean_accepted() -> None:
@@ -601,7 +600,7 @@ def test_has_attachment_rejects_anything_but_literal_true(value: object) -> None
         parse_condition_tree({"has-attachment": value})
 
 
-# --- auth-result (spec §7.1; contracts §3) --------------------------------
+# --- auth-result -------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -743,7 +742,7 @@ def test_mails_per_request_has_no_upper_bound(tmp_path: Path) -> None:
         load_config(write_config(tmp_path / "cfg2.yaml", data))
 
 
-# --- Derived fetch-header list (spec §4.1) --------------------------------
+# --- Derived fetch-header list ----------------------------------------
 
 
 def test_fetch_headers_includes_base_set(tmp_path: Path) -> None:
@@ -792,7 +791,7 @@ def test_has_deterministic_atom() -> None:
     assert not has_deterministic_atom(parse_condition_tree({"none": [processor_atom]}))
 
 
-# --- File permission/ownership checks (spec §12; acceptance test 15) -----
+# --- File permission/ownership checks (acceptance test 15) ---------------
 
 
 def test_acceptance_15_world_readable_config_warns_but_loads(
@@ -826,7 +825,7 @@ def test_config_owned_by_another_user_rejected(
 ) -> None:
     """Ownership stays a hard failure even though loose mode bits (above)
     now only warn: a file owned by someone else may already have been
-    tampered with (spec §12)."""
+    tampered with."""
     path = write_config(tmp_path / "cfg.yaml", make_config_dict())
     path.chmod(0o600)
     monkeypatch.setattr("os.getuid", lambda: path.stat().st_uid + 1)
@@ -857,7 +856,7 @@ def test_config_hash_deterministic_and_content_sensitive(tmp_path: Path) -> None
     assert compute_config_hash(path1) != compute_config_hash(path3)
 
 
-# --- `none:` composition keyword (jev-provider-plan §4) --------------------
+# --- `none:` composition keyword --------------------------------------------
 
 
 def test_none_composition_parses_to_none_node() -> None:
@@ -881,7 +880,7 @@ def test_none_counts_toward_nesting_depth_same_as_any() -> None:
         parse_condition_tree(too_deep)
 
 
-# --- `processor:` atom grammar (jev-provider-plan §3, §10) ------------------
+# --- `processor:` atom grammar -----------------------------------------------
 
 
 def test_processor_condition_equality_string_comparand() -> None:
@@ -935,7 +934,7 @@ def test_processor_condition_boolean_with_inequality_operator_rejected() -> None
         parse_condition_tree({"processor": "vibe-check.value < true"})
 
 
-# --- `_parse_comparison`'s widened decimal grammar (jev-provider-plan §10) -
+# --- `_parse_comparison`'s widened decimal grammar --------------------------
 
 
 @pytest.mark.parametrize("value", [">=0.85", ">0.5", "<=0.99", "==0.5", "!=0.1"])
@@ -966,7 +965,7 @@ def test_recipient_count_rejects_a_decimal_comparand() -> None:
         parse_condition_tree({"recipient-count": ">1.5"})
 
 
-# --- `ProcessorConfig` validation (jev-provider-plan §2, §9) ----------------
+# --- `ProcessorConfig` validation --------------------------------------------
 
 
 def _processors_config(
@@ -1095,7 +1094,7 @@ def test_choice_processor_option_count_over_255_rejected(tmp_path: Path) -> None
         load_config(path)
 
 
-# --- Cross-reference: option/level vocabulary (jev-provider-plan §9) ------
+# --- Cross-reference: option/level vocabulary -------------------------
 
 
 def test_choice_processor_atom_value_must_be_a_declared_option(tmp_path: Path) -> None:
@@ -1152,7 +1151,7 @@ def test_confidence_field_against_jev_processor_not_checked_against_vocabulary(
     """Only `.value` equality/inequality is checked against a declared
     vocabulary; `.confidence` on a `provider: jev` processor is a plain
     float with nothing to validate against (and jev always populates
-    it, jev-provider-plan §5)."""
+    it)."""
     data = make_config_dict()
     data["models"]["jev-primary"] = {
         "provider": "jev",
@@ -1177,7 +1176,7 @@ def test_confidence_field_against_jev_processor_not_checked_against_vocabulary(
 
 
 def test_confidence_field_against_chat_processor_rejected(tmp_path: Path) -> None:
-    """jev-provider-plan §9: 'field: confidence' only ever resolves for a
+    """'field: confidence' only ever resolves for a
     `provider: jev` processor -- a chat-backed processor's compiled
     schema never includes it (`prompt.py`'s `_answer_value_schema` emits
     only `value`), so this must be a load-time `ConfigError`, not a rule
@@ -1192,7 +1191,7 @@ def test_confidence_field_against_chat_processor_rejected(tmp_path: Path) -> Non
         load_config(path)
 
 
-# --- `task:<id>` routing cross-references (jev-provider-plan §7) -----------
+# --- `task:<id>` routing cross-references -----------------------------
 
 
 def test_task_routing_to_unknown_task_rejected(tmp_path: Path) -> None:
@@ -1248,7 +1247,7 @@ def test_task_with_no_source_and_no_routing_target_is_unreachable(
 
 
 def test_task_that_is_only_a_routing_target_is_reachable(tmp_path: Path) -> None:
-    """jev-provider-plan §7: `source_mailboxes` is optional -- a task
+    """`source_mailboxes` is optional -- a task
     that exists purely as a `task:<id>` target, with no mailbox scan of
     its own, is a valid, reachable task."""
     data = make_config_dict()
@@ -1263,7 +1262,7 @@ def test_task_that_is_only_a_routing_target_is_reachable(tmp_path: Path) -> None
 
 
 def test_task_action_does_not_count_as_a_remote_mutation(tmp_path: Path) -> None:
-    """jev-provider-plan §7: `task:<id>` composes freely with a real
+    """`task:<id>` composes freely with a real
     remote mutation in the same action list."""
     data = make_config_dict()
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = [
@@ -1287,7 +1286,7 @@ def test_task_empty_target_rejected(tmp_path: Path) -> None:
         load_config(path)
 
 
-# --- `jev` provider requirements (jev-provider-plan §1, §11) ----------------
+# --- `jev` provider requirements ---------------------------------------------
 
 
 def test_jev_provider_requires_base_url_and_api_key(tmp_path: Path) -> None:

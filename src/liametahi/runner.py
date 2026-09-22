@@ -1,6 +1,6 @@
-"""Phase orchestration: the three-phase run of specification §3 / §4.
+"""Phase orchestration: the three-phase run of specification.
 
-This is the integration point named in contracts §7: it sequences Unit
+This is the integration point that sequences Unit
 2's scan phase (`imap_adapter.scan`), Unit 3's evaluate phase
 (`evaluate.evaluate_candidates`), and Unit 4's execute/reconcile phases
 (`execute.execute_items` / `execute.reconcile_task`), plus Unit 4's
@@ -12,11 +12,11 @@ precedent already set by `backup.py` and `report.py`: a narrowly scoped
 query, documented at the call site, when `state.py`'s typed surface does
 not (yet) cover something this module needs).
 
-Ordering and the non-negotiable safety properties (spec §3, §4, §10):
+Ordering and the non-negotiable safety properties:
 
 1. The advisory task lock is acquired **before any IMAP connection and
    before any SQLite write** -- including the reconcile pass. Reconcile
-   (spec §4.0) explicitly assumes "the task lock guarantees any earlier
+   explicitly assumes "the task lock guarantees any earlier
    run of the *same* task has already exited... before this run could
    acquire the lock" (see `execute.reconcile_task`'s own docstring); that
    guarantee only holds if reconcile runs *after* lock acquisition, so
@@ -83,12 +83,12 @@ _REASON_CAP = 200
 
 
 def default_mailbox_factory(account: AccountConfig) -> MailboxAdapter:
-    """The real, `imaplib`-backed adapter (spec §4.1). Tests inject
+    """The real, `imaplib`-backed adapter. Tests inject
     `FakeMailbox` via `mailbox_factory` instead.
 
     Certificate-verifying TLS is the default and the only option for a
     real account: `tls_insecure_skip_verify` is rejected at config load
-    for any non-loopback host (spec §12), so by the time a context is
+    for any non-loopback host, so by the time a context is
     built here the flag can only mean a local development server.
     """
     ssl_context: ssl.SSLContext | None = None
@@ -106,9 +106,8 @@ def default_mailbox_factory(account: AccountConfig) -> MailboxAdapter:
 
 
 def default_classifier_factory(model: ModelConfig) -> Classifier:
-    """Selects the real adapter for a model's configured provider (spec
-    §8; jev-provider-plan §1). Tests inject `FakeClassifier` via
-    `classifier_factory` instead."""
+    """Selects the real adapter for a model's configured provider. Tests
+    inject `FakeClassifier` via `classifier_factory` instead."""
     if model.provider == "openai_compatible":
         return OpenAICompatibleClassifier(model)
     if model.provider == "anthropic":
@@ -120,7 +119,7 @@ def default_classifier_factory(model: ModelConfig) -> Classifier:
 
 def _close_mailbox(mailbox: object) -> None:
     """Close a mailbox connection if it exposes `close()`. `MailboxAdapter`
-    (contracts §5.4) is a structural `Protocol` with no `close()` method
+    is a structural `Protocol` with no `close()` method
     -- `ImapMailbox` has a real socket to release, `FakeMailbox` does
     not -- so this is duck-typed rather than assumed."""
     close = getattr(mailbox, "close", None)
@@ -136,7 +135,7 @@ class RunOutcome:
     exit_code: int
     dry_run: bool
     report_data: report.ReportData | None
-    diagnostic: str | None = None  # a stderr-only one-liner (spec §10 exit 5, etc.)
+    diagnostic: str | None = None  # a stderr-only one-liner (exit 5, etc.)
 
 
 # --- Entry point ------------------------------------------------------
@@ -157,13 +156,13 @@ def run_task(
     now: datetime | None = None,
     progress: Progress | None = None,
 ) -> RunOutcome:
-    """Run one task end to end (spec §3, §4). See the module docstring
+    """Run one task end to end. See the module docstring
     for the safety-critical ordering this function enforces.
 
     `on_run_created` is invoked with the new `run_id` immediately after
     the run row is created (before any phase executes), so `cli.py` can
-    print it "at the start" of `run` (spec §9) without this module doing
-    any `print()`/`typer.echo()` itself (contracts §2's logging rule).
+    print it "at the start" of `run` without this module doing
+    any `print()`/`typer.echo()` itself (logging goes through the logger).
     """
     if task_name not in config.tasks:
         return RunOutcome(
@@ -196,7 +195,7 @@ def run_task(
                 progress=progress or NullProgress(),
             )
     except LockTimeout as exc:
-        # spec §10: no run report, no DB write, no mailbox/model work.
+        # No run report, no DB write, no mailbox/model work.
         return RunOutcome(
             run_id=None,
             exit_code=EXIT_TASK_RUNNING,
@@ -241,11 +240,11 @@ def _run_locked(
     now: datetime,
     progress: Progress,
 ) -> RunOutcome:
-    """Everything from here on runs with the task lock held (spec §10)."""
+    """Everything from here on runs with the task lock held."""
     task = config.tasks[task_name]
     account_cfg = config.accounts[task.account]
     register_secret(account_cfg.password)
-    # jev-provider-plan §9: a task no longer names one `model:` -- each
+    # A task no longer names one `model:` -- each
     # of its rules' referenced processors carries its own. Register every
     # configured model's api_key up front rather than trying to figure
     # out in advance which ones this particular task will actually touch;
@@ -330,7 +329,7 @@ def _run_locked(
             )
         except KeyboardInterrupt:
             # SIGINT is turned into this by Python itself; `cli.py`
-            # additionally turns SIGTERM into it (spec §10) so both
+            # additionally turns SIGTERM into it so both
             # signals reach exactly one handler. Caught here rather than
             # left to propagate so the run gets a proper terminal report
             # instead of the silent, unreported abort a bare
@@ -382,7 +381,7 @@ def _run_locked(
 
 
 class _AuthFailure(Exception):
-    """Raised when connecting/authenticating to IMAP fails (spec §9 exit
+    """Raised when connecting/authenticating to IMAP fails (exit
     code 4). Kept distinct from every other runtime failure so `_run_locked`
     can map it to a different exit code."""
 
@@ -413,7 +412,7 @@ def _run_phases(
     now: datetime,
     progress: Progress,
 ) -> RunOutcome:
-    # --- Phase 1: scan (spec §4.1) + reconcile (spec §4.0) -------------
+    # --- Phase 1: scan + reconcile ---------------------------------------
     logger.info("run %s: connecting to account %s", run_id, task.account)
     scan_mailbox = _connect(mailbox_factory, account_cfg)
     try:
@@ -460,8 +459,8 @@ def _run_phases(
     finally:
         _close_mailbox(scan_mailbox)
 
-    # --- Phase 2: evaluate (spec §4.2) -- no mailbox connection open ---
-    # jev-provider-plan §7: this task's pool is the union of its own
+    # --- Phase 2: evaluate -- no mailbox connection open ------------------
+    # This task's pool is the union of its own
     # mailbox scan and whatever another task's rule routed here via
     # `task:<id>`, this run or a previous one.
     live_candidates = _merge_routed_candidates(
@@ -498,7 +497,7 @@ def _run_phases(
         len(eligible),
         len(protected_ids),
     )
-    # jev-provider-plan §2: `include_body` is a static per-processor
+    # `include_body` is a static per-processor
     # switch, not a dynamic escalation -- if a still-undecided rule
     # needs a body-requiring processor answered, fetch the excerpt now,
     # before asking anything, rather than after an unsure round-trip.
@@ -541,8 +540,8 @@ def _run_phases(
     )
     results_by_id = {r.candidate_id: r for r in evaluate_outcome.results}
 
-    # Fix D (sync-fix-brief Finding 3): the LLM decision cache is keyed on
-    # `fingerprint`, which is stable across a move (spec §11) -- so a
+    # The LLM decision cache is keyed on
+    # `fingerprint`, which is stable across a move -- so a
     # message the user restores from Trash back to a source mailbox
     # re-scans under a new UID/mailbox, hits a cached positive decision,
     # and would otherwise be re-trashed with no model call and no signal
@@ -600,14 +599,14 @@ def _run_phases(
                     detail=(
                         "fingerprint already has a completed trash/move_to from "
                         "a previous run; not re-acting on what looks like a "
-                        "user restore (sync-fix-brief Finding 3)"
+                        "user restore"
                     ),
                 )
                 # Retire it as well as skipping it. Without this the decision
                 # is re-derived on every future run: the candidate stays live,
                 # is re-evaluated, and reports `restored` again forever --
-                # exactly the never-retires waste Fix C exists to end
-                # (Finding 2), just reached by a different path, since
+                # exactly the never-retires waste this retirement logic
+                # exists to end, just reached by a different path, since
                 # skipping here means `execute._reverify` never runs and so
                 # can never retire it as `vanished` either. One decision to
                 # leave a message alone is final; there is no reason to keep
@@ -632,7 +631,7 @@ def _run_phases(
             )
             if decision.status != "matched" or decision.winning_rule is None:
                 # Defensive only: `result.matches` non-empty guarantees a
-                # winner (spec §7.4's select_winner never returns None for a
+                # winner (`select_winner` never returns None for a
                 # non-empty input).
                 state.insert_result_item(
                     conn, run_id=run_id, candidate_id=candidate_id, status="no_match"
@@ -652,7 +651,7 @@ def _run_phases(
             if decision.shadowed:
                 shadowed_by_candidate[candidate_id] = decision.shadowed
 
-    # --- Phase 3: execute (spec §4.3) -----------------------------------
+    # --- Phase 3: execute --------------------------------------------------
     logger.info("run %s: executing %d item(s)", run_id, len(execution_items))
     exec_mailbox = _connect(mailbox_factory, account_cfg)
     try:
@@ -698,7 +697,7 @@ def _run_phases(
         shadowed = shadowed_by_candidate.get(outcome.candidate_id)
         if shadowed and outcome.result_id is not None:
             # `execute.ExecutionItem` carries no `shadowed_by` field
-            # (contracts §5's `execute.py` signature is fixed), and
+            # (`execute.py`'s signature is fixed), and
             # `result_items` allows only one row per (run_id,
             # candidate_id) -- so the *other* matched-but-not-winning
             # rules for this message cannot get a row of their own. This
@@ -706,7 +705,7 @@ def _run_phases(
             # module's docstring describes: it augments the row
             # `execute.execute_items` already created for the winner
             # with the informational list of rules it shadowed, encoded
-            # as JSON text (contracts §4 declares the column `TEXT`,
+            # as JSON text (the column is declared `TEXT`,
             # not a fixed single value).
             conn.execute(
                 "UPDATE result_items SET shadowed_by = ? WHERE result_id = ?",
@@ -742,15 +741,15 @@ def _run_phases(
 # owned by the calling module, not a new ad-hoc SQL habit). `state.py`
 # exposes `get_candidate(key)` and `find_candidates_by_fingerprint`, but
 # nothing that lists every still-live candidate for a task's source
-# mailboxes -- exactly what the evaluate phase needs every run (spec
-# §4.2, §13: deterministic conditions are "re-evaluated free on every
+# mailboxes -- exactly what the evaluate phase needs every run
+# (deterministic conditions are "re-evaluated free on every
 # run", which requires reconsidering candidates beyond just the ones this
 # run's scan happened to touch, not only newly-scanned ones).
 #
 # "Live" here means: the candidate's own `uidvalidity` still matches the
 # mailbox's current `uidvalidity` in `mailbox_state` -- i.e. it was not
-# superseded by a `UIDVALIDITY` change (spec §4.1, §11) -- **and** the
-# row is not retired (migration 0003 / sync-fix-brief Fix C: `state.
+# superseded by a `UIDVALIDITY` change -- **and** the
+# row is not retired (migration 0003: `state.
 # retire_candidate` stamps `retired_at` once a `trash`/`move_to:*` action
 # actually completes, or `execute._reverify` reports the message gone
 # from the server). Excluding retired rows is what makes
@@ -758,12 +757,12 @@ def _run_phases(
 # all: without it every successfully-trashed or confirmed-vanished
 # message came back forever, re-matching from the LLM decision cache at
 # zero model cost but still burning a claim + re-verify round trip every
-# run (sync-fix-brief Finding 2). It does *not* detect a candidate whose
+# run. It does *not* detect a candidate whose
 # message was already moved out of the mailbox by an earlier action
 # while `UIDVALIDITY` stayed the same and that action's completion was
 # never recorded (e.g. a crash the reconcile pass has not yet visited);
 # such a stale row is re-evaluated again here, but this is safe, not
-# just tolerated: `execute.py`'s re-verify step (spec §4.3 point 4)
+# just tolerated: `execute.py`'s re-verify step
 # always re-fetches by key before any mutation and reports `vanished`
 # rather than acting, so at worst this produces repeat "vanished"/no-op
 # report noise for a long-dead candidate, never a wrong mutation.
@@ -799,7 +798,7 @@ def _live_candidates(
     return result
 
 
-# --- Dry-run capability preview (spec §7.5) -------------------------------
+# --- Dry-run capability preview -------------------------------------------
 #
 # "Both capability checks are performed and reported during --dry-run, so
 # a cron user learns about an unsupported action before a real run."
@@ -851,17 +850,17 @@ def _drop_unsupported_for_dry_run(
             status="unsupported",
             winning_rule=item.winning_rule,
             detail=f"'{blocked_action}' requires a capability the server does not "
-            "advertise (spec §7.5)",
+            "advertise",
         )
     return kept
 
 
-# --- Task-model summary (jev-provider-plan §9) ----------------------------
+# --- Task-model summary ----------------------------------------------------
 #
 # A task no longer names one `model:` -- each of its rules' referenced
 # processors carries its own (config.py's `ProcessorConfig.model`).
 # `runs.model_name`/`provider`/`model_id` are still single-value, NOT
-# NULL columns (contracts §4's DDL, unaltered by this migration), so this
+# NULL columns (unaltered by this migration), so this
 # collapses whatever models a task's rules actually reference into one
 # display-only summary per column: the single value if there is exactly
 # one, else a sorted comma-joined list. This is a deliberate,
@@ -890,7 +889,7 @@ def _summarize_task_models(task: TaskConfig, config: Config) -> tuple[str, str, 
     return ",".join(model_names), ",".join(providers), ",".join(model_ids)
 
 
-# --- Task routing (jev-provider-plan §7) ----------------------------------
+# --- Task routing -----------------------------------------------------------
 #
 # `task:<id>` is a local-only action: a candidate whose matched rule
 # includes it becomes part of the target task's candidate pool from that
@@ -898,7 +897,7 @@ def _summarize_task_models(task: TaskConfig, config: Config) -> tuple[str, str, 
 # `source_mailboxes`. `state.routed_fingerprints`/
 # `find_live_candidates_by_fingerprint` do the actual lookup; this module
 # only merges the result into the task's own mailbox-scan pool, restoring
-# oldest-first order (spec §4.1) across the merge.
+# oldest-first order across the merge.
 
 
 def _merge_routed_candidates(
@@ -919,10 +918,10 @@ def _merge_routed_candidates(
     return sorted(merged.items(), key=lambda pair: pair[1].internaldate)
 
 
-# --- Body-excerpt prefetch (spec §5.1; jev-provider-plan §2, §6) ----------
+# --- Body-excerpt prefetch --------------------------------------------------
 #
 # `include_body` is a static per-processor switch, not a dynamic
-# escalation (jev-provider-plan §2: "there is no dynamically-triggered
+# escalation ("there is no dynamically-triggered
 # second pass"). `evaluate.py` has no mailbox access at all, so this
 # module determines up front -- via the same pure, no-cache first pass
 # `evaluate.processors_needed_for_candidate` exposes -- which eligible
@@ -963,8 +962,8 @@ def _fetch_excerpts(
     candidate_ids: Sequence[int],
 ) -> dict[int, str]:
     """Fetch a bounded plain-text excerpt for each candidate (read-only,
-    `PEEK`, spec §4.2 step 7). A brief, separate reconnect: the bulk
-    evaluate phase holds no mailbox connection (spec §3), but this is a
+    `PEEK`). A brief, separate reconnect: the bulk
+    evaluate phase holds no mailbox connection, but this is a
     small, bounded (`max_messages_per_run`, default 20) exception, and
     the connection is closed again before any classify() calls happen.
     """
@@ -985,7 +984,7 @@ def _fetch_excerpts(
                 stored_uidvalidity is not None
                 and status.uidvalidity != stored_uidvalidity
             ):
-                # Reconnect-and-recheck (spec §3, §10): UIDVALIDITY moved
+                # Reconnect-and-recheck: UIDVALIDITY moved
                 # under us since the scan phase; escalation is
                 # unavailable for this mailbox's candidates this run.
                 continue
@@ -1003,7 +1002,7 @@ def _fetch_excerpts(
     return excerpts
 
 
-# --- Plain-text excerpt extraction (spec §5.1) -----------------------------
+# --- Plain-text excerpt extraction ------------------------------------------
 #
 # Nothing in the codebase does this yet: `prompt.build_excerpt_payload`'s
 # own docstring is explicit that turning a raw message into "cleaned
@@ -1026,7 +1025,7 @@ _SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style)[^>]*>.*?</\1>")
 
 
 def extract_plain_text_excerpt(raw: bytes) -> str:
-    """Best-effort: raw RFC 822 bytes -> cleaned plain text (spec §5.1)."""
+    """Best-effort: raw RFC 822 bytes -> cleaned plain text."""
     message = message_from_bytes(raw)
     text = _first_text_part(message)[:_MAX_RAW_TEXT_CHARS]
 
@@ -1084,14 +1083,14 @@ def _strip_html(html: str) -> str:
     return unescape(text)
 
 
-# --- Candidate content retention (spec §6, §11) ---------------------------
+# --- Candidate content retention --------------------------------------------
 #
 # No other module calls `state.prune_candidate_content`; it is run-time
 # housekeeping with no natural owner among Units 1-4's phase callables,
 # so it is invoked once per run here.
 
 
-# --- `config check --connect` (spec §9) ------------------------------------
+# --- `config check --connect` -----------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -1115,7 +1114,7 @@ class ConnectCheckResult:
 def connect_check(
     config: Config, *, mailbox_factory: MailboxFactory = default_mailbox_factory
 ) -> ConnectCheckResult:
-    """spec §9: `--connect` "verifies IMAP authentication, mailbox
+    """`--connect` "verifies IMAP authentication, mailbox
     existence, and MOVE/keyword capabilities" for every account actually
     used by a task."""
     accounts_used: dict[str, AccountConfig] = {}

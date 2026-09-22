@@ -1,4 +1,4 @@
-"""`has-attachment` (spec §7.1) against a real server's actual
+"""`has-attachment` against a real server's actual
 `BODYSTRUCTURE` response.
 
 Hand-written `BODYSTRUCTURE` byte strings (`tests/test_imap_adapter.py`)

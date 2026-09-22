@@ -1,4 +1,4 @@
-"""SQLite access layer (implementation-contracts.md §4).
+"""SQLite access layer.
 
 This module owns every piece of SQL in the codebase; every other module
 reads and writes state through the typed functions here. It applies the
@@ -33,10 +33,10 @@ _CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
 
 class SchemaVersionError(Exception):
     """Raised when opening a database written by a schema version newer
-    than this build of liametahi understands (spec §11)."""
+    than this build of liametahi understands."""
 
 
-# --- Identifiers (contracts §3) -------------------------------------------
+# --- Identifiers -----------------------------------------------------------
 
 
 def _new_id() -> str:
@@ -86,8 +86,7 @@ def _from_iso(value: str) -> datetime:
 
 def open_database(db_path: Path) -> sqlite3.Connection:
     """Open (creating if needed), apply PRAGMAs, and migrate to the
-    latest known schema. Sets file mode 0600 on the database file
-    (spec §12)."""
+    latest known schema. Sets file mode 0600 on the database file."""
     resolved = db_path.expanduser()
     resolved.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(resolved), isolation_level=None)
@@ -115,7 +114,7 @@ def transaction(conn: sqlite3.Connection) -> Iterator[None]:
     `PRAGMA synchronous = FULL` (see `open_database`), so by default every
     INSERT is its own durable transaction. That is exactly right for the
     `action_attempts` state machine and the backup manifest -- the
-    reconcile pass (spec §4.0) can only tell how far a crashed run got
+    reconcile pass can only tell how far a crashed run got
     because each step was committed as it happened -- but it is pure
     overhead for the bulk bookkeeping a run also produces (candidate
     upserts, classifications, decision-cache entries, no-op result items),
@@ -364,10 +363,10 @@ def find_candidates_by_fingerprint(
 def find_live_candidates_by_fingerprint(
     conn: sqlite3.Connection, *, account_id: int, fingerprint: str
 ) -> list[tuple[int, Candidate]]:
-    """As `find_candidates_by_fingerprint`, excluding retired rows
-    (jev-provider-plan §7: `runner.py` uses this to resolve a `task:<id>`
+    """As `find_candidates_by_fingerprint`, excluding retired rows:
+    `runner.py` uses this to resolve a `task:<id>`
     routing entry back to a live candidate row -- a message already
-    moved/vanished has nothing left to route)."""
+    moved/vanished has nothing left to route."""
     rows = conn.execute(
         "SELECT * FROM candidates WHERE account_id=? AND fingerprint=? "
         "AND retired_at IS NULL",
@@ -384,12 +383,12 @@ def update_candidate_flags(
     uidvalidity: int,
     flags_by_uid: Mapping[int, frozenset[str]],
 ) -> int:
-    """Refresh the stored `flags` column for already-known candidates
-    (sync-fix-brief Fix B, Finding 1): `imap_adapter.scan()` calls this
+    """Refresh the stored `flags` column for already-known candidates:
+    `imap_adapter.scan()` calls this
     once per mailbox per run with one batched flags-only fetch's worth of
     results, so `has-flag`/protection stay honest run to run instead of
     being frozen at whatever they were the first time a message was
-    seen. Retired rows (Fix C) are excluded -- a retired candidate's
+    seen. Retired rows are excluded -- a retired candidate's
     message has moved out of the mailbox (or vanished), so its flags
     have nothing left to refresh from.
 
@@ -417,14 +416,14 @@ def update_candidate_flags(
 def retire_candidate(
     conn: sqlite3.Connection, *, candidate_id: int, reason: str
 ) -> None:
-    """Give a candidate row a terminal state (sync-fix-brief Fix C,
-    Finding 2): `reason` is `"moved"` (a `trash`/`move_to:*` action
+    """Give a candidate row a terminal state: `reason` is `"moved"` (a
+    `trash`/`move_to:*` action
     completed), `"vanished"` (`execute._reverify` found the message gone
-    from the server), or `"prior_trash"` (Fix D skipped it because its
+    from the server), or `"prior_trash"` (skipped because its
     fingerprint already carried a completed destructive action -- see
     `runner.py`). Idempotent: a row already retired keeps its original
     `retired_at`/`retired_reason` rather than being overwritten by a
-    later call. Never deletes the row (spec §11)."""
+    later call. Never deletes the row."""
     conn.execute(
         """
         UPDATE candidates SET retired_at = ?, retired_reason = ?
@@ -694,7 +693,7 @@ def insert_classification(
     return int(cur.lastrowid)
 
 
-# --- LLM decision cache (spec §13; jev-provider-plan §0, §10) -------------
+# --- LLM decision cache -----------------------------------------------
 #
 # One row per (account, fingerprint, processor, processor definition,
 # input) -- `value_json`/`confidence` record how the processor answered,
@@ -781,7 +780,7 @@ def record_processor_decision(
     )
 
 
-# --- Task routing (jev-provider-plan §7) ----------------------------------
+# --- Task routing -----------------------------------------------------
 #
 # `task:<id>` is a local-only action: a candidate whose matched rule
 # includes it becomes part of the target task's candidate pool from that
@@ -820,7 +819,7 @@ def routed_fingerprints(
     return [str(row["fingerprint"]) for row in rows]
 
 
-# --- Key claims (spec §10, contracts §4 notes) ---------------------------
+# --- Key claims ---------------------------------------------------------
 
 
 def claim_key(conn: sqlite3.Connection, *, key: MessageKey, run_id: str) -> bool:
@@ -865,7 +864,7 @@ def get_key_claim_holder(conn: sqlite3.Connection, *, key: MessageKey) -> str | 
     return str(row["run_id"]) if row is not None else None
 
 
-# --- Backups (spec §11) ---------------------------------------------------
+# --- Backups -------------------------------------------------------------
 
 
 def insert_backup(
@@ -931,7 +930,7 @@ def record_restore(
     )
 
 
-# --- Action attempts and reconcile (spec §4.0, §4.3) ----------------------
+# --- Action attempts and reconcile ----------------------------------------
 
 
 def insert_action_attempt(
@@ -998,8 +997,8 @@ def update_action_attempt_state(
 def open_action_attempts(
     conn: sqlite3.Connection, *, task: str | None = None
 ) -> list[sqlite3.Row]:
-    """Rows in `pending`/`in_flight` state, for the reconcile pass
-    (spec §4.0), driven by `idx_actions_open`."""
+    """Rows in `pending`/`in_flight` state, for the reconcile pass,
+    driven by `idx_actions_open`."""
     if task is not None:
         return conn.execute(
             """
@@ -1024,12 +1023,11 @@ def fingerprints_with_completed_destructive_action(
 ) -> set[str]:
     """Which of `fingerprints` already carry a *completed* destructive
     action (`trash` or `move_to:*` -- never `label:*` or `backup`) from
-    some run other than `exclude_run_id` (sync-fix-brief Fix D, Finding
-    3).
+    some run other than `exclude_run_id`.
 
     The cache key `(account_id, fingerprint, rule_id, rule_text_hash,
     input_hash)` is stable across a move (`fingerprint` survives it by
-    design, spec §11), so restoring a trashed message back to a source
+    design), so restoring a trashed message back to a source
     mailbox re-scans it under a new UID/mailbox and can hit a cached
     positive decision -- re-trashing it with no model call and no signal
     to the user. `runner.py` calls this once per run, batched over every
@@ -1051,7 +1049,7 @@ def fingerprints_with_completed_destructive_action(
     return {str(row["fingerprint"]) for row in rows}
 
 
-# --- Audit events (append-only, spec §11) ---------------------------------
+# --- Audit events (append-only) -------------------------------------------
 
 
 def append_audit_event(

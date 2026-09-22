@@ -1,5 +1,4 @@
-"""Tests for `liametahi.policy` (spec section 7.4; jev-provider-plan §7,
-§8, §9)."""
+"""Tests for `liametahi.policy`."""
 
 from liametahi import policy
 from liametahi.config import RuleConfig
@@ -17,7 +16,7 @@ def test_select_winner_empty_is_none() -> None:
 
 
 def test_select_winner_first_listed_wins() -> None:
-    """jev-provider-plan §9: a matching rule's rank is simply its
+    """A matching rule's rank is simply its
     position in `task.rules` -- there is no separate priority number any
     more."""
     later = policy.MatchedRule(rule_index=1, label="rule #2 of 2")
@@ -89,7 +88,7 @@ def test_resolve_actions_backup_is_not_a_remote_mutation() -> None:
 
 
 def test_resolve_actions_trash_never_requires_prior_backup() -> None:
-    """jev-provider-plan §8: backup-before-trash is no longer mandatory
+    """Backup-before-trash is no longer mandatory
     -- `requires_prior_backup` is always False now, with or without a
     preceding `backup` action."""
     rule = _rule(["backup", "trash"])
@@ -133,7 +132,7 @@ def test_resolve_actions_label() -> None:
 
 
 def test_resolve_actions_task_is_not_a_remote_mutation() -> None:
-    """jev-provider-plan §7: `task:<id>` is local-only bookkeeping,
+    """`task:<id>` is local-only bookkeeping,
     never an IMAP mutation."""
     rule = _rule(["task:inbox-review"])
     (action,) = policy.resolve_actions(rule, trash_mailbox=None)

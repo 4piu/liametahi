@@ -1,8 +1,7 @@
 """Unit tests for `liametahi.imap_adapter`'s BODYSTRUCTURE parser, the
-has-attachment heuristic, and the auth-result trust boundary (spec §7.1;
-contracts §3, §5.4).
+has-attachment heuristic, and the auth-result trust boundary.
 
-`FakeMailbox` (contracts §6.3) never exercises the real wire-level
+`FakeMailbox` never exercises the real wire-level
 BODYSTRUCTURE parser -- it derives `has_attachment` independently via
 `email.message.Message.walk()` (`tests/fakes/fake_mailbox.py`) -- so this
 module is the only unit-tier coverage of the actual recursive-descent
@@ -67,7 +66,7 @@ def test_quoted_string_escapes_are_consumed_correctly() -> None:
 
 
 # --- Empty literal: a flags-only fetch requesting no header fields -----
-# (sync-fix-brief Fix B, Finding 1: `imap_adapter.scan()`'s per-run
+# (`imap_adapter.scan()`'s per-run
 # flags refresh, and `execute.py`'s reconcile pass, both call
 # `fetch_metadata(uids, ())`. `ImapMailbox.fetch_metadata` omits the
 # `BODY.PEEK[HEADER.FIELDS (...)]` data item entirely in that case
@@ -125,7 +124,7 @@ def test_multipart_mixed_with_pdf_attachment_true() -> None:
 
 
 def test_name_parameter_without_disposition_is_documented_true_positive() -> None:
-    """spec §7.1's documented heuristic trade-off: an inline image with
+    """The documented heuristic trade-off: an inline image with
     only a NAME parameter and no Content-Disposition still registers as
     an attachment, even though no mail client would show it as one to a
     user. Asserted deliberately, not avoided."""
@@ -166,7 +165,7 @@ def test_unbalanced_parens_returns_false_not_raise() -> None:
 def test_literal_marker_mid_structure_returns_false_not_raise() -> None:
     """A `{n}` literal-length marker embedded where this simple parser
     does not expect one is the one grammar construct it deliberately
-    does not support (spec §7.1) -- it must degrade to False, not crash."""
+    does not support -- it must degrade to False, not crash."""
     body = b'("TEXT" "PLAIN" ("CHARSET" {5}\r\nUTF-8) NIL NIL "7BIT" 100 5)'
     assert _bodystructure_has_attachment(_bodystructure_line(body)) is False
 
@@ -188,8 +187,8 @@ def test_bodystructure_absent_returns_false_and_rest_still_parses() -> None:
 
 
 # --- 8. A FLAGS keyword literally named "BODYSTRUCTURE" must not shadow the
-#        real field. `label:BODYSTRUCTURE` is a legal rule action (spec §7.3
-#        forbids only whitespace and `(){%*"\]`), and our own FETCH command
+#        real field. `label:BODYSTRUCTURE` is a legal rule action (the
+#        grammar forbids only whitespace and `(){%*"\]`), and our own FETCH command
 #        always requests FLAGS before BODYSTRUCTURE, so a naive first-match
 #        substring search finds the flag name instead of the real value.
 
@@ -239,7 +238,7 @@ def test_quoted_parens_before_bodystructure_do_not_desync_depth() -> None:
     assert _bodystructure_has_attachment(line) is True
 
 
-# --- Extra: RawMetadata construction sanity (mirrors contracts §5.1) -----
+# --- Extra: RawMetadata construction sanity ---------------------------
 
 
 def test_raw_metadata_accepts_has_attachment_field() -> None:
@@ -258,13 +257,13 @@ def test_raw_metadata_accepts_has_attachment_field() -> None:
 
 
 def test_normalize_uses_topmost_authentication_results_header() -> None:
-    """spec §7.1: a message can carry more than one Authentication-Results
+    """A message can carry more than one Authentication-Results
     header, one per hop that performed its own checks. Only the topmost
     (first-encountered, i.e. added last, by the hop closest to the
     recipient) is trustworthy -- an earlier hop's header could in
     principle be attacker-supplied content in a forwarded/relayed
-    message. `RawMetadata.headers` preserves wire top-to-bottom order
-    (contracts §5.4), so `normalize()` must pick index 0, never the last
+    message. `RawMetadata.headers` preserves wire top-to-bottom order,
+    so `normalize()` must pick index 0, never the last
     or an arbitrary one."""
     raw = RawMetadata(
         uid=1,

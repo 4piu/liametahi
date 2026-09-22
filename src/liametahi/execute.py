@@ -1,36 +1,36 @@
-"""Execute phase and reconcile pass (spec section 4.3, section 4.0).
+"""Execute phase and reconcile pass.
 
-Both are callables Unit 5's orchestrator sequences (contracts section 7:
-"Units 2-4 each expose their phase as a callable Unit 5 will sequence").
+Both are callables Unit 5's orchestrator sequences ("Units 2-4 each
+expose their phase as a callable Unit 5 will sequence").
 This module owns claim-before-mutate, re-verify-before-mutate,
 backup-before-trash enforcement, the opt-in `max_actions` cap
-(unset means uncapped, spec §6), and closing out `action_attempts` rows
+(unset means uncapped), and closing out `action_attempts` rows
 left non-terminal by a crashed previous run of the same task.
 
 Result-item bookkeeping note: `state.py` provides no way to update a
 `result_items` row after inserting it, only `insert_result_item`
-(contracts section 5's typed surface is insert-only there). For an item
+(its typed surface is insert-only there). For an item
 that reaches the run-actions step, this module therefore inserts the
 row once with `status="pending"` -- itself a legitimate status in the
-spec section 9 vocabulary -- purely so the `action_attempts` rows that
-follow have a `result_id` to reference (contracts section 4's foreign
+fixed vocabulary -- purely so the `action_attempts` rows that
+follow have a `result_id` to reference (a foreign
 key), and never updates it again. `report.py` derives the *displayed*
 status for a `"pending"` result item from its `action_attempts`
 children (all completed -> completed, any failed -> failed, etc.),
 which is also exactly what makes those children -- not the parent row
 -- the right thing for the reconcile pass below to inspect.
 
-Documented deviation (sync-fix-brief Fix A): `execute_items` gained two
+Documented deviation: `execute_items` gained two
 new keyword-only parameters, `protected_flags` and `protect_unread`, both
 defaulting to "nothing protected" so every pre-existing call site keeps
 its prior behaviour unless it opts in. `execute.py`'s public functions
-are not among the signatures contracts section 5 declares fixed (only
+are not among the signatures declared fixed (only
 `domain.py`, `rules.py`, `classifier/__init__.py`, `imap_adapter.py`, and
 `report.py`'s JSON shape are), so this is an additive, backward-compatible
 change rather than a deviation from a pinned interface -- it is called
 out here anyway because it is safety-relevant. It exists to close a gap
-where a message's *stored* flags (frozen at first scan, spec section
-4.1) could drift out of sync with the server between the evaluate and
+where a message's *stored* flags (frozen at first scan) could drift out
+of sync with the server between the evaluate and
 execute phases -- long enough, in a real run, for a user to flag a
 message as important from another client after Liametahi already scanned
 it. `rules.is_protected_by_flags` is re-checked here against the fresh
@@ -117,8 +117,8 @@ class _Selection:
 @dataclass(frozen=True, slots=True)
 class ExecutionItem:
     """One matched, non-shadowed, non-protected candidate ready to have
-    its winning rule's action list run (spec section 4.2 step 8's
-    output, this module's input)."""
+    its winning rule's action list run (the evaluate phase's output,
+    this module's input)."""
 
     candidate_id: int
     key: MessageKey  # pre-mutation message key
@@ -157,18 +157,18 @@ def execute_items(
     protect_unread: bool = False,
     progress: Progress | None = None,
 ) -> ExecuteSummary:
-    """spec section 4.3. `items` must already be in the order the caller
-    wants the cap applied (spec section 4.1: oldest `INTERNALDATE`
+    """`items` must already be in the order the caller
+    wants the cap applied (oldest `INTERNALDATE`
     first). `max_actions` is opt-in: `None` means no cap at all
-    (spec §6) and the cap check below is skipped entirely. `dry_run`
+    and the cap check below is skipped entirely. `dry_run`
     performs no claim, no mailbox call, and no mutation, but still
     applies the cap when one is configured and still records one
     `result_items` row per candidate with its intended actions (so
     `report` and a future real run agree on what the cap would do).
 
     `protected_flags`/`protect_unread` are the task's `protect.flags`/
-    `protect.unread` configuration (sync-fix-brief Fix A, see module
-    docstring): re-checked against freshly re-fetched flags immediately
+    `protect.unread` configuration (see module docstring): re-checked
+    against freshly re-fetched flags immediately
     before a non-dry-run mutation. Defaulting to "nothing protected"
     keeps every existing caller's behaviour unchanged unless it passes
     the real config values.
@@ -257,7 +257,7 @@ def _execute_one(
     protect_unread: bool,
     selection: _Selection,
 ) -> tuple[ItemStatus, int | None, str | None]:
-    # Claim before mutate (spec section 10, section 4.3 point 3): a key
+    # Claim before mutate: a key
     # held by a different live run is never stolen.
     claimed = state.claim_key(conn, key=item.key, run_id=run_id)
     if not claimed:
@@ -304,21 +304,21 @@ def _execute_one(
             if verdict == "vanished":
                 # The message is gone from the server entirely -- retire
                 # the candidate so it stops coming back as a live row on
-                # every future run (sync-fix-brief Fix C, Finding 2).
+                # every future run.
                 state.retire_candidate(
                     conn, candidate_id=item.candidate_id, reason="vanished"
                 )
             return verdict, result_id, None
         assert meta is not None  # guaranteed by _reverify when verdict == "ok"
 
-        # Fix A (sync-fix-brief Finding 1): stored flags are frozen at
-        # scan time (spec §4.1) and can drift out of sync with the
+        # Stored flags are frozen at
+        # scan time and can drift out of sync with the
         # server in the minutes-wide window before this mutation -- a
         # message the user flags as important from another client after
         # Liametahi already scanned it must not be trashed anyway. This
         # is the safety-net re-check, using the flags `_reverify` just
-        # fetched fresh; `imap_adapter.scan`'s per-run flag refresh (Fix
-        # B) is the complementary first line of defense that keeps
+        # fetched fresh; `imap_adapter.scan`'s per-run flag refresh is
+        # the complementary first line of defense that keeps
         # `has-flag`/protection honest run to run in the common case.
         if rules.is_protected_by_flags(
             meta.flags,
@@ -373,7 +373,7 @@ def _reverify(
     selection: _Selection,
     wants_body: bool,
 ) -> tuple[_ReverifyVerdict, RawMetadata | None, bytes | None]:
-    """spec section 4.3 point 4: re-fetch by message key and confirm
+    """Re-fetch by message key and confirm
     existence and an unchanged fingerprint before any mutation.
 
     With `wants_body`, the message's raw bytes come back alongside the
@@ -386,7 +386,7 @@ def _reverify(
     Recomputes `domain.fingerprint` from a freshly re-fetched
     `MESSAGE-ID` header plus the re-fetched `INTERNALDATE`/
     `RFC822.SIZE` -- exactly the inputs `fingerprint()` actually uses
-    when a `Message-ID` is present (contracts section 5.1), so this
+    when a `Message-ID` is present, so this
     needs no address/subject parsing. For the rare message with no
     `Message-ID`, reconstructing the same parsing `imap_adapter.py`
     (Unit 2, not yet built) will apply to build a `Candidate` is out of
@@ -424,8 +424,8 @@ def _reverify(
         return "vanished", None, None
     meta = fetched[0]
 
-    # RawMetadata.headers is lowercased-key, multi-valued (contracts
-    # §5.4); take the first value of "message-id" if present.
+    # RawMetadata.headers is lowercased-key, multi-valued;
+    # take the first value of "message-id" if present.
     message_id_values = meta.headers.get("message-id")
     message_id = message_id_values[0] if message_id_values else None
     if message_id:
@@ -464,13 +464,13 @@ def _run_action_sequence(
     meta: RawMetadata,
     raw: bytes | None,
 ) -> tuple[ItemStatus, str | None]:
-    """spec section 4.3 points 6-7 / spec's non-negotiables: run actions
+    """Run actions
     strictly in order; the single remote mutation only after every
     preceding action in the sequence succeeded. Backup-before-trash is no
-    longer mandatory (jev-provider-plan §8): `policy.resolve_actions`
+    longer mandatory: `policy.resolve_actions`
     always sets `requires_prior_backup=False` now, so the check below
     only ever fires if a future rule change reintroduces it.
-    `task:<id>` (jev-provider-plan §7) is local-only bookkeeping, handled
+    `task:<id>` is local-only bookkeeping, handled
     in its own branch below, never treated as a remote mutation."""
     backup_completed = False
     aborted = False
@@ -528,7 +528,7 @@ def _run_action_sequence(
                 )
             except backup.BackupError as exc:
                 # Backup verification failed: the mailbox has not been
-                # touched, and it must stay that way (spec section 11).
+                # touched, and it must stay that way.
                 state.update_action_attempt_state(
                     conn,
                     attempt_id=attempt_id,
@@ -558,7 +558,7 @@ def _run_action_sequence(
             continue
 
         if action.kind == "task":
-            # jev-provider-plan §7: local-only, never an IMAP mutation.
+            # Local-only, never an IMAP mutation.
             # `record_task_route` is itself idempotent on
             # (account_id, fingerprint, target_task) -- the same rule
             # matching again on a later run writes no second row -- so
@@ -613,7 +613,7 @@ def _run_action_sequence(
                 aborted, final_status = True, "vanished"
                 # Vanished mid-mutation (a race after _reverify succeeded,
                 # not just at re-verify time) is the same "gone from the
-                # server" fact Fix C's retirement targets -- retire here
+                # server" fact this retirement targets -- retire here
                 # too so this row does not keep coming back either.
                 state.retire_candidate(
                     conn, candidate_id=item.candidate_id, reason="vanished"
@@ -646,7 +646,7 @@ def _run_action_sequence(
             conn, attempt_id=attempt_id, state="completed", finished=True
         )
         if action.kind in ("trash", "move_to"):
-            # Fix C (sync-fix-brief Finding 2): a completed relocation
+            # A completed relocation
             # moves the message out of the source mailbox, so this
             # candidate row is done -- retire it so it stops being
             # re-evaluated (and, via cache, re-matched at zero LLM cost)
@@ -665,7 +665,7 @@ def _run_action_sequence(
     return final_status, error
 
 
-# --- Reconcile pass (spec section 4.0) -------------------------------
+# --- Reconcile pass -----------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -679,10 +679,10 @@ def reconcile_task(
     task: str,
     mailbox: MailboxAdapter | None,
 ) -> ReconcileSummary:
-    """spec section 4.0: close out every `action_attempts` row left
+    """Close out every `action_attempts` row left
     `pending`/`in_flight` for `task` by a previous run, and release the
     key claims those rows imply. Safe to call at the very start of a new
-    run: the task lock (spec section 10) guarantees any earlier run of
+    run: the task lock guarantees any earlier run of
     the *same* task has already exited, crashed or not, before this run
     could acquire the lock -- so every open row found here belongs to a
     definitely-dead process, and every claim held for that same key is
@@ -733,9 +733,9 @@ def _reconcile_backup_row(
 ) -> tuple[str, str | None, str | None]:
     """A `backup` action doesn't relocate its message, so "did it
     finish" is answered by asking whether its manifest row was actually
-    committed (spec section 11's last step) -- exactly what a crash
+    committed (its last step) -- exactly what a crash
     between that commit and the `action_attempts` update would leave
-    unresolved (spec section 4.0's motivating example)."""
+    unresolved."""
     backup_id = row["backup_id"]
     if backup_id:
         existing = state.get_backup(conn, str(backup_id))

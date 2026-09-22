@@ -1,4 +1,4 @@
-"""Jev (`provider: jev`) adapter (jev-provider-plan §1, §5, §10, §11).
+"""Jev (`provider: jev`) adapter.
 
 Jev is not a chat model: a decision model reached through
 `POST /v1/systemone`, answering one of three fixed, structured question
@@ -8,14 +8,14 @@ JSON-schema negotiation ladder (`prompt.build_response_schema` is chat-only,
 per its own docstring) — a processor's `type`/`criteria`/`options`/`levels`
 map onto a `noul`/`choice`/`score` request directly, and the response's
 `value`/`confidence` are passed straight through into a `ProcessorAnswer`
-with no folding or thresholding of any kind (jev-provider-plan §5).
+with no folding or thresholding of any kind.
 
 `mails_per_request` must be `1` for `provider: jev` (enforced at config
 load, `config.ModelConfig._validate_provider_requirements`): jev answers
 one candidate per HTTP call, not a batch. When a candidate needs more than
 one jev-backed processor answered, `classify()` makes one HTTP call per
 processor for that candidate (still "one call per candidate" for any
-single processor, per jev-provider-plan §5) and merges the results into
+single processor) and merges the results into
 one `Classification` per candidate. A processor call that never succeeds
 is simply absent from that candidate's `answers` map (per
 `classifier.Classification`'s own contract: "a name absent from the map
@@ -24,7 +24,7 @@ a candidate with at least one successful answer is still reported in
 `results`; a candidate with zero successful answers goes to `invalid`.
 
 **Retry policy is a deliberate deviation from `openai_compatible.py`'s
-"transport errors only, never a rejected response" policy** (spec §6):
+"transport errors only, never a rejected response" policy**:
 jev is a single-purpose decision API behind a rate limiter, not a chat
 completion request whose rejection typically means the request itself was
 malformed. A `429`/`529` here means "the service is temporarily out of

@@ -1,13 +1,12 @@
-"""`FakeClassifier`: a scripted stand-in for `classifier.Classifier`
-(contracts §5.3, §6.3; jev-provider-plan §5, §10).
+"""`FakeClassifier`: a scripted stand-in for `classifier.Classifier`.
 
 `OfferedProcessor`, `CandidatePayload`, `Classification`, `ClassifyOutcome`,
 and `Classifier` are imported from `liametahi.classifier`, which is the
-fixed cross-unit interface (contracts §5.3). `Classifier` is a
+fixed cross-unit interface. `Classifier` is a
 `Protocol`, so `FakeClassifier` keeps satisfying it structurally without
 any change to the class below.
 
-Per contracts §5.3: "validation against the offered [processor] and
+"Validation against the offered [processor] and
 candidate vocabulary happens in the caller, not the adapter."
 `FakeClassifier` therefore happily returns semantically-invalid
 `Classification`s (an unoffered processor name, an unknown candidate id,
@@ -17,7 +16,7 @@ validation layer's tests exercise its rejection logic. Only
 transport-level failure (unparseable/wholly invalid response) belongs in
 `invalid`/`missing`.
 
-Per jev-provider-plan: a processor's answer is a resolved `value` (bool
+A processor's answer is a resolved `value` (bool
 for `noul`, a declared option/level string for `choice`/`score`) plus an
 optional `confidence` -- there is no yes/no/unsure vocabulary left.
 """
@@ -92,8 +91,7 @@ class FakeClassifier:
         return next_item
 
 
-# --- Scripted-outcome builders for the failure switches named in
-# --- contracts §6.3 -------------------------------------------------
+# --- Scripted-outcome builders for the failure switches -------------------
 
 
 def outcome_with_answers(
@@ -143,7 +141,7 @@ def outcome_with_unknown_candidate(
 
 
 def outcome_malformed(payload_ids: Sequence[str]) -> ClassifyOutcome:
-    """The whole response failed to parse (spec §5.4 point 2-3): every
+    """The whole response failed to parse: every
     requested payload id is reported `invalid`."""
     return ClassifyOutcome(
         results=(),
@@ -160,7 +158,7 @@ def outcome_missing(
     present: Mapping[str, Mapping[str, ProcessorAnswer]], missing_ids: Sequence[str]
 ) -> ClassifyOutcome:
     """Some payload ids got a decision; others are simply absent from an
-    otherwise-valid response (spec §5.4 point 3)."""
+    otherwise-valid response."""
     base = outcome_with_answers(answers_by_payload=present)
     return ClassifyOutcome(
         results=base.results,

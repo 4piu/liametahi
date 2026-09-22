@@ -1,5 +1,5 @@
 """Tests for `liametahi.runner`'s signal handling: a `KeyboardInterrupt`
-raised mid-run (spec §10) -- what `cli.py` turns both SIGINT and SIGTERM
+raised mid-run -- what `cli.py` turns both SIGINT and SIGTERM
 into -- must finish the run with a proper stored report and exit code 3,
 release the task lock normally, and record an audit event, rather than
 leaving the run row looking perpetually in-progress.
@@ -131,7 +131,7 @@ def test_keyboard_interrupt_stores_a_finished_run_row(tmp_path: Path) -> None:
 
 def test_keyboard_interrupt_releases_the_task_lock(tmp_path: Path) -> None:
     """A run interrupted mid-flight must not leave the next invocation of
-    the same task lock-contended (spec §10)."""
+    the same task lock-contended."""
     path = _config_with_state(tmp_path)
     cfg = load_config(path)
 

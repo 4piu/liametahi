@@ -1,4 +1,4 @@
-"""Chat-Completions-shaped adapter (spec §8.1).
+"""Chat-Completions-shaped adapter.
 
 Covers Ollama, llama.cpp server, LM Studio, vLLM, OpenAI, and any other
 gateway that speaks `POST /chat/completions`. `base_url` is posted to
@@ -8,10 +8,10 @@ since gateways vary in whether the conventional path is what actually
 reaches them. OpenRouter needs no special handling here: it is
 OpenAI-compatible, so pointing `base_url` at its full endpoint and
 setting `model` to a namespaced `vendor/model` slug is purely
-configuration (spec §8.1).
+configuration.
 
 This adapter performs exactly one model call per `classify()` invocation
-(spec §5.4's split-and-retry batching lives in `liametahi.evaluate`, one
+(the split-and-retry batching lives in `liametahi.evaluate`, one
 level up) and does no semantic validation of what comes back — see
 `liametahi.classifier` and `liametahi.prompt` module docstrings for why
 that boundary is drawn where it is.
@@ -162,7 +162,7 @@ class OpenAICompatibleClassifier:
 
     def _post_with_retry(self, body: dict[str, object]) -> httpx.Response:
         """Retry a transport-level failure (connection reset, timeout) up
-        to `max_retries` times (spec §6: "transport errors only, never a
+        to `max_retries` times ("transport errors only, never a
         rejected response" — an HTTP error response is returned to the
         caller above, not retried here)."""
         attempts = self._config.max_retries + 1

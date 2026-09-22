@@ -1,12 +1,11 @@
-"""Classifier protocol and payload/response models (contracts Sec 5.3;
-jev-provider-plan §5, §10).
+"""Classifier protocol and payload/response models.
 
 This is the fixed cross-unit interface between the evaluate phase (this
 unit) and the provider adapters (`openai_compatible.py`, `anthropic.py`,
 `jev.py`, also this unit). It was originally reproduced verbatim inside
 `tests/fakes/fake_classifier.py` because this module did not yet exist
-when Unit 1 landed; per contracts Sec 5.4 that fake now imports these
-definitions from here instead of declaring local copies.
+when Unit 1 landed; per the explicit instruction that fake now imports
+these definitions from here instead of declaring local copies.
 
 **Validation against the offered processor and candidate vocabulary
 happens in the caller (see `liametahi.evaluate`), never in an adapter.**
@@ -52,7 +51,7 @@ class OfferedProcessor:
     `noul`/`choice`/`score` request shape; `prompt.py` compiles the same
     fields into a chat prompt + JSON schema for the other two
     providers). `question` is optional framing text alongside the
-    vocabulary fields, not shorthand for them (jev-provider-plan §2's
+    vocabulary fields, not shorthand for them (the
     `spam-category`/`urgency` examples set both `question` and
     `options`/`levels` on the same processor) -- it is folded into
     `criteria.true` only for the `noul` plain-string shorthand."""
@@ -69,8 +68,7 @@ class OfferedProcessor:
 @dataclass(frozen=True, slots=True)
 class CandidatePayload:
     """One candidate as sent to the model: a batch-local id and its
-    already capped-and-sanitised metadata fields (spec Sec 5.1, Sec
-    5.2)."""
+    already capped-and-sanitised metadata fields."""
 
     payload_id: str  # batch-local, "c1".."cN"
     fields: Mapping[str, object]  # already capped and sanitised by prompt.py
@@ -99,8 +97,7 @@ class Classification:
 class ClassifyOutcome:
     """The full result of one `classify()` call: parsed items, the
     payload ids that failed structural parsing, the payload ids simply
-    absent from the response, and per-call metadata for the audit trail
-    (spec Sec 8.4)."""
+    absent from the response, and per-call metadata for the audit trail."""
 
     results: tuple[Classification, ...]  # validated items only
     invalid: tuple[str, ...]  # payload_ids that failed validation

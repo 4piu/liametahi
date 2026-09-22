@@ -1,4 +1,4 @@
-"""Dovecot integration test harness (contracts §6.1, §6.2).
+"""Dovecot integration test harness.
 
 Stands up a disposable Dovecot IMAP server in Docker for each test that
 needs one, waits for it to accept authenticated IMAP connections, and
@@ -32,8 +32,8 @@ was written, using `imaplib` directly against a running container:
   itself does not have to differ -- destination mailboxes assign UIDs
   independently).
 - A **read-write** (`readonly=False`) `select`'s `PERMANENTFLAGS`
-  includes `\\*`, so arbitrary IMAP keywords (`label:<keyword>`, spec
-  §7.5) are supported; `UID STORE +FLAGS (<keyword>)` persists the
+  includes `\\*`, so arbitrary IMAP keywords (`label:<keyword>`) are
+  supported; `UID STORE +FLAGS (<keyword>)` persists the
   keyword. An `EXAMINE`d (read-only) mailbox correctly reports
   `PERMANENTFLAGS ()` instead -- nothing is permanently settable in a
   read-only session -- which is not evidence of missing support.
@@ -81,7 +81,7 @@ _READY_TIMEOUT_SECONDS = 45.0
 _DOCKER_TIMEOUT_SECONDS = 90
 _DOCKER_RM_TIMEOUT_SECONDS = 20
 
-#: The synthetic corpus committed at contracts §6.2 -- used to seed a
+#: The synthetic corpus committed to the repo -- used to seed a
 #: container the same way a real deployment's history would be
 #: reconstructed via `restore`, exercising `ImapMailbox.append` for real.
 SYNTHETIC_CORPUS_MANIFEST = (
@@ -99,7 +99,7 @@ class DovecotServer:
     password: str
 
     def connect(self) -> ImapMailbox:
-        """A real `ImapMailbox` (production code, contracts §5.4)
+        """A real `ImapMailbox` (production code)
         connected to this container. Certificate verification is
         disabled because the container's certificate is self-signed --
         acceptable here because `host` is always `127.0.0.1`."""
@@ -115,7 +115,7 @@ class DovecotServer:
         """A bare, authenticated `imaplib` connection for test-setup
         commands (`CREATE`, `DELETE`) that no production code path ever
         issues -- `MailboxAdapter` deliberately has no such method
-        (spec §4: mailbox structure is user-managed, not something
+        (mailbox structure is user-managed, not something
         Liametahi creates or deletes)."""
         conn = imaplib.IMAP4_SSL(
             self.host, self.port, ssl_context=_insecure_ssl_context()
@@ -238,7 +238,7 @@ def dovecot_server() -> Iterator[DovecotServer]:
         _docker_rm(container_name)
 
 
-# --- Corpus seeding (contracts §6.2 point 2) ------------------------------
+# --- Corpus seeding ---------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,7 +257,7 @@ def seed_corpus(
 ) -> tuple[SeededMessage, ...]:
     """`APPEND` every message from a corpus manifest into its recorded
     mailbox, preserving flags and `INTERNALDATE` -- the same
-    `ImapMailbox.append` method `restore` uses (spec §4.4), so seeding a
+    `ImapMailbox.append` method `restore` uses, so seeding a
     test server exercises real production code, not a parallel
     test-only write path."""
     base = manifest_path.parent

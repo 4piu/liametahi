@@ -1,4 +1,4 @@
-"""Tests for `liametahi.backup` (spec section 11, section 4.4)."""
+"""Tests for `liametahi.backup`."""
 
 import sqlite3
 import stat
@@ -172,7 +172,7 @@ def test_is_unsupported_error_matches_named_exception() -> None:
     assert not backup.is_unsupported_error(RuntimeError("x"))
 
 
-# --- restore (spec section 4.4) -------------------------------------------
+# --- restore ----------------------------------------------------------
 
 
 def _do_backup(

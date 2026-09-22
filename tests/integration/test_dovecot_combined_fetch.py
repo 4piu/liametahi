@@ -10,7 +10,7 @@ bytes can be trusted to predict.
 
 These tests assert the combined call agrees, field for field, with the
 two separate calls it replaces, and that `\\Seen` stays untouched
-(spec §4.1, §12 -- `BODY.PEEK[]`, never `BODY[]`).
+(`BODY.PEEK[]`, never `BODY[]`).
 """
 
 from datetime import UTC, datetime

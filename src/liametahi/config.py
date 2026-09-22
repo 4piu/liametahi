@@ -1,9 +1,8 @@
 """Pydantic v2 configuration models and load-time validation.
 
-Implements specification §6 (configuration reference), §7.3 (rule
-constraints), §12 (config file is a secret — ownership/permission check),
-and the derived fetch-header list of §4.1. Value grammars follow
-implementation-contracts.md §3.
+Implements the configuration reference, rule
+constraints, the config file's secret status (ownership/permission check),
+and the derived fetch-header list.
 
 Two exception families surface from this module:
 
@@ -54,23 +53,23 @@ class ConfigError(Exception):
 
 class ConfigFilePermissionError(ConfigError):
     """The config file is not exclusively owned/readable by the invoking
-    user (spec §12). Maps to exit code 2."""
+    user. Maps to exit code 2."""
 
 
-# --- Value grammars (contracts §3) --------------------------------------
+# --- Value grammars --------------------------------------------------------
 
 _DURATION_RE = re.compile(r"^(\d+)([smhdw])$")
 _SIZE_RE = re.compile(r"^(\d+)([kKmMgG]?)[bB]?$")
 # Two-character operators must precede their one-character prefixes in the
-# alternation (contracts §3): regex alternation picks the first alternative
+# alternation: regex alternation picks the first alternative
 # that matches at a position, not the longest, so ">" before ">=" would
 # swallow the ">" and leave a stray "=" that fails the trailing \d+ anchor.
-# Widened (jev-provider-plan §10) to also accept a decimal amount, so
+# Widened to also accept a decimal amount, so
 # `>=0.85` parses the same way `>=2` already does -- `recipient-count`'s
 # existing integer forms are unaffected, since `\d+` on its own still
 # matches with no decimal point captured.
 _COMPARISON_RE = re.compile(r"^(==|!=|>=|<=|>|<)(\d+(?:\.\d+)?)$")
-# jev-provider-plan §3: `processor: "name.field op value"`, one fixed
+# `processor: "name.field op value"`, one fixed
 # shape, no optional parts. `field` is checked against the closed
 # {"value", "confidence"} set after matching, not in the regex itself, so
 # an invalid field name gets a clear message instead of a generic
@@ -78,11 +77,11 @@ _COMPARISON_RE = re.compile(r"^(==|!=|>=|<=|>|<)(\d+(?:\.\d+)?)$")
 _PROCESSOR_CONDITION_RE = re.compile(
     r"^([A-Za-z_][\w-]*)\.([A-Za-z_][\w-]*)\s*(==|!=|>=|<=|>|<)\s*(.+)$"
 )
-# contracts §3: mechanism is a closed set, result word is deliberately open
+# mechanism is a closed set, result word is deliberately open
 # (pass/fail/softfail/neutral/none/temperror/permerror and provider-specific
 # extensions all appear in real Authentication-Results headers).
 _AUTH_RESULT_RE = re.compile(r"^(spf|dkim|dmarc)\s*=\s*([A-Za-z_]+)$", re.IGNORECASE)
-# spec §7.3: "no spaces, no `(){%*"\]`"
+# "no spaces, no `(){%*"\]`"
 _LABEL_FORBIDDEN_RE = re.compile(r'[\s(){%*"\\\]]')
 
 _DURATION_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
@@ -139,7 +138,7 @@ def _parse_comparison(key: str, value: str) -> tuple[rules.ComparisonOp, int | f
 
 
 def _parse_processor_condition(key: str, value: object) -> ProcessorCondition:
-    """`processor: "name.field op value"` (jev-provider-plan §3): one
+    """`processor: "name.field op value"`: one
     fixed shape, no optional parts. `field` is exactly `value` or
     `confidence`; the comparand is `true`/`false` (lowercase, exact) ->
     bool, else a float if it parses as one, else a plain string (a
@@ -192,7 +191,7 @@ def _parse_processor_condition(key: str, value: object) -> ProcessorCondition:
 
 
 def _parse_auth_result(key: str, value: object) -> rules.AuthResult:
-    """`auth-result: mechanism=result` (spec §7.1; contracts §3). The
+    """`auth-result: mechanism=result`. The
     mechanism is one of `spf`/`dkim`/`dmarc` (case-insensitive); the
     result word is open vocabulary. Compiled once here into a single
     precomputed `re.Pattern`, never re-built per candidate at eval time."""
@@ -212,7 +211,7 @@ def _parse_auth_result(key: str, value: object) -> rules.AuthResult:
 
 
 def _parse_has_attachment(key: str, value: object) -> rules.HasAttachment:
-    """`has-attachment: true` (spec §7.1): only the literal YAML boolean
+    """`has-attachment: true`: only the literal YAML boolean
     `True` is accepted -- anything else, including `False` or the string
     `"true"`, is a config error. Negate with `not: {has-attachment: true}`
     rather than inventing a second spelling for the same fact."""
@@ -225,7 +224,7 @@ def _parse_has_attachment(key: str, value: object) -> rules.HasAttachment:
     return rules.HasAttachment()
 
 
-#: Hosts for which `tls_insecure_skip_verify` is permitted (spec §12).
+#: Hosts for which `tls_insecure_skip_verify` is permitted.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 BASE_FETCH_HEADERS: tuple[str, ...] = (
@@ -253,7 +252,7 @@ DEFAULT_BACKUP_DIR = _DEFAULT_STATE_DIR / "backups"
 DEFAULT_LOCK_DIR = _DEFAULT_STATE_DIR / "locks"
 
 
-# --- Condition-tree parsing (spec §7.1, §7.2, §7.3) ---------------------
+# --- Condition-tree parsing ------------------------------------------------
 
 _COMPOSITION_KEYS = frozenset({"all", "any", "none", "not"})
 _MAX_NESTING_DEPTH = 3
@@ -280,7 +279,7 @@ _REGEX_NOOP_FLAGS = frozenset({"g"})
 
 def _parse_match_pattern(key: str, value: object) -> rules.MatchPattern:
     """A `sender-match`/`recipient-match`/`subject-contains`/`list-id-contains`
-    value (spec §7.1): either a plain glob/substring (the default, matched
+    value: either a plain glob/substring (the default, matched
     case-insensitively), or a `/pattern/flags` regex literal, compiled
     once here so a malformed pattern is a config-load error, never a
     runtime one.
@@ -374,9 +373,8 @@ def parse_condition_tree(raw: object, *, depth: int = 0) -> ConditionTree:
 
     Enforces: each node is a single-key mapping, `all`/`any`/`none`
     values are non-empty lists, `not` takes a single nested node, and
-    nesting of `all`/`any`/`none`/`not` does not exceed depth 3 (spec
-    §7.2; jev-provider-plan §4). Grammar parsing for duration/size/
-    processor atoms happens here (contracts §3; jev-provider-plan §3).
+    nesting of `all`/`any`/`none`/`not` does not exceed depth 3. Grammar
+    parsing for duration/size/processor atoms happens here.
     """
     if not isinstance(raw, dict) or len(raw) != 1:
         raise ConfigError(
@@ -405,7 +403,7 @@ def parse_condition_tree(raw: object, *, depth: int = 0) -> ConditionTree:
 
 
 def parse_when(raw: object) -> ConditionTree:
-    """Parse a rule's top-level `when:` value (spec §7.2).
+    """Parse a rule's top-level `when:` value.
 
     Two shapes are accepted:
 
@@ -445,10 +443,10 @@ def parse_when(raw: object) -> ConditionTree:
 
 
 def has_deterministic_atom(tree: ConditionTree) -> bool:
-    """True if the tree contains at least one non-`processor` atom (spec
-    §5.2). A `processor:` atom never counts as deterministic regardless
-    of processor type, backend, or which field is being compared
-    (jev-provider-plan §3's safety invariant) -- a `trash` rule still
+    """True if the tree contains at least one non-`processor` atom. A
+    `processor:` atom never counts as deterministic regardless
+    of processor type, backend, or which field is being compared -- this
+    is a safety invariant, so a `trash` rule still
     needs at least one atom besides it."""
     if isinstance(tree, rules.AllNode | rules.AnyNode | rules.NoneNode):
         return any(has_deterministic_atom(child) for child in tree.children)
@@ -501,19 +499,19 @@ def _validate_actions(
     *,
     rule_label: str,
 ) -> None:
-    """Enforce spec §7.3/§7.4/§7.5 action-list constraints.
+    """Enforce action-list constraints.
 
-    Backup-before-trash (formerly enforced here) is removed
-    (jev-provider-plan §8): `trash` no longer requires a preceding
+    Backup-before-trash (formerly enforced here) is removed:
+    `trash` no longer requires a preceding
     `backup` in the same action list, and `allow_trash_without_backup`
     no longer exists as a config field at all -- `RuleConfig`'s
     `extra="forbid"` now rejects it outright as an unknown key. What is
     unchanged: at most one remote mutation per action list, and `trash`
-    still requires at least one deterministic condition (spec §5.2) --
-    the more important of the two, since it stops a model's (or
+    still requires at least one deterministic condition -- the more
+    important of the two, since it stops a model's (or
     processor's) verdict alone from being sufficient to delete
-    something. `task:<id>` is a new, local-only action (jev-provider-plan
-    §7): never an IMAP mutation, so it never counts toward
+    something. `task:<id>` is a new, local-only action:
+    never an IMAP mutation, so it never counts toward
     `remote_mutations` and composes freely with everything else.
     """
     remote_mutations = 0
@@ -597,7 +595,7 @@ class AccountConfig(BaseModel):
 
     @model_validator(mode="after")
     def _insecure_tls_is_loopback_only(self) -> AccountConfig:
-        """Certificate-verifying TLS is mandatory (spec §12).
+        """Certificate-verifying TLS is mandatory.
 
         The single exception is a local development server with a
         self-signed certificate (`tools/dev_imap.py`), so this flag is
@@ -615,7 +613,7 @@ class AccountConfig(BaseModel):
 
 
 class BodyExcerptConfig(BaseModel):
-    """No separate on/off switch here (spec §5.1; jev-provider-plan §2):
+    """No separate on/off switch here:
     a processor's own `include_body` is already the opt-in, and a second
     gate at the model level would only mean two places to enable the same
     thing before it does anything, with no clear story for what one
@@ -644,7 +642,7 @@ class ModelConfig(BaseModel):
     # unlike the `max_*` keys this keeps a default. No upper bound is
     # enforced -- large batches measurably degrade small local models, but
     # that is guidance for the README, not something to reject outright.
-    # jev-provider-plan §11: a `jev` model must set this to exactly 1 --
+    # A `jev` model must set this to exactly 1 --
     # jev is "one HTTP call per candidate", not a batched chat request.
     mails_per_request: int = Field(default=10, ge=1)
     # How many of those requests may be in flight at once. Defaults to 1
@@ -668,7 +666,7 @@ class ModelConfig(BaseModel):
         if self.provider == "anthropic" and not self.api_key:
             raise ConfigError("models: 'api_key' is required for provider 'anthropic'")
         if self.provider == "jev":
-            # jev-provider-plan §1, §11: a real HTTP endpoint and a
+            # A real HTTP endpoint and a
             # bearer credential, exactly like a hosted chat provider.
             if not self.base_url:
                 raise ConfigError("models: 'base_url' is required for provider 'jev'")
@@ -685,8 +683,8 @@ class ModelConfig(BaseModel):
 
 
 class ProcessorConfig(BaseModel):
-    """One named question in Jev's structured vocabulary
-    (jev-provider-plan §2, §9): `type` selects which of `criteria`
+    """One named question in Jev's structured vocabulary:
+    `type` selects which of `criteria`
     (`noul`), `options` (`choice`), or `levels` (`score`) is meaningful;
     the other two must be left unset. `model:` alone determines how the
     question is compiled/sent (`prompt.py` for a chat provider, straight
@@ -719,7 +717,7 @@ class ProcessorConfig(BaseModel):
                         "processors: a 'noul' processor must not set "
                         "'options' or 'levels'"
                     )
-                # jev-provider-plan §2: the plain-string shorthand implies
+                # The plain-string shorthand implies
                 # `criteria: {true: question}` -- deliberately not a
                 # synthesized 'false' entry; the shorthand and the
                 # explicit two-key form are two different valid shapes,
@@ -771,7 +769,7 @@ class ProcessorConfig(BaseModel):
 
 
 class ProtectConfig(BaseModel):
-    """No implicit protection (spec §6): a task with no `protect` block, or
+    """No implicit protection: a task with no `protect` block, or
     one that omits a field, protects nothing on that axis. Every exclusion
     a user relies on must be visible in their own config, not inherited
     from a library default."""
@@ -784,12 +782,10 @@ class ProtectConfig(BaseModel):
 
 
 class RuleConfig(BaseModel):
-    """A rule has no `id` and no `priority` (jev-provider-plan §9): nothing
-    else in the config ever references a rule by name (see the plan's
-    referenced-from table), and a matching rule's rank is simply its
-    position in `rules:` -- first-listed wins (spec §7.4, reinterpreted:
-    "config order" is now the *only* ordering key, not a tiebreaker under
-    `priority`)."""
+    """A rule has no `id` and no `priority`: nothing else in the config
+    ever references a rule by name, and a matching rule's rank is simply
+    its position in `rules:` -- first-listed wins ("config order" is now
+    the *only* ordering key, not a tiebreaker under `priority`)."""
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
@@ -806,11 +802,11 @@ class TaskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     account: str = Field(min_length=1)
-    # Optional (jev-provider-plan §7): a task can scan its own mailbox,
+    # Optional: a task can scan its own mailbox,
     # exist purely as a `task:<id>` routing target, or both. Defaults to
     # an *empty* list, not `["INBOX"]` -- a routing-only task (no
     # `source_mailboxes` at all) must not silently also scan INBOX, which
-    # is the whole point of §7's worked example being able to omit the
+    # is the whole point of being able to omit the
     # field on a task that exists only to receive routed candidates.
     source_mailboxes: list[str] = Field(default_factory=list)
     protect: ProtectConfig = Field(default_factory=ProtectConfig)
@@ -820,9 +816,9 @@ class TaskConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_rules(self) -> Self:
-        """Per-rule action-list validation (spec §7.3/§7.4/§7.5), done
+        """Per-rule action-list validation, done
         here rather than on `RuleConfig` itself so the error message can
-        name a rule by its position (jev-provider-plan §9) -- a rule has
+        name a rule by its position -- a rule has
         no name of its own to report."""
         total = len(self.rules)
         for index, rule in enumerate(self.rules):
@@ -835,7 +831,7 @@ class TaskConfig(BaseModel):
 
     @property
     def fetch_headers(self) -> tuple[str, ...]:
-        """The derived fetch-header list (spec §4.1): the base set plus
+        """The derived fetch-header list: the base set plus
         every header named by a `has-header` condition anywhere in this
         task's rules, computed once from the loaded config."""
         extra = {
@@ -852,18 +848,19 @@ def _validate_processor_atom(
     processors: Mapping[str, ProcessorConfig],
     models: Mapping[str, ModelConfig],
 ) -> None:
-    """jev-provider-plan §9's per-atom cross-reference rule, once the
+    """Per-atom cross-reference rule, once the
     atom's processor name is already known to exist.
 
     A `field: confidence` comparison is only ever meaningful against a
-    `provider: jev` processor: jev always populates `confidence`
-    (jev-provider-plan §5), but a chat-backed processor's compiled
+    `provider: jev` processor: jev always populates `confidence`, but a
+    chat-backed processor's compiled
     schema (`prompt.py: _answer_value_schema`) never includes it -- there
     is no config field that opts a chat processor into reporting one.
     Left unchecked, `processor: "name.confidence ..."` against a chat
     processor would load cleanly and then sit at `Tri.UNKNOWN` forever,
     silently disabling whatever rule it's part of -- exactly the "load-
-    time error, not a silent runtime no-op" plan §9 asks for.
+    time error, not a silent runtime no-op" this validation exists to
+    enforce.
 
     An equality/inequality comparison against `.value` on a `choice`/
     `score` processor must name one of its declared options/levels
@@ -915,8 +912,8 @@ def _validate_processor_atom(
 
 
 def _check_routing_acyclic(edges: Mapping[str, frozenset[str]]) -> None:
-    """DAG check for `task:<id>` routing edges (jev-provider-plan §7):
-    plain DFS, the same style as `_MAX_NESTING_DEPTH`'s guard -- a
+    """DAG check for `task:<id>` routing edges: plain DFS, the same
+    style as `_MAX_NESTING_DEPTH`'s guard -- a
     routing cycle would ping-pong candidates between tasks forever across
     cron ticks and belongs at `config check` time, not discovered at 3am.
     Unknown targets are skipped here; they are already reported by the
@@ -1021,18 +1018,18 @@ class Config(BaseModel):
         return self
 
 
-# --- File loading (spec §12) ----------------------------------------------
+# --- File loading -----------------------------------------------------------
 
-# Any bit here on a config file (which contains literal credentials, per
-# spec §12) means it is readable, writable, or executable by someone other
+# Any bit here on a config file (which contains literal credentials)
+# means it is readable, writable, or executable by someone other
 # than its owner. The spec's minimum bar is "group- or world-readable"; we
 # warn on the broader set deliberately, as the more conservative check.
 _UNSAFE_MODE_BITS = stat.S_IRWXG | stat.S_IRWXO
 
 
 def check_file_permissions(path: Path) -> None:
-    """Enforce spec §12's ownership requirement and warn about loose mode
-    bits on the config file.
+    """Enforce the config file's ownership requirement and warn about
+    loose mode bits on the config file.
 
     Ownership is a hard failure (`ConfigFilePermissionError`, exit code 2):
     a config file owned by someone else may already have been read or
@@ -1077,7 +1074,7 @@ def load_config(path: Path) -> Config:
     """Load, permission-check, parse, and validate the config file.
 
     Raises `ConfigError` (including `ConfigFilePermissionError`) on any
-    failure; callers map this to exit code 2 (spec §9).
+    failure; callers map this to exit code 2.
     """
     resolved = path.expanduser()
     if not resolved.is_file():

@@ -1,10 +1,9 @@
-"""Tests for `liametahi.classifier.openai_compatible` (spec section 8.1;
-contracts section 5.3).
+"""Tests for `liametahi.classifier.openai_compatible`.
 
 All tests use `httpx.MockTransport`: no network, no Docker. These tests
 deliberately do *not* exercise semantic validation (unoffered rule id,
 duplicate) -- that boundary lives in `liametahi.evaluate`, never in an
-adapter (contracts section 5.3), and is covered by
+adapter, and is covered by
 `tests/test_evaluate.py` instead.
 """
 
@@ -59,7 +58,7 @@ def test_wrong_provider_rejected() -> None:
         OpenAICompatibleClassifier(cfg)
 
 
-# --- Request shape (spec section 8.1) ---------------------------------------
+# --- Request shape ------------------------------------------------------------
 
 
 def test_sends_model_messages_max_tokens_and_temperature_zero() -> None:
@@ -88,7 +87,7 @@ def test_sends_model_messages_max_tokens_and_temperature_zero() -> None:
 def test_extra_headers_and_authorization_applied_to_internally_built_client() -> None:
     """When no `client` is injected (the production path), the adapter
     must build one carrying the configured `Authorization` bearer token
-    and any `extra_headers` (spec section 6)."""
+    and any `extra_headers`."""
     cfg = _config(api_key="secret-key", extra_headers={"X-Title": "liametahi"})
     clf = OpenAICompatibleClassifier(cfg)
     headers = clf._client.headers  # noqa: SLF001 - inspecting the built client only
@@ -121,7 +120,7 @@ def test_base_url_used_verbatim_as_the_endpoint(base_url: str) -> None:
     assert clf._endpoint_url == base_url  # noqa: SLF001
 
 
-# --- Structured-output degradation ladder (spec section 8.1) ---------------
+# --- Structured-output degradation ladder -----------------------------------
 
 
 def test_auto_tries_json_schema_first_and_succeeds() -> None:
@@ -206,7 +205,7 @@ def test_structured_output_none_sends_no_response_format() -> None:
     assert "response_format" not in bodies[0]
 
 
-# --- Transport-level retry (spec section 6: "transport errors only") ------
+# --- Transport-level retry ("transport errors only") -----------------------
 
 
 def test_transport_error_retried_up_to_max_retries_then_raises() -> None:
@@ -249,7 +248,7 @@ def test_transport_error_succeeds_after_one_retry() -> None:
 def test_http_error_response_is_not_retried_at_transport_level() -> None:
     """An HTTP error response (the server answered) is a structured-
     output rejection signal to degrade, never a transport retry target
-    -- spec section 6: 'transport errors only, never a rejected
+    -- 'transport errors only, never a rejected
     response.'"""
     attempts_per_level: dict[str | None, int] = {}
 

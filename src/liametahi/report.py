@@ -1,7 +1,6 @@
-"""Table and JSON report rendering (spec section 9; contracts section
-5.5's pinned JSON shape).
+"""Table and JSON report rendering.
 
-`report` never touches the mailbox or the model (spec section 9): every
+`report` never touches the mailbox or the model: every
 function here only reads from SQLite through `conn`. Two reads this
 module needs -- a run's account name, and result items/action attempts
 joined for a run -- have no corresponding query in `state.py`'s typed
@@ -32,7 +31,7 @@ from typing import Any
 from liametahi import state
 from liametahi.domain import MessageKey
 
-#: spec section 9: hidden from the default table/JSON view, shown with
+#: Hidden from the default table/JSON view, shown with
 #: `--verbose`. Every other status (including `pending` rows whose
 #: derived status turns out to still be `pending`) is shown by default.
 QUIET_STATUSES = frozenset(
@@ -43,7 +42,7 @@ REPORT_VERSION = 1
 
 
 class ReportNotFoundError(Exception):
-    """No stored run matches the requested run id (spec section 9)."""
+    """No stored run matches the requested run id."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,11 +200,11 @@ def _visible_items(data: ReportData, *, verbose: bool) -> tuple[ReportItem, ...]
     return tuple(item for item in data.items if item.status not in QUIET_STATUSES)
 
 
-# --- JSON rendering (contracts section 5.5) --------------------------
+# --- JSON rendering --------------------------------------------------
 
 
 def to_json_document(data: ReportData, *, verbose: bool) -> dict[str, Any]:
-    """The exact document shape pinned by contracts section 5.5."""
+    """The exact document shape pinned by the fixed report interface."""
     run = data.run
     items = _visible_items(data, verbose=verbose)
     return {
@@ -258,7 +257,7 @@ def render_json(data: ReportData, *, verbose: bool) -> str:
     return json.dumps(to_json_document(data, verbose=verbose), indent=2)
 
 
-# --- Table rendering (spec section 9) ---------------------------------
+# --- Table rendering ---------------------------------------------------
 
 
 def render_table(data: ReportData, *, verbose: bool) -> str:
@@ -320,7 +319,7 @@ _ELLIPSIS = "..."
 def _display_time(value: str | None) -> str:
     """A stored timestamp trimmed to whole seconds, for human output only.
 
-    Storage keeps full microsecond ISO-8601 UTC (contracts §2) and the
+    Storage keeps full microsecond ISO-8601 UTC and the
     JSON document keeps it verbatim, because that is the machine-readable
     shape. Sub-second precision is noise in a table, though, and costs
     seven columns twice over -- nobody reads a report to find out which

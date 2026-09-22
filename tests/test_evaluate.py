@@ -1,9 +1,7 @@
 """Tests for `liametahi.evaluate`: the safety-critical response
-validation boundary (spec section 4.2 steps 2-6, section 5.2, section
-5.3, section 5.4, section 13; contracts section 5.3; jev-provider-plan
-§5, §6, §10).
+validation boundary.
 
-Contracts section 5.3 requires this validation to live exactly once, in
+This validation must live exactly once, in
 the caller, never in an adapter, so it "cannot be skipped by adding a new
 adapter". These tests exercise that boundary directly against
 `FakeClassifier`, which stands in for *any* provider: the two adapter
@@ -13,7 +11,7 @@ independently show that a hostile or malformed value survives their
 transport layer untouched, and these tests show the one place that
 actually rejects it.
 
-jev-provider-plan retires the old single-`llm`-atom, yes/no/unsure
+This retires the old single-`llm`-atom, yes/no/unsure
 vocabulary in favour of named `processor:` atoms answering with a
 resolved `value` (validated against a closed, declared vocabulary) plus
 an optional `confidence`. Consequently:
@@ -24,7 +22,7 @@ an optional `confidence`. Consequently:
   same key repeated" is no longer representable on the wire; the old
   duplicate-rule-id test is gone because there is nothing left to test.
 - Batching now groups every candidate in one `classify()` call by an
-  identical *processor* set (jev-provider-plan §6), which is a
+  identical *processor* set, which is a
   structural invariant rather than an implementation detail -- so the
   old "candidate B was offered a different rule set than candidate A in
   the same batch" scenario cannot arise any more; what still needs
@@ -272,7 +270,7 @@ def test_reason_capped_at_200_chars(tmp_path: Path) -> None:
 def test_reason_text_never_influences_the_outcome(tmp_path: Path) -> None:
     """A `reason` string that mentions a processor name, or reads like an
     instruction, must have zero effect: only `answers` can ever select a
-    rule (spec section 5.3: reason is "never read by the policy
+    rule (reason is "never read by the policy
     engine")."""
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
@@ -316,7 +314,7 @@ def test_reason_text_never_influences_the_outcome(tmp_path: Path) -> None:
 
 # =========================================================================
 # An answer whose value is outside the processor's declared vocabulary is
-# rejected (contracts section 5.3, extended to processor answers)
+# rejected (extended to processor answers)
 # =========================================================================
 
 
@@ -416,7 +414,7 @@ def test_answer_confidence_outside_zero_one_is_rejected(tmp_path: Path) -> None:
 
 # =========================================================================
 # Both a match and a non-match are cached, each tagged with which they
-# were (spec §13): a re-run reuses either answer without asking again.
+# were: a re-run reuses either answer without asking again.
 # =========================================================================
 
 
@@ -523,7 +521,7 @@ def test_matched_and_unselected_rules_are_both_cached_correctly(
 
 
 def test_cached_match_is_reused_without_a_model_call(tmp_path: Path) -> None:
-    """The core payoff (spec §13): once a processor's answer is cached, a
+    """The core payoff: once a processor's answer is cached, a
     later run with the same processor definition and input skips the
     model entirely and still produces an accepted match -- e.g. because
     the previous run's remote mutation failed and the message is still a
@@ -724,7 +722,7 @@ def test_acceptance_03_single_invalid_item_is_a_no_op_others_apply(
 ) -> None:
     """A response where one item is structurally invalid and nine are
     valid does not require a split -- every item is still validated
-    independently (spec section 5.4 point 1)."""
+    independently."""
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
     config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
@@ -775,7 +773,7 @@ def test_acceptance_03_single_invalid_item_is_a_no_op_others_apply(
 def test_acceptance_03_wholly_invalid_batch_splits_and_both_halves_apply(
     tmp_path: Path,
 ) -> None:
-    """spec section 5.4 point 2-3: a wholly unparseable/invalid response
+    """A wholly unparseable/invalid response
     triggers exactly one split-in-half retry. This asserts BOTH halves
     of the split are correctly finalised -- the left half resolves
     cleanly, and the right half still has one permanently invalid item
@@ -848,8 +846,8 @@ def test_acceptance_03_wholly_invalid_batch_splits_and_both_halves_apply(
 
 
 def test_split_retry_does_not_recurse_a_second_time(tmp_path: Path) -> None:
-    """Neither status is retried again within the run (spec section 5.4
-    point 4): if BOTH halves also come back wholly invalid, there must
+    """Neither status is retried again within the run: if BOTH halves
+    also come back wholly invalid, there must
     be exactly initial + 2 calls, never a further split."""
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
@@ -884,10 +882,10 @@ def test_split_retry_does_not_recurse_a_second_time(tmp_path: Path) -> None:
         assert result.status == "invalid_response"
 
 
-# Note: acceptance test 4 (spec §14 item 4, "unsure classification with
+# Note: acceptance test 4 ("unsure classification with
 # content escalation unavailable") no longer has an analog: the
 # yes/no/unsure vocabulary it exercised (`needs_content`) does not exist
-# in the jev-provider-plan redesign -- a processor either answers or it
+# in this redesign -- a processor either answers or it
 # doesn't, this round, with no separate "I looked and I'm unsure" signal
-# (jev-provider-plan §5's chat-compiled schema deliberately has no
+# (the chat-compiled schema deliberately has no
 # invented field for it). See the final report.

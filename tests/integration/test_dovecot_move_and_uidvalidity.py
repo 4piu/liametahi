@@ -1,5 +1,5 @@
 """A real `UID MOVE` between mailboxes and a real `UIDVALIDITY` change
-(contracts §6.2 point 3's minimum integration coverage)."""
+(the minimum integration coverage for this)."""
 
 from datetime import UTC, datetime
 
@@ -51,8 +51,9 @@ def test_uidvalidity_changes_on_mailbox_delete_and_recreate(
     dovecot_server: DovecotServer,
 ) -> None:
     """No production code path deletes or recreates a mailbox; this
-    simulates the server-side rebuild spec §4.1 point 2 defends against
-    using an operation an administrator (not Liametahi) might perform."""
+    simulates the server-side rebuild the UIDVALIDITY re-identification
+    logic defends against, using an operation an administrator (not
+    Liametahi) might perform."""
     raw = dovecot_server.raw_imap()
     try:
         raw.create("Rebuildable")

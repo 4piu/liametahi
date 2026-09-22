@@ -1,6 +1,5 @@
 """LLM payload construction, capping, sanitisation, and the wire-level
-request/response shape shared by the two chat-backed classifier adapters
-(spec §5.1, §5.2, §5.3; contracts §5.3, §7; jev-provider-plan §5, §10).
+request/response shape shared by the two chat-backed classifier adapters.
 
 This module owns everything the specification calls "payload
 construction, capping, sanitisation": turning a `Candidate` into the
@@ -10,12 +9,12 @@ request JSON. It also owns the reverse: parsing a raw model response
 string into structurally-typed `Classification` objects. What it
 deliberately does NOT do is semantic vocabulary validation (candidate
 belongs to the batch, processor was offered, answer value is one of the
-processor's declared options/levels) — contracts §5.3 is explicit that
-this happens once, in the caller (`liametahi.evaluate`), not per-adapter,
+processor's declared options/levels) — that check happens once, in the
+caller (`liametahi.evaluate`), not per-adapter,
 so a hostile model response cannot slip past a specific provider's
 adapter.
 
-jev-provider-plan §5, §10: this module now compiles a *processor*
+This module compiles a *processor*
 definition (`type`/`criteria`/`options`/`levels`) into a system prompt and
 a per-batch JSON response schema, rather than the old per-rule free-form
 `llm` description. The compiled schema contains **exactly the fields the
@@ -34,7 +33,7 @@ grouping), so the offered-processor list is batch-level, not per-candidate
 — unlike the old per-candidate `offered` rule-id list.
 
 Sender display names, subjects, and header values are attacker-controlled
-text entering a prompt (spec §5.2). Every value that originates from
+text entering a prompt. Every value that originates from
 message content goes through `sanitize_text()` and a field-specific cap
 before it is ever serialised.
 """
@@ -52,7 +51,7 @@ from liametahi.classifier import (
 from liametahi.domain import Candidate
 from liametahi.rules import ProcessorAnswer
 
-# --- Caps (spec §5.2) -------------------------------------------------
+# --- Caps ---------------------------------------------------------------
 
 SUBJECT_CAP = 200
 DISPLAY_NAME_CAP = 100
@@ -60,7 +59,7 @@ ADDRESS_CAP = 200
 LIST_ID_CAP = 200
 RECIPIENTS_CAP = 5
 
-# --- Sanitisation (spec §5.2) ------------------------------------------
+# --- Sanitisation ---------------------------------------------------------
 #
 # "Strip C0/C1 control characters, replace newlines with a single space,
 # strip zero-width and bidirectional-override characters."
@@ -76,7 +75,7 @@ _STRIP_CHARS = frozenset(_ZERO_WIDTH_CHARS + _BIDI_CONTROL_CHARS)
 
 def sanitize_text(value: str) -> str:
     """Neutralise untrusted message-derived text before it enters a
-    prompt (spec §5.2): newlines become a single space, then every
+    prompt: newlines become a single space, then every
     remaining C0/C1 control character and every zero-width or
     bidirectional-override character is stripped outright.
 
@@ -113,11 +112,11 @@ def _cap(value: str, max_len: int | None) -> tuple[str, bool]:
     return value[:max_len], True
 
 
-# --- System prompt (spec §5.2; jev-provider-plan §5) --------------------
+# --- System prompt -------------------------------------------------------
 
 #: Bump whenever SYSTEM_PROMPT or the compiled schema shape changes in a
-#: way that could change the model's answer. It is part of the §13 cache
-#: key, so bumping it invalidates every cached decision -- which is the
+#: way that could change the model's answer. It is part of the decision
+#: cache key, so bumping it invalidates every cached decision -- which is the
 #: point: a processor's own definition is covered by the processor
 #: identity hash (see `evaluate.py`), but nothing covers the instructions
 #: wrapped around it.
@@ -149,15 +148,13 @@ SYSTEM_PROMPT = (
     "you report."
 )
 
-# --- JSON schema for structured-output modes (spec §8.1, §8.2;
-# --- jev-provider-plan §5, §10) ------------------------------------------
+# --- JSON schema for structured-output modes -------------------------------
 
 
 def _answer_value_schema(processor: OfferedProcessor) -> dict[str, object]:
     """The JSON-schema fragment for one processor's `value` field —
     exactly what its own declared shape implies, nothing more
-    (jev-provider-plan §5: "no auto-injected... no invented confidence
-    field")."""
+    ("no auto-injected... no invented confidence field")."""
     if processor.type == "noul":
         return {"type": "boolean"}
     if processor.type == "choice":
@@ -168,7 +165,7 @@ def _answer_value_schema(processor: OfferedProcessor) -> dict[str, object]:
 
 
 def build_response_schema(processors: Sequence[OfferedProcessor]) -> dict[str, object]:
-    """Build the per-batch JSON response schema (jev-provider-plan §5):
+    """Build the per-batch JSON response schema:
     one `answers` property per offered processor, containing exactly
     that processor's declared `value` shape — never an auto-injected
     field a chat processor's own config did not ask for."""
@@ -202,14 +199,14 @@ def build_response_schema(processors: Sequence[OfferedProcessor]) -> dict[str, o
     }
 
 
-# --- Candidate payload construction (spec §5.1, §5.2) -------------------
+# --- Candidate payload construction -----------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class BuiltPayload:
     """A `CandidatePayload` plus the bookkeeping needed for the LLM
-    decision cache (spec §13): the input hash (which the truncation flag
-    participates in, per spec §5.2) and the truncation flag itself."""
+    decision cache: the input hash (which the truncation flag
+    participates in) and the truncation flag itself."""
 
     payload: CandidatePayload
     input_hash: str
@@ -221,10 +218,10 @@ def compute_input_hash(
 ) -> str:
     """sha256 of the canonical (sorted-key) JSON serialisation of the
     already-capped-and-sanitised fields, folded together with the input
-    level and the truncation flag (spec §5.2: "truncation participates
-    in the input hash"). This is the `input_hash` half of the §13 cache
-    key; it is stable across runs for the same message because the
-    metadata field set is fixed (spec §5.1)."""
+    level and the truncation flag ("truncation participates
+    in the input hash"). This is the `input_hash` half of the decision
+    cache key; it is stable across runs for the same message because the
+    metadata field set is fixed."""
     canonical = json.dumps(
         {"input_level": input_level, "truncated": truncated, "fields": fields},
         sort_keys=True,
@@ -235,7 +232,7 @@ def compute_input_hash(
 
 def compute_processor_hash(processor: OfferedProcessor) -> str:
     """sha256 of a processor's own declared definition — the
-    `processor_hash` half of the §13 cache key (analogous to the old
+    `processor_hash` half of the decision cache key (analogous to the old
     per-rule `rule_text_hash`). Changing a processor's `type`, `question`,
     `criteria`/`options`/`levels`, or `include_body` changes this hash,
     which is what makes an edited processor's cached decisions invalidate
@@ -255,13 +252,13 @@ def compute_processor_hash(processor: OfferedProcessor) -> str:
 
 
 def build_candidate_payload(candidate: Candidate, *, payload_id: str) -> BuiltPayload:
-    """Build the metadata-level payload for one candidate (spec §5.1):
-    the fixed field set only — no dates, ages, or flags — every value
-    sanitised then capped per spec §5.2.
+    """Build the metadata-level payload for one candidate: the fixed
+    field set only — no dates, ages, or flags — every value
+    sanitised then capped.
 
     Recipients beyond `RECIPIENTS_CAP` are dropped from the visible list
     and folded into `cc_count` as an overflow count, since
-    `Candidate.recipients` (contracts §5.1) is already the union of
+    `Candidate.recipients` is already the union of
     To/Cc/Delivered-To/X-Original-To used by `recipient-match` and the
     domain model carries no separate To/Cc breakdown to preserve.
     """
@@ -308,8 +305,8 @@ def build_excerpt_payload(
     excerpt_text: str,
     max_chars: int | None,
 ) -> BuiltPayload:
-    """Build the excerpt-level escalation payload for one candidate
-    (spec §5.1): the same fixed metadata fields plus a capped, sanitised
+    """Build the excerpt-level escalation payload for one candidate: the
+    same fixed metadata fields plus a capped, sanitised
     plain-text excerpt. `excerpt_text` is assumed to already be cleaned
     plain text (HTML removed, quoted history and signatures stripped) —
     that content processing happens wherever the excerpt is fetched from
@@ -326,7 +323,7 @@ def build_excerpt_payload(
     return BuiltPayload(payload=payload, input_hash=input_hash, truncated=truncated)
 
 
-# --- Canonical request shape (spec §5.3; jev-provider-plan §5) ----------
+# --- Canonical request shape ---------------------------------------------
 
 
 def _processor_definition_json(processor: OfferedProcessor) -> dict[str, object]:
@@ -345,8 +342,8 @@ def _processor_definition_json(processor: OfferedProcessor) -> dict[str, object]
 def build_request_payload(
     candidates: Sequence[CandidatePayload], processors: Sequence[OfferedProcessor]
 ) -> dict[str, object]:
-    """Build the canonical request JSON object (jev-provider-plan §5):
-    an array of metadata records plus the shared set of processors every
+    """Build the canonical request JSON object: an array of metadata
+    records plus the shared set of processors every
     candidate in this batch is being asked about. Shared verbatim by both
     chat adapters so the wire shape cannot drift between providers.
     """
@@ -362,12 +359,12 @@ def build_request_payload(
     return {"candidates": candidates_json, "processors": processors_json}
 
 
-# --- Canonical response parsing (spec §5.3, §5.4; jev-provider-plan §5) -
+# --- Canonical response parsing --------------------------------------------
 #
 # Structural parsing only. This does NOT check that a candidate id
 # belongs to the batch, that a processor was offered, or that an answer
-# value is one of a processor's declared options/levels — contracts §5.3
-# requires that semantic check to live once in the caller
+# value is one of a processor's declared options/levels — that semantic
+# check must live once in the caller
 # (`liametahi.evaluate`), not here, so it cannot be skipped by adding a
 # new adapter.
 
@@ -383,12 +380,12 @@ def parse_classification_response(
     raw_text: str, requested_ids: Sequence[str]
 ) -> ParsedResponse:
     """Parse one raw model response body into structurally-typed
-    `Classification` objects (spec §5.4 point 1: "parse the response per
+    `Classification` objects ("parse the response per
     item; accept every item that validates").
 
     If the response is not valid JSON, or lacks a `results` array
     entirely, the whole thing is unparseable: every requested id is
-    reported `invalid` (spec §5.4 point 2, "unparseable or wholly
+    reported `invalid` ("unparseable or wholly
     invalid"), signalling the caller to attempt the one split-and-retry.
     Otherwise each item in `results` is parsed independently: a
     structurally malformed item (missing candidate id, `answers` not an
