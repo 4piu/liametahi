@@ -848,16 +848,42 @@ class TaskConfig(BaseModel):
 
 
 def _validate_processor_atom(
-    atom: ProcessorCondition, *, processors: Mapping[str, ProcessorConfig]
+    atom: ProcessorCondition,
+    *,
+    processors: Mapping[str, ProcessorConfig],
+    models: Mapping[str, ModelConfig],
 ) -> None:
     """jev-provider-plan §9's per-atom cross-reference rule, once the
-    atom's processor name is already known to exist: an equality/
-    inequality comparison against `.value` on a `choice`/`score`
-    processor must name one of its declared options/levels
-    (case-sensitive exact match). `.confidence` and non-equality
-    operators against `.value` (numeric `score` comparisons) need no
-    such check -- there is no closed vocabulary to validate against."""
+    atom's processor name is already known to exist.
+
+    A `field: confidence` comparison is only ever meaningful against a
+    `provider: jev` processor: jev always populates `confidence`
+    (jev-provider-plan §5), but a chat-backed processor's compiled
+    schema (`prompt.py: _answer_value_schema`) never includes it -- there
+    is no config field that opts a chat processor into reporting one.
+    Left unchecked, `processor: "name.confidence ..."` against a chat
+    processor would load cleanly and then sit at `Tri.UNKNOWN` forever,
+    silently disabling whatever rule it's part of -- exactly the "load-
+    time error, not a silent runtime no-op" plan §9 asks for.
+
+    An equality/inequality comparison against `.value` on a `choice`/
+    `score` processor must name one of its declared options/levels
+    (case-sensitive exact match). Non-equality operators against `.value`
+    (numeric `score` comparisons) need no such check -- there is no
+    closed vocabulary to validate against."""
     processor = processors[atom.name]
+    if atom.field == "confidence":
+        backend = models[processor.model].provider
+        if backend != "jev":
+            raise ConfigError(
+                f"processor {atom.name!r}: 'processor: \"{atom.name}.confidence "
+                f"{atom.op} {atom.value}\"' compares 'confidence', but "
+                f"{atom.name!r} is answered by model {processor.model!r} "
+                f"(provider {backend!r}); only provider 'jev' ever populates "
+                "'confidence' (jev-provider-plan §5) -- this condition could "
+                "never resolve"
+            )
+        return
     if atom.field != "value" or atom.op not in ("==", "!="):
         return
     if not isinstance(atom.value, str):
@@ -976,7 +1002,9 @@ class Config(BaseModel):
             for rule in task.rules:
                 for atom in _collect_processor_atoms(rule.when):
                     if atom.name in self.processors:
-                        _validate_processor_atom(atom, processors=self.processors)
+                        _validate_processor_atom(
+                            atom, processors=self.processors, models=self.models
+                        )
 
         for target in sorted(routed_targets):
             if target not in self.tasks:

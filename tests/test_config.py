@@ -1146,17 +1146,50 @@ def test_noul_processor_atom_value_must_be_boolean_string(tmp_path: Path) -> Non
         load_config(path)
 
 
-def test_confidence_field_not_checked_against_vocabulary(tmp_path: Path) -> None:
+def test_confidence_field_against_jev_processor_not_checked_against_vocabulary(
+    tmp_path: Path,
+) -> None:
     """Only `.value` equality/inequality is checked against a declared
-    vocabulary; `.confidence` is a plain float with nothing to validate
-    against."""
+    vocabulary; `.confidence` on a `provider: jev` processor is a plain
+    float with nothing to validate against (and jev always populates
+    it, jev-provider-plan §5)."""
+    data = make_config_dict()
+    data["models"]["jev-primary"] = {
+        "provider": "jev",
+        "base_url": "https://jev.example.com/v1/systemone",
+        "model": "jev-latest",
+        "api_key": "secret",
+        "mails_per_request": 1,
+    }
+    data["processors"] = {
+        "urgency": {
+            "model": "jev-primary",
+            "type": "score",
+            "levels": ["low", "high"],
+        }
+    }
+    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
+        {"processor": "urgency.confidence >= 0.5"}
+    ]
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["move_to:Archive"]
+    path = write_config(tmp_path / "cfg.yaml", data)
+    load_config(path)  # should not raise
+
+
+def test_confidence_field_against_chat_processor_rejected(tmp_path: Path) -> None:
+    """jev-provider-plan §9: 'field: confidence' only ever resolves for a
+    `provider: jev` processor -- a chat-backed processor's compiled
+    schema never includes it (`prompt.py`'s `_answer_value_schema` emits
+    only `value`), so this must be a load-time `ConfigError`, not a rule
+    that silently sits at `Tri.UNKNOWN` forever."""
     processors = {
         "urgency": {"model": "local", "type": "score", "levels": ["low", "high"]}
     }
     path = _processors_config(
         tmp_path, processors, [{"processor": "urgency.confidence >= 0.5"}]
     )
-    load_config(path)  # should not raise
+    with pytest.raises(ConfigError, match="confidence"):
+        load_config(path)
 
 
 # --- `task:<id>` routing cross-references (jev-provider-plan §7) -----------

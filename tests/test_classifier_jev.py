@@ -93,6 +93,39 @@ def test_confidence_and_value_pass_through_untouched_for_each_type() -> None:
     assert answers["spam-category"].value == "spam"
 
 
+def test_question_included_in_request_body_when_set() -> None:
+    """jev-provider-plan §2's own worked examples set `question:` on a
+    `choice`/`score` processor alongside `options`/`levels` -- it must
+    reach the wire, not be silently dropped."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"value": "spam", "confidence": 0.9})
+
+    processor = OfferedProcessor(
+        name="spam-category",
+        type="choice",
+        question="What kind of mail is this?",
+        options={"spam": "d1", "personal": "d2"},
+    )
+    clf = JevClassifier(_config(), client=_client(handler))
+    clf.classify([CANDIDATE], [processor])
+    assert captured["question"] == "What kind of mail is this?"
+
+
+def test_question_omitted_from_request_body_when_unset() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"value": "spam", "confidence": 0.9})
+
+    clf = JevClassifier(_config(), client=_client(handler))
+    clf.classify([CANDIDATE], [SPAM_PROCESSOR])
+    assert "question" not in captured
+
+
 def test_mails_per_request_must_be_one() -> None:
     """Enforced at config load (`config.py`'s provider-requirements
     check) -- `JevClassifier.__init__`'s own check is a defensive

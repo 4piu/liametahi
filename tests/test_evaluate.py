@@ -365,6 +365,55 @@ def test_answer_value_outside_declared_vocabulary_is_rejected(tmp_path: Path) ->
     assert result.status == "no_match"
 
 
+def test_answer_confidence_outside_zero_one_is_rejected(tmp_path: Path) -> None:
+    """An out-of-range `confidence` (e.g. a misbehaving or hostile
+    backend returning `999.0`) must not be trusted -- it could otherwise
+    make a `processor: "name.confidence >= 0.85"` condition spuriously
+    TRUE for every candidate regardless of the model's actual certainty."""
+    conn, account_id = _setup(tmp_path)
+    run_id = _new_run(conn, account_id)
+    processors: dict[str, dict[str, object]] = {
+        "spam-category": {
+            "model": "m",
+            "type": "choice",
+            "options": {"spam": "d", "personal": "d"},
+        }
+    }
+    config = _config(
+        [
+            {
+                "when": {"processor": "spam-category.value == spam"},
+                "actions": ["move_to:Archive"],
+            }
+        ],
+        processors=processors,
+    )
+    task = config.tasks["t"]
+    cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "x" * 60)
+    cid = state.upsert_candidate(conn, cand)
+
+    fc = FakeClassifier(
+        [
+            outcome_with_answers(
+                answers_by_payload={
+                    "c1": {"spam-category": ProcessorAnswer("spam", 999.0)}
+                }
+            )
+        ]
+    )
+    result = _evaluate(
+        conn,
+        account_id=account_id,
+        run_id=run_id,
+        task=task,
+        config=config,
+        classifier=fc,
+        candidates=[(cid, cand)],
+    ).results[0]
+    assert result.matches == ()
+    assert result.status == "no_match"
+
+
 # =========================================================================
 # Both a match and a non-match are cached, each tagged with which they
 # were (spec §13): a re-run reuses either answer without asking again.

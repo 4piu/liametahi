@@ -285,6 +285,19 @@ def test_processor_hash_stable_for_identical_definition() -> None:
     ) == prompt.compute_processor_hash(_choice_processor())
 
 
+def test_processor_hash_changes_when_question_edited() -> None:
+    a = OfferedProcessor(
+        name="urgency", type="score", question="How urgent?", levels=("low", "high")
+    )
+    b = OfferedProcessor(
+        name="urgency",
+        type="score",
+        question="How urgent is this really?",
+        levels=("low", "high"),
+    )
+    assert prompt.compute_processor_hash(a) != prompt.compute_processor_hash(b)
+
+
 def test_processor_hash_ignores_name() -> None:
     """The hash is over the processor's own declared shape, not its
     config key -- renaming a processor without changing its definition
@@ -319,6 +332,44 @@ def test_build_request_payload_includes_candidate_id_field() -> None:
     assert isinstance(candidates, list)
     assert candidates[0]["id"] == "c1"
     assert candidates[0]["subject"] == "hi"
+
+
+def test_build_request_payload_includes_question_for_choice_and_score() -> None:
+    """jev-provider-plan §2's own worked examples set `question:` on a
+    `choice` and a `score` processor alongside `options`/`levels` -- it
+    is framing text, not shorthand only meaningful for `noul`, so a chat
+    request must actually carry it through to the model."""
+    processors = [
+        OfferedProcessor(
+            name="spam-category",
+            type="choice",
+            question="What kind of mail is this?",
+            options={"spam": "d"},
+        ),
+        OfferedProcessor(
+            name="urgency",
+            type="score",
+            question="How urgent is this message?",
+            levels=("low", "high"),
+        ),
+    ]
+    payloads = [CandidatePayload(payload_id="c1", fields={})]
+    request = prompt.build_request_payload(payloads, processors)
+    offered = request["processors"]
+    assert isinstance(offered, dict)
+    assert offered["spam-category"]["question"] == "What kind of mail is this?"
+    assert offered["urgency"]["question"] == "How urgent is this message?"
+
+
+def test_build_request_payload_omits_question_when_unset() -> None:
+    processors = [
+        OfferedProcessor(name="urgency", type="score", levels=("low", "high"))
+    ]
+    payloads = [CandidatePayload(payload_id="c1", fields={})]
+    request = prompt.build_request_payload(payloads, processors)
+    offered = request["processors"]
+    assert isinstance(offered, dict)
+    assert "question" not in offered["urgency"]
 
 
 # --- Response schema (jev-provider-plan §5) --------------------------------

@@ -134,6 +134,7 @@ def _offered_processor(name: str, cfg: ProcessorConfig) -> OfferedProcessor:
     return OfferedProcessor(
         name=name,
         type=cfg.type,
+        question=cfg.question,
         criteria=cfg.criteria,
         options=cfg.options,
         levels=tuple(cfg.levels) if cfg.levels else None,
@@ -819,7 +820,16 @@ def _validate_answer(cfg: ProcessorConfig, answer: ProcessorAnswer) -> bool:
     """An answer is untrusted until its `value` is checked against the
     processor's own declared vocabulary -- exactly the boundary
     `classifier/__init__.py`'s module docstring requires: never let an
-    adapter response widen what an action may do."""
+    adapter response widen what an action may do.
+
+    `confidence` gets the same treatment: it is a calibrated probability
+    (jev-provider-plan §5), so anything outside `[0, 1]` is not a value
+    jev or a well-formed chat schema would ever produce -- a malformed
+    or hostile `confidence` (e.g. `999.0`) must not be allowed to make a
+    `processor: "name.confidence >= 0.85"` condition spuriously TRUE for
+    every candidate."""
+    if answer.confidence is not None and not 0.0 <= answer.confidence <= 1.0:
+        return False
     if cfg.type == "noul":
         return isinstance(answer.value, bool)
     if cfg.type == "choice":

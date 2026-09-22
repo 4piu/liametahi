@@ -80,40 +80,41 @@ def _not(child: _TestNode) -> NotNode:
     return NotNode(child)  # type: ignore[arg-type]
 
 
+@pytest.fixture(autouse=True)
+def _patch_fixed_atom_leaf(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route a `_FixedAtom` leaf through the real `rules.evaluate()` so
+    the exhaustive Kleene tests below exercise the production
+    `AllNode`/`AnyNode`/`NoneNode`/`NotNode` composition branches
+    directly, instead of a hand-written reimplementation of them that a
+    real bug in `rules.py` could drift from unnoticed. Only the
+    atom-leaf dispatch (`_eval_atom`) is stubbed; every composition
+    branch runs unmodified."""
+    original_eval_atom = rules._eval_atom
+
+    def _patched(
+        atom: object,
+        candidate: object,
+        *,
+        now: datetime,
+        processor_values: object,
+    ) -> Tri:
+        if isinstance(atom, _FixedAtom):
+            return atom.value
+        return original_eval_atom(
+            atom,  # type: ignore[arg-type]
+            candidate,  # type: ignore[arg-type]
+            now=now,
+            processor_values=processor_values,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(rules, "_eval_atom", _patched)
+
+
 def _evaluate_with_fixed(node: _TestNode, *, now: datetime) -> Tri:
-    """Evaluate a tree that may contain `_FixedAtom` leaves, reusing the
-    real `evaluate()` composition logic by monkeypatching-free recursion."""
-    if isinstance(node, _FixedAtom):
-        return node.value
-    if isinstance(node, AllNode):
-        results = [_evaluate_with_fixed(c, now=now) for c in node.children]
-        if any(r is Tri.FALSE for r in results):
-            return Tri.FALSE
-        if all(r is Tri.TRUE for r in results):
-            return Tri.TRUE
-        return Tri.UNKNOWN
-    if isinstance(node, AnyNode):
-        results = [_evaluate_with_fixed(c, now=now) for c in node.children]
-        if any(r is Tri.TRUE for r in results):
-            return Tri.TRUE
-        if all(r is Tri.FALSE for r in results):
-            return Tri.FALSE
-        return Tri.UNKNOWN
-    if isinstance(node, NoneNode):
-        results = [_evaluate_with_fixed(c, now=now) for c in node.children]
-        if any(r is Tri.TRUE for r in results):
-            return Tri.FALSE
-        if all(r is Tri.FALSE for r in results):
-            return Tri.TRUE
-        return Tri.UNKNOWN
-    if isinstance(node, NotNode):
-        inner = _evaluate_with_fixed(node.child, now=now)
-        if inner is Tri.TRUE:
-            return Tri.FALSE
-        if inner is Tri.FALSE:
-            return Tri.TRUE
-        return Tri.UNKNOWN
-    raise AssertionError(f"unexpected node {node!r}")
+    """Evaluate a tree that may contain `_FixedAtom` leaves through the
+    real `rules.evaluate()` (see `_patch_fixed_atom_leaf` above -- the
+    composition logic itself is never reimplemented here)."""
+    return evaluate(node, make_candidate(), now=now)  # type: ignore[arg-type]
 
 
 TRI_VALUES = (Tri.TRUE, Tri.FALSE, Tri.UNKNOWN)

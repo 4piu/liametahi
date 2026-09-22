@@ -236,13 +236,14 @@ def compute_input_hash(
 def compute_processor_hash(processor: OfferedProcessor) -> str:
     """sha256 of a processor's own declared definition — the
     `processor_hash` half of the §13 cache key (analogous to the old
-    per-rule `rule_text_hash`). Changing a processor's `type`,
+    per-rule `rule_text_hash`). Changing a processor's `type`, `question`,
     `criteria`/`options`/`levels`, or `include_body` changes this hash,
     which is what makes an edited processor's cached decisions invalidate
     automatically."""
     canonical = json.dumps(
         {
             "type": processor.type,
+            "question": processor.question,
             "criteria": dict(processor.criteria) if processor.criteria else None,
             "options": dict(processor.options) if processor.options else None,
             "levels": list(processor.levels) if processor.levels else None,
@@ -330,6 +331,8 @@ def build_excerpt_payload(
 
 def _processor_definition_json(processor: OfferedProcessor) -> dict[str, object]:
     entry: dict[str, object] = {"type": processor.type}
+    if processor.question is not None:
+        entry["question"] = processor.question
     if processor.criteria is not None:
         entry["criteria"] = dict(processor.criteria)
     if processor.options is not None:

@@ -46,14 +46,20 @@ __all__ = [
 @dataclass(frozen=True, slots=True)
 class OfferedProcessor:
     """One processor offered to the model for a batch: its name and
-    enough of its declared shape (`type` plus `criteria`/`options`/
-    `levels`) for an adapter to compile a request/schema from (`jev.py`
-    maps these straight onto its `noul`/`choice`/`score` request shape;
-    `prompt.py` compiles the same fields into a chat prompt + JSON
-    schema for the other two providers)."""
+    enough of its declared shape (`type`, the optional natural-language
+    `question`, plus `criteria`/`options`/`levels`) for an adapter to
+    compile a request/schema from (`jev.py` maps these straight onto its
+    `noul`/`choice`/`score` request shape; `prompt.py` compiles the same
+    fields into a chat prompt + JSON schema for the other two
+    providers). `question` is optional framing text alongside the
+    vocabulary fields, not shorthand for them (jev-provider-plan §2's
+    `spam-category`/`urgency` examples set both `question` and
+    `options`/`levels` on the same processor) -- it is folded into
+    `criteria.true` only for the `noul` plain-string shorthand."""
 
     name: str
     type: str  # "noul" | "choice" | "score"
+    question: str | None = None
     criteria: Mapping[str, str] | None = None
     options: Mapping[str, str] | None = None
     levels: tuple[str, ...] | None = None

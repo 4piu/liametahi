@@ -37,10 +37,11 @@ immediately with no retry: retrying a `401`/`422` can never succeed and
 only wastes the retry budget that would otherwise be available for a
 genuine `429`/`529`.
 
-The wire shape below (`POST` body: `model`/`type`/`criteria`-or-`options`-
-or-`levels`/`input`; response body: `{"value": ..., "confidence": ...}`)
-is this project's own design choice, since jev-provider-plan does not pin
-one — documented as an explicit assumption in the final report.
+The wire shape below (`POST` body: `model`/`type`/optional `question`/
+`criteria`-or-`options`-or-`levels`/`input`; response body:
+`{"value": ..., "confidence": ...}`) is this project's own design choice,
+since jev-provider-plan does not pin one — documented as an explicit
+assumption in the final report.
 """
 
 import time
@@ -145,6 +146,8 @@ class JevClassifier:
             "type": processor.type,
             "input": dict(candidate.fields),
         }
+        if processor.question is not None:
+            body["question"] = processor.question
         if processor.type == "noul":
             body["criteria"] = dict(processor.criteria or {})
         elif processor.type == "choice":
