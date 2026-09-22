@@ -36,21 +36,6 @@ mailbox. Never run in CI.
 ## Testing against a real mailbox without touching it twice
 
 ```sh
-uv sync --all-groups
-
-uv run ruff format --check .
-uv run ruff check .
-uv run mypy --strict src/liametahi tests
-uv run pytest                    # unit + integration; integration auto-skips without Docker
-uv run pytest -m integration     # only the Docker-backed IMAP tests (Dovecot)
-```
-
-The `live` marker (`LIAMETAHI_LIVE=1 uv run pytest -m live`) exercises a real
-mailbox and is never run in CI.
-
-### Testing against a real mailbox without touching it twice
-
-```sh
 # Once: pull a corpus from a real account, read-only, into local .eml files.
 uv run tools/capture_corpus.py --host imap.gmail.com --username you@gmail.com \
     --limit 200 --out tests/corpus/mine

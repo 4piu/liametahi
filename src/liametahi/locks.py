@@ -73,8 +73,7 @@ def task_lock(
     """
     if not math.isfinite(wait_seconds) or wait_seconds < 0:
         raise ValueError(
-            "wait_seconds must be a finite, non-negative number of seconds "
-            "(spec §10: the wait is always bounded)"
+            "wait_seconds must be a finite, non-negative number of seconds"
         )
     lock_dir.mkdir(parents=True, exist_ok=True)
     path = lock_path(lock_dir, config_path, task)

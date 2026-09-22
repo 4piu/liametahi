@@ -536,7 +536,7 @@ def _validate_actions(
             if _LABEL_FORBIDDEN_RE.search(keyword):
                 raise ConfigError(
                     f"{rule_label}: label keyword {keyword!r} is not a "
-                    'valid IMAP atom (no spaces or ( ) { % * " \\ ]) (spec §7.3)'
+                    'valid IMAP atom (no spaces or ( ) { % * " \\ ])'
                 )
             remote_mutations += 1
             continue
@@ -548,18 +548,17 @@ def _validate_actions(
         raise ConfigError(
             f"{rule_label}: unknown action {action!r}; expected one of "
             "'backup', 'trash', 'move_to:<mailbox>', 'label:<keyword>', "
-            "'task:<id>' (spec §7.4; jev-provider-plan §7)"
+            "'task:<id>'"
         )
     if remote_mutations > 1:
         raise ConfigError(
             f"{rule_label}: at most one remote mutation "
-            "(trash / move_to / label) is allowed per rule's action list "
-            "(spec §7.3)"
+            "(trash / move_to / label) is allowed per rule's action list"
         )
     if "trash" in actions and not has_deterministic_atom(when):
         raise ConfigError(
             f"{rule_label}: a rule whose actions include 'trash' must "
-            "contain at least one deterministic condition (spec §5.2)"
+            "contain at least one deterministic condition"
         )
 
 
@@ -677,10 +676,10 @@ class ModelConfig(BaseModel):
                 raise ConfigError("models: 'api_key' is required for provider 'jev'")
             if self.mails_per_request != 1:
                 raise ConfigError(
-                    "models: 'mails_per_request' must be 1 for provider 'jev' "
-                    "(jev-provider-plan §11): jev answers one candidate per "
-                    "HTTP call, never a batch. Use 'max_concurrent_requests' "
-                    "to raise real throughput instead."
+                    "models: 'mails_per_request' must be 1 for provider 'jev': "
+                    "jev answers one candidate per HTTP call, never a batch. "
+                    "Use 'max_concurrent_requests' to raise real throughput "
+                    "instead."
                 )
         return self
 
@@ -880,8 +879,7 @@ def _validate_processor_atom(
                 f"{atom.op} {atom.value}\"' compares 'confidence', but "
                 f"{atom.name!r} is answered by model {processor.model!r} "
                 f"(provider {backend!r}); only provider 'jev' ever populates "
-                "'confidence' (jev-provider-plan §5) -- this condition could "
-                "never resolve"
+                "'confidence' -- this condition could never resolve"
             )
         return
     if atom.field != "value" or atom.op not in ("==", "!="):
@@ -933,9 +931,7 @@ def _check_routing_acyclic(edges: Mapping[str, frozenset[str]]) -> None:
                 continue
             if color[neighbor] == GRAY:
                 cycle = " -> ".join([*path, neighbor])
-                raise ConfigError(
-                    f"'task:' routing forms a cycle: {cycle} (jev-provider-plan §7)"
-                )
+                raise ConfigError(f"'task:' routing forms a cycle: {cycle}")
             if color[neighbor] == WHITE:
                 visit(neighbor, (*path, neighbor))
         color[node] = BLACK
@@ -982,8 +978,7 @@ class Config(BaseModel):
             if self.accounts[account_name].trash_mailbox is None:
                 raise ConfigError(
                     f"account {account_name!r} is used by a task with a "
-                    "'trash' action but has no 'trash_mailbox' configured "
-                    "(spec §6)"
+                    "'trash' action but has no 'trash_mailbox' configured"
                 )
 
         for name in sorted(referenced_processors):
@@ -1020,8 +1015,8 @@ class Config(BaseModel):
                 raise ConfigError(
                     f"task {task_name!r} has no candidate source: it has no "
                     "'source_mailboxes' and is never the target of a "
-                    "'task:<id>' action anywhere in the config "
-                    "(jev-provider-plan §7) -- it can never run"
+                    "'task:<id>' action anywhere in the config -- it can "
+                    "never run"
                 )
         return self
 
@@ -1058,14 +1053,14 @@ def check_file_permissions(path: Path) -> None:
             f"config file {path} is owned by uid {st.st_uid}, not the "
             f"invoking user (uid {invoking_uid}); refusing to read a "
             "config file containing credentials that another user placed "
-            "or could modify (spec §12)"
+            "or could modify"
         )
     mode = stat.S_IMODE(st.st_mode)
     if mode & _UNSAFE_MODE_BITS:
         print(
             f"warning: config file {path} has mode {oct(mode)}, which "
             "grants group or other access; it contains literal credentials "
-            f"(spec §12) — run 'chmod 600 {path}'",
+            f"-- run 'chmod 600 {path}'",
             file=sys.stderr,
         )
 

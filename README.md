@@ -66,7 +66,7 @@ interrupted, `4` auth failure, `5` task already running — cron-safe:
 ```sh
 cp config.example.yaml config.yaml
 $EDITOR config.yaml    # at least an account and a model
-chmod 600 config.yaml  # it holds literal credentials once filled in
+chmod 600 config.yaml
 
 uv run liametahi config check --connect
 uv run liametahi run inbox-classify --dry-run --verbose  # preview, no mutation
