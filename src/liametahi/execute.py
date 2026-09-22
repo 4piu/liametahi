@@ -466,9 +466,12 @@ def _run_action_sequence(
 ) -> tuple[ItemStatus, str | None]:
     """spec section 4.3 points 6-7 / spec's non-negotiables: run actions
     strictly in order; the single remote mutation only after every
-    preceding action in the sequence succeeded; `trash` never mutates
-    without a prior successful backup in *this* sequence unless the
-    rule set `allow_trash_without_backup`."""
+    preceding action in the sequence succeeded. Backup-before-trash is no
+    longer mandatory (jev-provider-plan §8): `policy.resolve_actions`
+    always sets `requires_prior_backup=False` now, so the check below
+    only ever fires if a future rule change reintroduces it.
+    `task:<id>` (jev-provider-plan §7) is local-only bookkeeping, handled
+    in its own branch below, never treated as a remote mutation."""
     backup_completed = False
     aborted = False
     final_status: ItemStatus = "completed"
@@ -551,6 +554,25 @@ def _run_action_sequence(
                 run_id,
                 result.backup_id,
                 item.key.render(),
+            )
+            continue
+
+        if action.kind == "task":
+            # jev-provider-plan §7: local-only, never an IMAP mutation.
+            # `record_task_route` is itself idempotent on
+            # (account_id, fingerprint, target_task) -- the same rule
+            # matching again on a later run writes no second row -- so
+            # there is nothing else to check before marking this
+            # "action" completed.
+            assert action.destination is not None
+            state.record_task_route(
+                conn,
+                account_id=item.key.account_id,
+                fingerprint=item.fingerprint,
+                target_task=action.destination,
+            )
+            state.update_action_attempt_state(
+                conn, attempt_id=attempt_id, state="completed", finished=True
             )
             continue
 

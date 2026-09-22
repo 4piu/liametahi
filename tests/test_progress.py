@@ -14,8 +14,9 @@ from pathlib import Path
 from liametahi import runner as runner_mod
 from liametahi.config import load_config
 from liametahi.progress import NullProgress, TtyProgress
+from liametahi.rules import ProcessorAnswer
 from tests.conftest import make_config_dict, write_config
-from tests.fakes.fake_classifier import FakeClassifier, outcome_with_matches
+from tests.fakes.fake_classifier import FakeClassifier, outcome_with_answers
 from tests.fakes.fake_mailbox import FakeMailbox, _StoredMessage
 
 MESSAGE_ID = "<p1@example.com>"
@@ -98,9 +99,12 @@ def _config(tmp_path: Path) -> Path:
         "backup_dir": str(tmp_path / "backups"),
         "task_lock_dir": str(tmp_path / "locks"),
     }
+    data["processors"] = {
+        "junk-check": {"model": "local", "type": "noul", "question": "junk?"},
+    }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
         {"older-than": "1h"},
-        {"llm": "junk?"},
+        {"processor": "junk-check.value == true"},
     ]
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["backup", "trash"]
     return write_config(tmp_path / "cfg.yaml", data)
@@ -134,8 +138,11 @@ def test_a_run_reports_its_long_phases(tmp_path: Path) -> None:
     reporter = RecordingProgress()
     clf = FakeClassifier(
         [
-            outcome_with_matches(
-                matches_by_payload={f"c{i}": ["old-weekly-digest"] for i in range(1, 4)}
+            outcome_with_answers(
+                answers_by_payload={
+                    f"c{i}": {"junk-check": ProcessorAnswer(True, None)}
+                    for i in range(1, 4)
+                }
             )
         ]
     )
@@ -170,7 +177,11 @@ def test_a_run_without_a_reporter_still_works(tmp_path: Path) -> None:
     path = _config(tmp_path)
     cfg = load_config(path)
     clf = FakeClassifier(
-        [outcome_with_matches(matches_by_payload={"c1": ["old-weekly-digest"]})]
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+            )
+        ]
     )
     outcome = runner_mod.run_task(
         config=cfg,
@@ -246,15 +257,15 @@ def test_classification_counts_mails_not_batches(tmp_path: Path) -> None:
     cfg = load_config(path)
     reporter = RecordingProgress()
     mails = 25  # > one batch of 10, so batches and mails cannot coincide
+
+    def _batch(ids: range) -> dict[str, dict[str, ProcessorAnswer]]:
+        return {f"c{i}": {"junk-check": ProcessorAnswer(False, None)} for i in ids}
+
     clf = FakeClassifier(
         [
-            outcome_with_matches(
-                matches_by_payload={f"c{i}": [] for i in range(1, 11)}
-            ),
-            outcome_with_matches(
-                matches_by_payload={f"c{i}": [] for i in range(1, 11)}
-            ),
-            outcome_with_matches(matches_by_payload={f"c{i}": [] for i in range(1, 6)}),
+            outcome_with_answers(answers_by_payload=_batch(range(1, 11))),
+            outcome_with_answers(answers_by_payload=_batch(range(1, 11))),
+            outcome_with_answers(answers_by_payload=_batch(range(1, 6))),
         ]
     )
     runner_mod.run_task(

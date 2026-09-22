@@ -23,13 +23,13 @@ from collections.abc import Sequence
 
 import httpx
 
-from liametahi.classifier import CandidatePayload, ClassifyOutcome, OfferedRule
+from liametahi.classifier import CandidatePayload, ClassifyOutcome, OfferedProcessor
 from liametahi.config import ModelConfig
 from liametahi.logging import get_logger
 from liametahi.prompt import (
-    RESPONSE_JSON_SCHEMA,
     SYSTEM_PROMPT,
     build_request_payload,
+    build_response_schema,
     parse_classification_response,
 )
 
@@ -71,10 +71,13 @@ class OpenAICompatibleClassifier:
         )
 
     def classify(
-        self, candidates: Sequence[CandidatePayload], rules: Sequence[OfferedRule]
+        self,
+        candidates: Sequence[CandidatePayload],
+        processors: Sequence[OfferedProcessor],
     ) -> ClassifyOutcome:
         requested_ids = [c.payload_id for c in candidates]
-        user_content = json.dumps(build_request_payload(candidates, rules))
+        user_content = json.dumps(build_request_payload(candidates, processors))
+        response_schema = build_response_schema(processors)
         last_error: Exception | None = None
 
         for level in self._levels_to_try():
@@ -92,7 +95,7 @@ class OpenAICompatibleClassifier:
                     "type": "json_schema",
                     "json_schema": {
                         "name": "classification_response",
-                        "schema": RESPONSE_JSON_SCHEMA,
+                        "schema": response_schema,
                         "strict": True,
                     },
                 }

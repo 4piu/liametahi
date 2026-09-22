@@ -14,12 +14,14 @@ import anthropic
 import httpx
 import pytest
 
-from liametahi.classifier import CandidatePayload, OfferedRule
+from liametahi.classifier import CandidatePayload, OfferedProcessor
 from liametahi.classifier.anthropic import AnthropicClassifier, TransportError
 from liametahi.config import ModelConfig
 
-CANDIDATE = CandidatePayload(payload_id="c1", fields={"subject": "hi"}, offered=("r1",))
-RULES = [OfferedRule(rule_id="r1", description="d1")]
+CANDIDATE = CandidatePayload(payload_id="c1", fields={"subject": "hi"})
+PROCESSORS = [
+    OfferedProcessor(name="spam-category", type="choice", options={"spam": "d1"})
+]
 
 
 def _config(**overrides: object) -> ModelConfig:
@@ -86,7 +88,7 @@ def test_system_prompt_is_top_level_not_a_message() -> None:
         return _ok_response([])
 
     clf = AnthropicClassifier(_config(), client=_anthropic_client(handler))
-    clf.classify([CANDIDATE], RULES)
+    clf.classify([CANDIDATE], PROCESSORS)
 
     body = bodies[0]
     assert "system" in body
@@ -104,7 +106,7 @@ def test_max_tokens_always_sent() -> None:
         return _ok_response([])
 
     clf = AnthropicClassifier(_config(), client=_anthropic_client(handler))
-    clf.classify([CANDIDATE], RULES)
+    clf.classify([CANDIDATE], PROCESSORS)
     assert isinstance(bodies[0]["max_tokens"], int)
     assert bodies[0]["max_tokens"] > 0
 
@@ -120,7 +122,7 @@ def test_temperature_is_never_sent() -> None:
         return _ok_response([])
 
     clf = AnthropicClassifier(_config(), client=_anthropic_client(handler))
-    clf.classify([CANDIDATE], RULES)
+    clf.classify([CANDIDATE], PROCESSORS)
     assert "temperature" not in bodies[0]
 
 
@@ -132,12 +134,12 @@ def test_user_content_carries_the_canonical_request_payload() -> None:
         return _ok_response([])
 
     clf = AnthropicClassifier(_config(), client=_anthropic_client(handler))
-    clf.classify([CANDIDATE], RULES)
+    clf.classify([CANDIDATE], PROCESSORS)
     messages = bodies[0]["messages"]
     assert isinstance(messages, list)
     user_content = json.loads(messages[0]["content"])
     assert user_content["candidates"][0]["id"] == "c1"
-    assert user_content["offered_rules"]["c1"][0]["id"] == "r1"
+    assert user_content["processors"]["spam-category"]["type"] == "choice"
 
 
 # --- Structured-output degradation ladder (spec section 8.1, 8.2) ---------
@@ -151,7 +153,7 @@ def test_auto_tries_schema_first_and_succeeds() -> None:
         return _ok_response([])
 
     clf = AnthropicClassifier(_config(), client=_anthropic_client(handler))
-    outcome = clf.classify([CANDIDATE], RULES)
+    outcome = clf.classify([CANDIDATE], PROCESSORS)
     assert outcome.structured_output_level == "json_schema"
     assert "output_config" in bodies[0]
 
@@ -167,7 +169,7 @@ def test_auto_degrades_to_unstructured_when_schema_rejected() -> None:
         return _ok_response([])
 
     clf = AnthropicClassifier(_config(), client=_anthropic_client(handler))
-    outcome = clf.classify([CANDIDATE], RULES)
+    outcome = clf.classify([CANDIDATE], PROCESSORS)
     assert outcome.structured_output_level == "none"
     assert len(bodies) == 2
     assert "output_config" in bodies[0]
@@ -191,7 +193,7 @@ def test_fixed_json_schema_does_not_fall_back_on_rejection() -> None:
         _config(structured_output="json_schema"), client=_anthropic_client(handler)
     )
     with pytest.raises(TransportError):
-        clf.classify([CANDIDATE], RULES)
+        clf.classify([CANDIDATE], PROCESSORS)
     assert attempts == 1
 
 
@@ -205,7 +207,7 @@ def test_structured_output_none_sends_no_output_config() -> None:
     clf = AnthropicClassifier(
         _config(structured_output="none"), client=_anthropic_client(handler)
     )
-    outcome = clf.classify([CANDIDATE], RULES)
+    outcome = clf.classify([CANDIDATE], PROCESSORS)
     assert outcome.structured_output_level == "none"
     assert "output_config" not in bodies[0]
 
@@ -216,7 +218,7 @@ def test_auto_raises_when_both_schema_and_fallback_are_rejected() -> None:
 
     clf = AnthropicClassifier(_config(), client=_anthropic_client(handler))
     with pytest.raises(TransportError):
-        clf.classify([CANDIDATE], RULES)
+        clf.classify([CANDIDATE], PROCESSORS)
 
 
 def test_connection_error_raises_transport_error_without_retrying_schema() -> None:
@@ -225,7 +227,7 @@ def test_connection_error_raises_transport_error_without_retrying_schema() -> No
 
     clf = AnthropicClassifier(_config(), client=_anthropic_client(handler))
     with pytest.raises(TransportError):
-        clf.classify([CANDIDATE], RULES)
+        clf.classify([CANDIDATE], PROCESSORS)
 
 
 # --- Response extraction --------------------------------------------------
@@ -236,32 +238,32 @@ def test_usage_extracted_from_message() -> None:
         return _ok_response([])
 
     clf = AnthropicClassifier(_config(), client=_anthropic_client(handler))
-    outcome = clf.classify([CANDIDATE], RULES)
+    outcome = clf.classify([CANDIDATE], PROCESSORS)
     assert outcome.input_tokens == 9
     assert outcome.output_tokens == 3
 
 
 def test_response_content_passed_through_to_structural_parser_unvalidated() -> None:
     """As with the openai_compatible adapter, semantic validation must
-    not happen here -- an unoffered rule id must survive intact into the
-    returned `ClassifyOutcome` for `evaluate.py` to reject (contracts
-    section 5.3)."""
+    not happen here -- an unoffered processor name must survive intact
+    into the returned `ClassifyOutcome` for `evaluate.py` to reject
+    (contracts section 5.3)."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return _ok_response(
             [
                 {
                     "candidate": "c1",
-                    "matches": ["never-offered"],
+                    "answers": {"never-offered": {"value": "anything"}},
                 }
             ]
         )
 
     clf = AnthropicClassifier(_config(), client=_anthropic_client(handler))
-    outcome = clf.classify([CANDIDATE], RULES)
+    outcome = clf.classify([CANDIDATE], PROCESSORS)
     assert len(outcome.results) == 1
-    match = outcome.results[0].matches[0]
-    assert match == "never-offered"
+    answer = outcome.results[0].answers["never-offered"]
+    assert answer.value == "anything"
 
 
 def test_empty_content_blocks_yield_wholly_invalid_not_a_crash() -> None:
@@ -281,6 +283,6 @@ def test_empty_content_blocks_yield_wholly_invalid_not_a_crash() -> None:
         )
 
     clf = AnthropicClassifier(_config(), client=_anthropic_client(handler))
-    outcome = clf.classify([CANDIDATE], RULES)
+    outcome = clf.classify([CANDIDATE], PROCESSORS)
     assert outcome.results == ()
     assert outcome.invalid == ("c1",)

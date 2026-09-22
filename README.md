@@ -1,23 +1,35 @@
 # Liametahi
 
 A local, cron-friendly CLI that cleans up an IMAP mailbox. You describe the
-mail you want gone in plain language; an LLM answers **yes / no / unsure**
-for each rule against each message, and deterministic code does everything
-else.
+mail you want gone as one or more named **processors** — a structured
+question ("is this spam?", "how urgent is this?") answered either by a fast
+decision model (`jev`) or an ordinary chat model — and rules reference those
+processors' answers. Deterministic code does everything else.
 
 ```yaml
-- id: old-digest
-  when:
-    - older-than: 30d
-    - llm: A newsletter or digest with nothing time-sensitive left in it.
-  actions: [backup, trash]
+processors:
+  vibe-check:
+    model: local
+    type: noul
+    question: A newsletter or digest with nothing time-sensitive left in it.
+
+tasks:
+  inbox-cleanup:
+    account: personal
+    source_mailboxes: [INBOX]
+    rules:
+      - when:
+          - older-than: 30d
+          - processor: "vibe-check.value == true"
+        actions: [backup, trash]
 ```
 
-The model never touches your mail. It cannot invent an action, name a rule
-you did not write, or return anything outside the closed list it was offered
-for that one message — it only classifies, and a separate phase decides what
-to do and does it. Every destructive action is backed up first and is
-restorable.
+The model never touches your mail. It cannot invent an action, name a
+processor you did not declare, or return an answer outside the closed
+vocabulary (options/levels) it was offered — it only answers the question a
+processor asks, and a separate phase decides what to do and does it. A
+destructive action can be backed up first and restored; nothing requires it,
+but nothing stops you from asking for it either.
 
 That matters because the alternative approaches both fail: deleting years of
 accumulated notifications by hand is tedious, and a rigid filter misses
@@ -26,9 +38,9 @@ everything that does not match a pattern you thought of in advance.
 ## Install
 
 Needs Python ≥ 3.14, [`uv`](https://docs.astral.sh/uv/), an IMAP account, and
-an LLM endpoint — an OpenAI-compatible one (including a local
-[llama.cpp](https://github.com/ggml-org/llama.cpp) server), Anthropic, or
-OpenRouter.
+a model endpoint — an OpenAI-compatible one (including a local
+[llama.cpp](https://github.com/ggml-org/llama.cpp) server), Anthropic,
+OpenRouter, or a `jev` structured-decision endpoint.
 
 ```sh
 uv sync
@@ -83,32 +95,40 @@ models:
     base_url: http://127.0.0.1:8080/v1/chat/completions
     model: qwen2.5-7b-instruct
 
+processors:
+  stale-update:
+    model: local
+    type: noul
+    question: >
+      An automated notification, receipt, or update that is safe to discard,
+      except bills, account-security notices, or mail that asks the
+      recipient to act.
+
 tasks:
   inbox-cleanup:
     account: personal
-    model: local
     source_mailboxes: [INBOX]
     protect:
       flags: ['\Flagged', '\Answered']
       unread: true
     rules:
-      - id: old-digest
-        priority: 100
-        when:
+      # A rule has no id and no priority: this is a plain list, evaluated
+      # top to bottom, and the first match wins.
+      - when:
           - older-than: 30d
           - list-id-contains: digest
         actions: [backup, trash]
 
-      - id: stale-notifications
-        priority: 10
-        when:
+      - when:
           - older-than: 7d
-          - llm: >
-              An automated notification, receipt, or update that is safe
-              to discard, except bills, account-security notices, or mail
-              that asks the recipient to act.
+          - processor: "stale-update.value == true"
         actions: [backup, trash]
 ```
+
+See [`config.example.yaml`](config.example.yaml) for a fuller,
+two-task example that also uses a `jev` decision model and `task:` routing
+to run an expensive chat model only on the subset of mail a cheap first
+pass left uncertain.
 
 Then:
 
@@ -132,13 +152,18 @@ uv run liametahi restore 4w8w --mailbox INBOX
 
 ## Safety model
 
-- **The LLM never mutates anything.** It classifies; deterministic code
-  decides and acts.
-- **`trash` requires a successful `backup` first** — same message, same run,
-  earlier in the same action list — unless the rule opts out with
-  `allow_trash_without_backup: true`.
-- **A rule that can `trash` must carry a deterministic condition.** An LLM
-  verdict alone is never destructive.
+- **The LLM never mutates anything.** It only answers a processor's
+  question; deterministic code decides and acts.
+- **`backup` is available, not required, before `trash`.** Most IMAP
+  providers already retain trashed mail for some window, so a mandatory
+  local copy was frequently redundant friction. Anyone who wants a
+  tool-restorable local copy still adds `backup` to that rule's own action
+  list.
+- **A rule that can `trash` must carry a deterministic condition.** A
+  processor's answer alone — however confident, whatever model produced it —
+  is never sufficient by itself to delete mail; at least one atom in the
+  rule's `when:` must be a deterministic condition like `older-than` or
+  `in-mailbox`, not a `processor:` atom.
 - **Protection is opt-in.** No `protect:` block means nothing is protected;
   there are no hidden defaults shielding unread or flagged mail.
 - **Protection is re-checked against freshly fetched flags** immediately
@@ -184,17 +209,17 @@ default.
 
 | Key | Description | Default |
 | --- | --- | --- |
-| `provider` * | `openai_compatible` or `anthropic` | — |
-| `base_url` * | Required for `openai_compatible`; the complete Chat Completions endpoint URL, posted to as-is | — |
+| `provider` * | `openai_compatible`, `anthropic`, or `jev` | — |
+| `base_url` * | Required for `openai_compatible` and `jev`; the complete endpoint URL, posted to as-is | — |
 | `model` * | The provider's model identifier | — |
-| `api_key` | Required for `anthropic`; optional for a local `openai_compatible` server | none |
+| `api_key` | Required for `anthropic` and `jev`; optional for a local `openai_compatible` server | none |
 | `extra_headers` | Extra HTTP headers merged into every request | `{}` |
-| `structured_output` | `auto` / `json_schema` / `json_object` / `none` | `auto` |
-| `mails_per_request` | Messages sent to the model per classification call. No upper bound is enforced, but large batches measurably degrade small local models | `10` |
-| `max_concurrent_requests` | Classification requests in flight at once. Raising this is the biggest speed-up available on a first run; how far you can raise it is your provider's rate limit to answer | `1` (serial) |
+| `structured_output` | `auto` / `json_schema` / `json_object` / `none` — ignored for `jev`, which has no separate structured-output negotiation | `auto` |
+| `mails_per_request` | Messages sent to the model per classification call. **Must be exactly `1` for `provider: jev`** — jev answers one candidate per HTTP call, never a batch. No upper bound is enforced for the other providers, but large batches measurably degrade small local models | `10` |
+| `max_concurrent_requests` | Classification requests in flight at once. Raising this is the biggest speed-up available on a first run, including for `jev`; how far you can raise it is your provider's rate limit to answer | `1` (serial) |
 | `timeout_seconds` | Per-request HTTP timeout | `45` |
-| `max_retries` | Transport-error retries — never a rejected response | `2` |
-| `body_excerpt.format` | Excerpt format offered on escalation | `plain_text_excerpt` |
+| `max_retries` | Transport-error retries — never a rejected response, except for `jev`, which also retries `429`/`529` (temporary capacity, not a bad request) | `2` |
+| `body_excerpt.format` | Excerpt format for any processor with `include_body: true` | `plain_text_excerpt` |
 | `body_excerpt.max_chars` | Truncate each body excerpt to this many characters | none (no limit) |
 
 An OpenRouter endpoint is `provider: openai_compatible` with
@@ -202,13 +227,31 @@ An OpenRouter endpoint is `provider: openai_compatible` with
 OpenRouter's namespaced id (`vendor/model`). OpenRouter also accepts optional
 `HTTP-Referer`/`X-Title` attribution headers via `extra_headers`.
 
+### `processors.<name>`
+
+A processor names one question, answered by whichever model it references —
+a chat model gets the same structured question compiled into a prompt; `jev`
+answers it directly. Nothing else in the config gates whether a processor
+runs for a given candidate: that is entirely a consequence of which rules
+reference it (see [Rule conditions](#rule-conditions)'s `processor:` atom)
+and, for cross-task pipelines, the `task:<id>` action below.
+
+| Key | Description | Default |
+| --- | --- | --- |
+| `model` * | Must name an entry in `models` | — |
+| `type` * | `noul` (boolean), `choice` (one of several named options), or `score` (one of an ordered list of levels) | — |
+| `question` | Shorthand for a `noul` processor: implies `criteria: {"true": question}` | — |
+| `criteria` | Required for `noul` unless `question` is used; exactly the keys `"true"` and `"false"` | — |
+| `options` | Required for `choice`; a map of option name to its description, at most 255 entries | — |
+| `levels` | Required for `score`; an ordered list of level names, 2 to 10 entries | — |
+| `include_body` | This processor's request always includes a bounded plain-text body excerpt — a static switch, not a dynamic per-message escalation | `false` |
+
 ### `tasks.<name>`
 
 | Key | Description | Default |
 | --- | --- | --- |
 | `account` * | Must name an entry in `accounts` | — |
-| `model` * | Must name an entry in `models` | — |
-| `source_mailboxes` | Mailboxes to scan, in order | `[INBOX]` |
+| `source_mailboxes` | Mailboxes to scan, in order. May be omitted entirely for a task that exists only as a `task:<id>` routing target | `[]` (none — an omitted task must be a routing target, or it is unreachable and rejected at load time) |
 | `protect.flags` | IMAP flags that exempt a message — see [Safety model](#safety-model) | `[]` (nothing protected) |
 | `protect.senders` | Sender globs that exempt a message | `[]` |
 | `protect.unread` | Exempt unread messages | `false` |
@@ -216,16 +259,20 @@ OpenRouter's namespaced id (`vendor/model`). OpenRouter also accepts optional
 | `max_actions` | Caps one run's mutations | none (uncapped) |
 | `rules` * | Non-empty list — see below | — |
 
+A task no longer names one `model:` — each of its rules' referenced
+processors carries its own.
+
 ### `tasks.<name>.rules[]`
 
 | Key | Description | Default |
 | --- | --- | --- |
-| `id` * | Unique within the task — also the model's output vocabulary | — |
 | `when` * | A condition tree — see [Rule conditions](#rule-conditions) below | — |
-| `actions` * | Non-empty ordered list: `backup`, `trash`, `move_to:<mailbox>`, `label:<keyword>` | — |
-| `priority` | Higher wins when more than one rule matches the same message (ties break by declaration order — earlier wins) | `0` |
-| `allow_body_excerpt` | Let this rule's `llm` condition trigger the bounded body-excerpt second pass (see [Reading the message body](#reading-the-message-body)) when the model reports it's unsure | `false` |
-| `allow_trash_without_backup` | Required if `trash` appears with no preceding `backup` in the same action list — see [Safety model](#safety-model) | `false` |
+| `actions` * | Non-empty ordered list: `backup`, `trash`, `move_to:<mailbox>`, `label:<keyword>`, `task:<id>` | — |
+
+A rule has no `id` and no `priority`: nothing else in the config ever refers
+to a rule by name, so when more than one rule matches the same message, the
+**first-listed** rule wins outright — reordering rules in the file *is*
+reprioritizing them.
 
 ### Rule conditions
 
@@ -243,7 +290,27 @@ OpenRouter's namespaced id (`vendor/model`). OpenRouter also accepts optional
 | `recipient-count` | comparison (`>10`, `<=3`, `==1`) | against the same deduplicated union `recipient-match` uses |
 | `has-attachment` | `true` | see below |
 | `auth-result` | `mechanism=result` (`spf=fail`) | see below; mechanism is `spf`, `dkim`, or `dmarc` |
-| `llm` | free-text description | the only condition the model ever sees |
+| `processor` | `"name.field op value"` (`"spam-category.value == spam"`, `"urgency.confidence >= 0.85"`) | the only condition a processor's answer is ever read through; see below |
+
+The `processor:` atom reads one field off a named processor's answer:
+`.value` (always present) or `.confidence` (always present for `jev`, only
+present for a chat processor if its own declared schema happens to include
+it — reading a field that was never produced evaluates to unresolved, not an
+error). The operator is `==`/`!=` for a boolean or a declared option/level
+name, or any of `==`/`!=`/`>=`/`<=`/`>`/`<` for a numeric comparand like
+`confidence`. "One of several options" is `any:` over several equality
+atoms, not a separate `in (...)` operator:
+
+```yaml
+any:
+  - processor: "spam-category.value == digest"
+  - processor: "spam-category.value == notification"
+```
+
+A `processor:` atom never counts as the deterministic condition `trash`
+requires (see [Safety model](#safety-model)), and — unlike the retired `llm`
+atom — there is no per-rule count cap and no restriction on appearing under
+`not:`.
 
 ### Combining conditions
 
@@ -267,23 +334,29 @@ when:
       subject-contains: buz
 ```
 
-For "either of these," use `any:` — a list item can itself be `{any: [...]}`
-or `{not: {...}}`, nested up to 3 deep. A rule that's fundamentally an OR at
-the top is a one-item list wrapping it: `when: [{any: [...]}]`. A rule
-needing only one condition skips the list entirely — `when: {older-than:
-30d}` is exactly as terse as ever.
+For "either of these," use `any:` — a list item can itself be `{any: [...]}`,
+`{none: [...]}`, or `{not: {...}}`, nested up to 3 deep. A rule that's
+fundamentally an OR at the top is a one-item list wrapping it: `when:
+[{any: [...]}]`. A rule needing only one condition skips the list entirely —
+`when: {older-than: 30d}` is exactly as terse as ever.
+
+`none:` is "none of these" — the De Morgan mirror of `any:`: true only if
+every child is false, false if any child is true. It exists mainly to save a
+level of the depth-3 nesting budget over `not: {any: [...]}}`, which spends
+two levels for the same idea:
+
+```yaml
+when:
+  - none:
+      - processor: "spam-category.value == spam"
+      - older-than: 90d
+```
 
 There's no top-level `all:` keyword — `when: {all: [A, B]}` and `when: [A,
 B]` meant the same thing, so only the list form is accepted at the top now.
 `all` is still valid *nested*, e.g. inside an `any:`'s list to group several
 conditions as one alternative: `any: [{all: [A, B]}, C]` reads as "(A and B)
 or C".
-
-`not` can't wrap an `llm` condition (spec-enforced) — the payload sent to the
-model carries a description without polarity, so a negated `llm` atom would
-ask the model an un-negated question and then invert the answer, which is
-backwards. Phrase the exclusion in the description text instead: `llm: "safe
-to discard, except anything mentioning buz"`.
 
 ### Condition details
 
@@ -327,30 +400,48 @@ require *every* recipient to match. This list is never capped (a separate,
 much smaller cap only applies to what's shown to the LLM classifier — it
 never affects a deterministic condition like this one).
 
-At most one `llm` atom per rule, and it may not appear under `not` — the
-model answers "does X apply," not an arbitrary boolean expression.
-
 ### Actions and winner-takes-all
 
-`backup`, `trash`, `move_to:<mailbox>`, `label:<keyword>`. When more than one
-rule matches a message, the rule with the highest `priority` wins (ties
-broken by config order); the rest are reported `shadowed`, not run.
+`backup`, `trash`, `move_to:<mailbox>`, `label:<keyword>`, `task:<id>`. When
+more than one rule matches a message, the **first-listed** rule wins; the
+rest are reported `shadowed`, not run. `task:<id>` (see [Chaining tasks
+together](#chaining-tasks-together)) is local-only bookkeeping, never an
+IMAP mutation, so it composes freely alongside a real mutation in the same
+action list and never counts toward the one-remote-mutation-per-rule cap.
 
 ### Reading the message body
 
-By default, the model only ever sees message metadata (headers, sizes,
-flags) — never the body. If a rule sets `allow_body_excerpt: true` and
-the model reports it's unsure, a bounded plain-text excerpt of the body is
-fetched once and the message is re-classified. Off by default; turn it on
-per-rule with `allow_body_excerpt: true`. Bear in mind this is the only
-path where message *bodies* reach the model, and that each escalation is
-its own un-batched model call plus a full-message fetch — so enable it on
-the rules that need it, not everywhere.
+By default, a processor only ever sees message metadata (headers, sizes,
+flags) — never the body. Setting `include_body: true` on a processor makes
+its request always carry a bounded plain-text excerpt of the body — a
+static property of that processor, not something a model's own uncertainty
+triggers at runtime. Bear in mind this is the only path where message
+*bodies* reach a model, and that each such request is its own un-batched
+call plus a full-message fetch — so give `include_body: true` only to the
+processors that actually need it, typically ones only a small, already
+filtered-down set of candidates ever reach (see [Chaining tasks
+together](#chaining-tasks-together)).
 
-The verdict is cached like any other, so a message only ever gets escalated
-once: later runs reuse the answer without re-fetching the body or re-asking.
-If the model is *still* unsure even with the excerpt, nothing is cached —
-that is a deferral, not a decision — so it will be retried.
+The verdict is cached like any other, keyed on the processor's own
+definition, so a given message's body is never re-fetched or re-asked once
+answered. A processor's answer is either cached or the call outright failed
+(transport/parse error) — there is no separate "unsure" state to defer on.
+
+### Chaining tasks together
+
+A rule's action list can include `task:<id>`, which hands the candidate to
+another task's pool without moving or labelling it in the mailbox at all —
+purely local, idempotent bookkeeping. This is what makes a two-stage
+pipeline affordable: a cheap, unconditional first pass (typically a `jev`
+processor) either resolves the common case outright or routes the
+remainder to a second task, and only that routed subset ever reaches a
+slower, more expensive processor. See
+[`config.example.yaml`](config.example.yaml) for the full pattern.
+
+A task can omit `source_mailboxes` entirely if its whole candidate pool
+arrives via `task:<id>` routing from elsewhere — `config check` rejects a
+task with neither a mailbox to scan nor any `task:` action naming it, since
+it could never run at all.
 
 ## CLI reference
 
@@ -387,10 +478,11 @@ phase, how many mails through it is, and elapsed time:
 ```
 
 Every phase counts the same unit — mails — so two bars in one run can never
-be counting different things behind identical-looking numbers. Every slow phase is counted:
-fetching new mail and refreshing flags during the scan, classification,
-body-excerpt escalation, and execution. Escalation is the slowest per
-message, since each one costs its own un-batched model call.
+be counting different things behind identical-looking numbers. Every slow
+phase is counted: fetching new mail and refreshing flags during the scan,
+classification, body-excerpt fetching for any `include_body: true`
+processor, and execution. A body fetch plus its processor call is the
+slowest per message, since each one costs its own un-batched model call.
 
 It is **strictly interactive**: when stderr is not a terminal — cron, CI,
 redirected output — nothing is drawn and the output is byte-for-byte what it

@@ -115,9 +115,7 @@ def _build(
         capabilities=frozenset({"MOVE"}),
         accepts_custom_keywords=True,
     )
-    rule = RuleConfig.model_validate(
-        {"id": "r", "when": {"older-than": "1d"}, "actions": actions}
-    )
+    rule = RuleConfig.model_validate({"when": {"older-than": "1d"}, "actions": actions})
     resolved = policy.resolve_actions(rule, trash_mailbox="Trash")
 
     items = []

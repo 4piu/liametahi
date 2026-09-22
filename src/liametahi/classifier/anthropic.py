@@ -25,13 +25,13 @@ from collections.abc import Sequence
 
 import anthropic
 
-from liametahi.classifier import CandidatePayload, ClassifyOutcome, OfferedRule
+from liametahi.classifier import CandidatePayload, ClassifyOutcome, OfferedProcessor
 from liametahi.config import ModelConfig
 from liametahi.logging import get_logger
 from liametahi.prompt import (
-    RESPONSE_JSON_SCHEMA,
     SYSTEM_PROMPT,
     build_request_payload,
+    build_response_schema,
     parse_classification_response,
 )
 
@@ -69,10 +69,13 @@ class AnthropicClassifier:
             )
 
     def classify(
-        self, candidates: Sequence[CandidatePayload], rules: Sequence[OfferedRule]
+        self,
+        candidates: Sequence[CandidatePayload],
+        processors: Sequence[OfferedProcessor],
     ) -> ClassifyOutcome:
         requested_ids = [c.payload_id for c in candidates]
-        user_content = json.dumps(build_request_payload(candidates, rules))
+        user_content = json.dumps(build_request_payload(candidates, processors))
+        response_schema = build_response_schema(processors)
 
         configured = self._config.structured_output
         want_schema = configured in ("auto", "json_schema")
@@ -88,7 +91,9 @@ class AnthropicClassifier:
         start = time.monotonic()
         level = "json_schema" if want_schema else "none"
         try:
-            message = self._create(user_content, with_schema=want_schema)
+            message = self._create(
+                user_content, with_schema=want_schema, response_schema=response_schema
+            )
         except anthropic.APIStatusError as exc:
             if not want_schema or not allow_fallback:
                 raise TransportError(str(exc)) from exc
@@ -97,7 +102,9 @@ class AnthropicClassifier:
             # applied to the one structured level Anthropic offers).
             logger.debug("classify: structured_output=json_schema rejected: %s", exc)
             try:
-                message = self._create(user_content, with_schema=False)
+                message = self._create(
+                    user_content, with_schema=False, response_schema=response_schema
+                )
                 level = "none"
             except anthropic.APIStatusError as exc2:
                 raise TransportError(str(exc2)) from exc2
@@ -127,7 +134,11 @@ class AnthropicClassifier:
         )
 
     def _create(
-        self, user_content: str, *, with_schema: bool
+        self,
+        user_content: str,
+        *,
+        with_schema: bool,
+        response_schema: dict[str, object],
     ) -> anthropic.types.Message:
         """One Messages request.
 
@@ -152,7 +163,7 @@ class AnthropicClassifier:
             system=SYSTEM_PROMPT,
             messages=messages,
             output_config={
-                "format": {"type": "json_schema", "schema": RESPONSE_JSON_SCHEMA}
+                "format": {"type": "json_schema", "schema": response_schema}
             },
         )
 

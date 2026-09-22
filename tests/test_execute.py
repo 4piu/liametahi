@@ -44,9 +44,7 @@ def _setup_run(
 
 
 def _rule(actions: list[str]) -> RuleConfig:
-    return RuleConfig.model_validate(
-        {"id": "r", "when": {"older-than": "1d"}, "actions": actions}
-    )
+    return RuleConfig.model_validate({"when": {"older-than": "1d"}, "actions": actions})
 
 
 def _unbacked_trash_action() -> tuple[policy.ResolvedAction, ...]:

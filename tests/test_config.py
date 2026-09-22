@@ -1,6 +1,7 @@
 """Tests for `liametahi.config` (spec §6, §7.3, §12; contracts §3)."""
 
 import copy
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -78,51 +79,60 @@ def test_settings_defaults_applied(config_path: Path) -> None:
     assert cfg.settings.log_level == "info"
 
 
-def test_full_spec_example_config_loads(tmp_path: Path) -> None:
-    """The full example from spec §6, including all three sample rules."""
+def test_full_jev_provider_plan_example_config_loads(tmp_path: Path) -> None:
+    """The two-task, two-processor worked example from
+    jev-provider-plan §11 (trimmed to what this config already has:
+    account/model names, trash_mailbox)."""
     data = make_config_dict()
+    data["models"]["local"]["provider"] = "openai_compatible"
+    data["processors"] = {
+        "spam-category": {
+            "model": "local",
+            "type": "choice",
+            "options": {"spam": "unsolicited bulk mail", "personal": "legitimate mail"},
+        },
+        "spam-review": {
+            "model": "local",
+            "type": "noul",
+            "include_body": True,
+            "criteria": {"true": "this is spam", "false": "this is legitimate"},
+        },
+    }
     data["tasks"]["inbox-cleanup"]["rules"] = [
         {
-            "id": "old-weekly-digest",
-            "priority": 100,
+            "when": [
+                {"processor": "spam-category.value == spam"},
+            ],
+            "actions": ["task:inbox-review"],
+        },
+        {
             "when": [{"older-than": "30d"}, {"list-id-contains": "digest"}],
             "actions": ["backup", "trash"],
         },
-        {
-            "id": "mozmail-notifications",
-            "priority": 50,
-            "when": [
-                {"recipient-match": "*@mozmail.com"},
-                {"older-than": "7d"},
-                {
-                    "llm": (
-                        "Automated, low-priority notification with no requested action."
-                    )
-                },
-            ],
-            "allow_body_excerpt": True,
-            "actions": ["move_to:Archive"],
-        },
-        {
-            "id": "stale-updates",
-            "priority": 10,
-            "when": [
-                {"older-than": "14d"},
-                {
-                    "llm": (
-                        "An update or announcement that is safe to discard, "
-                        "except bills, account-security notices, or mail that "
-                        "asks the recipient to act."
-                    )
-                },
-            ],
-            "actions": ["backup", "trash"],
-        },
     ]
+    data["tasks"]["inbox-review"] = {
+        "account": "personal",
+        "rules": [
+            {
+                # jev-provider-plan §11's own worked example pairs `trash`
+                # with only a `processor:` atom, which actually violates
+                # its own §3 safety invariant ("a processor: atom never
+                # counts as deterministic... a trash rule still needs at
+                # least one non-processor atom") -- see the final report.
+                # `in-mailbox` supplies the required deterministic atom.
+                "when": [
+                    {"processor": "spam-review.value == true"},
+                    {"in-mailbox": "INBOX"},
+                ],
+                "actions": ["backup", "trash"],
+            },
+        ],
+    }
     path = write_config(tmp_path / "cfg.yaml", data)
     cfg = load_config(path)
     task = cfg.tasks["inbox-cleanup"]
-    assert len(task.rules) == 3
+    assert len(task.rules) == 2
+    assert cfg.tasks["inbox-review"].source_mailboxes == []
 
 
 # --- Structural validation (unknown keys, missing sections) ----------------
@@ -188,11 +198,32 @@ def test_task_unknown_account_rejected(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_task_unknown_model_rejected(tmp_path: Path) -> None:
+def test_processor_unknown_model_rejected(tmp_path: Path) -> None:
     data = make_config_dict()
-    data["tasks"]["inbox-cleanup"]["model"] = "does-not-exist"
+    data["processors"] = {
+        "spam-category": {
+            "model": "does-not-exist",
+            "type": "choice",
+            "options": {"spam": "d"},
+        }
+    }
+    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
+        {"processor": "spam-category.value == spam"}
+    ]
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["move_to:Archive"]
     path = write_config(tmp_path / "cfg.yaml", data)
     with pytest.raises(ConfigError, match="unknown model"):
+        load_config(path)
+
+
+def test_rule_references_undeclared_processor_rejected(tmp_path: Path) -> None:
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
+        {"processor": "not-declared.value == spam"}
+    ]
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["move_to:Archive"]
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError, match="unknown processor"):
         load_config(path)
 
 
@@ -213,44 +244,84 @@ def test_trash_mailbox_not_required_when_unused(tmp_path: Path) -> None:
     assert cfg.accounts["personal"].trash_mailbox is None
 
 
-def test_duplicate_rule_id_rejected(tmp_path: Path) -> None:
+def test_rule_id_is_rejected_as_an_unknown_key(tmp_path: Path) -> None:
+    """jev-provider-plan §9: a rule has no `id` any more -- nothing
+    references a rule by name, so the field is simply gone, and
+    `extra="forbid"` rejects it like any other unknown key."""
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["id"] = "some-id"
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_rule_priority_is_rejected_as_an_unknown_key(tmp_path: Path) -> None:
+    """jev-provider-plan §9: a matching rule's rank is simply its
+    position in `rules:` -- there is no separate `priority:` field any
+    more."""
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["priority"] = 100
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_duplicate_rules_are_simply_allowed_now(tmp_path: Path) -> None:
+    """With no `id` to collide on, two rules with identical `when`/
+    `actions` are unremarkable -- the first-listed one always wins."""
     data = make_config_dict()
     second = copy.deepcopy(data["tasks"]["inbox-cleanup"]["rules"][0])
     data["tasks"]["inbox-cleanup"]["rules"].append(second)
     path = write_config(tmp_path / "cfg.yaml", data)
-    with pytest.raises(ConfigError, match="duplicate rule id"):
-        load_config(path)
+    cfg = load_config(path)  # should not raise
+    assert len(cfg.tasks["inbox-cleanup"].rules) == 2
 
 
-# --- Rule constraints (spec §7.3) --------------------------------------
+# --- Rule constraints (spec §7.3; jev-provider-plan §3, §8) ------------
 
 
-def test_two_llm_atoms_in_one_rule_rejected(tmp_path: Path) -> None:
+def test_multiple_processor_atoms_in_one_rule_allowed(tmp_path: Path) -> None:
+    """jev-provider-plan §3: no per-rule count cap on `processor:` atoms
+    -- the old `llm:` atom's "at most one" restriction is gone."""
     data = make_config_dict()
+    data["processors"] = {
+        "a": {"model": "local", "type": "choice", "options": {"x": "d"}},
+        "b": {"model": "local", "type": "choice", "options": {"y": "d"}},
+    }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
-        {"llm": "first"},
-        {"llm": "second"},
+        {"processor": "a.value == x"},
+        {"processor": "b.value == y"},
     ]
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["move_to:Archive"]
     path = write_config(tmp_path / "cfg.yaml", data)
-    with pytest.raises(ConfigError, match="at most one 'llm' atom"):
-        load_config(path)
+    load_config(path)  # should not raise
 
 
-def test_llm_under_not_rejected(tmp_path: Path) -> None:
+def test_processor_atom_under_not_is_allowed(tmp_path: Path) -> None:
+    """jev-provider-plan §3: unlike the old `llm:` atom, `not` around a
+    `processor:` atom is fine -- the payload no longer carries an
+    un-negatable free-form description."""
     data = make_config_dict()
+    data["processors"] = {
+        "a": {"model": "local", "type": "choice", "options": {"x": "d"}},
+    }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = {
-        "not": {"llm": "should not be allowed here"}
+        "not": {"processor": "a.value == x"}
     }
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["move_to:Archive"]
     path = write_config(tmp_path / "cfg.yaml", data)
-    with pytest.raises(ConfigError, match="'llm' may not appear under 'not'"):
-        load_config(path)
+    load_config(path)  # should not raise
 
 
-def test_trash_on_llm_only_rule_rejected(tmp_path: Path) -> None:
+def test_trash_on_processor_only_rule_rejected(tmp_path: Path) -> None:
+    """spec §5.2's deterministic-atom requirement for `trash` is
+    unchanged by the redesign -- a `processor:` atom never counts as
+    deterministic regardless of processor type or backend."""
     data = make_config_dict()
-    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = {"llm": "discard freely"}
+    data["processors"] = {
+        "a": {"model": "local", "type": "choice", "options": {"x": "d"}},
+    }
+    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = {"processor": "a.value == x"}
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["trash"]
     path = write_config(tmp_path / "cfg.yaml", data)
     with pytest.raises(ConfigError, match="deterministic condition"):
@@ -259,44 +330,46 @@ def test_trash_on_llm_only_rule_rejected(tmp_path: Path) -> None:
 
 def test_trash_with_deterministic_condition_allowed(tmp_path: Path) -> None:
     data = make_config_dict()
+    data["processors"] = {
+        "a": {"model": "local", "type": "choice", "options": {"x": "d"}},
+    }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
         {"older-than": "30d"},
-        {"llm": "safe to discard"},
+        {"processor": "a.value == x"},
     ]
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["backup", "trash"]
     path = write_config(tmp_path / "cfg.yaml", data)
     load_config(path)  # should not raise
 
 
-def test_trash_without_backup_rejected_unless_opted_out(tmp_path: Path) -> None:
-    """spec §7.4: 'trash' silently fails every run without a preceding
-    'backup' in the same action list, unless the rule explicitly opts
-    out via `allow_trash_without_backup` (e.g. because the account's own
-    trash folder is recovery enough). Config load must catch this, not
-    let it validate and then fail at every execution."""
+def test_trash_without_backup_is_now_valid(tmp_path: Path) -> None:
+    """jev-provider-plan §8: backup-before-trash is no longer required
+    -- 'trash' with no preceding 'backup' must load cleanly."""
     data = make_config_dict()
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["trash"]
     path = write_config(tmp_path / "cfg.yaml", data)
-    with pytest.raises(ConfigError, match="allow_trash_without_backup"):
-        load_config(path)
+    load_config(path)  # should not raise
 
 
-def test_trash_before_backup_in_action_list_rejected(tmp_path: Path) -> None:
-    """Order matters: a 'backup' listed *after* 'trash' never satisfies
-    the requirement, since actions run strictly in the written order."""
-    data = make_config_dict()
-    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["trash", "backup"]
-    path = write_config(tmp_path / "cfg.yaml", data)
-    with pytest.raises(ConfigError, match="allow_trash_without_backup"):
-        load_config(path)
-
-
-def test_trash_without_backup_allowed_with_explicit_opt_out(tmp_path: Path) -> None:
+def test_allow_trash_without_backup_is_an_unknown_field_error(tmp_path: Path) -> None:
+    """jev-provider-plan §8: the flag itself is gone, not merely
+    deprecated -- setting it is a config error, not a silent no-op."""
     data = make_config_dict()
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["trash"]
     data["tasks"]["inbox-cleanup"]["rules"][0]["allow_trash_without_backup"] = True
     path = write_config(tmp_path / "cfg.yaml", data)
-    load_config(path)  # should not raise
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_allow_body_excerpt_is_an_unknown_field_error(tmp_path: Path) -> None:
+    """jev-provider-plan §2: body-excerpt opt-in moved to
+    `ProcessorConfig.include_body`; the old per-rule flag is gone."""
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["allow_body_excerpt"] = True
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError):
+        load_config(path)
 
 
 def test_more_than_one_remote_mutation_rejected(tmp_path: Path) -> None:
@@ -710,11 +783,13 @@ def test_collect_header_names_walks_full_tree() -> None:
 
 
 def test_has_deterministic_atom() -> None:
+    processor_atom = {"processor": "spam.value == true"}
     assert has_deterministic_atom(parse_condition_tree({"older-than": "1d"}))
-    assert not has_deterministic_atom(parse_condition_tree({"llm": "x"}))
+    assert not has_deterministic_atom(parse_condition_tree(processor_atom))
     assert has_deterministic_atom(
-        parse_condition_tree({"all": [{"llm": "x"}, {"older-than": "1d"}]})
+        parse_condition_tree({"all": [processor_atom, {"older-than": "1d"}]})
     )
+    assert not has_deterministic_atom(parse_condition_tree({"none": [processor_atom]}))
 
 
 # --- File permission/ownership checks (spec §12; acceptance test 15) -----
@@ -780,3 +855,450 @@ def test_config_hash_deterministic_and_content_sensitive(tmp_path: Path) -> None
     path3 = write_config(tmp_path / "c.yaml", other)
     assert compute_config_hash(path1) == compute_config_hash(path2)
     assert compute_config_hash(path1) != compute_config_hash(path3)
+
+
+# --- `none:` composition keyword (jev-provider-plan §4) --------------------
+
+
+def test_none_composition_parses_to_none_node() -> None:
+    tree = parse_condition_tree(
+        {"none": [{"older-than": "90d"}, {"larger-than": "1M"}]}
+    )
+    assert isinstance(tree, rules.NoneNode)
+    assert len(tree.children) == 2
+
+
+def test_none_requires_nonempty_list() -> None:
+    with pytest.raises(ConfigError):
+        parse_condition_tree({"none": []})
+
+
+def test_none_counts_toward_nesting_depth_same_as_any() -> None:
+    raw = {"all": [{"any": [{"none": [{"older-than": "1d"}]}]}]}
+    parse_condition_tree(raw)  # depth 3, must not raise
+    too_deep = {"all": [{"any": [{"none": [{"not": {"older-than": "1d"}}]}]}]}
+    with pytest.raises(ConfigError, match="nesting"):
+        parse_condition_tree(too_deep)
+
+
+# --- `processor:` atom grammar (jev-provider-plan §3, §10) ------------------
+
+
+def test_processor_condition_equality_string_comparand() -> None:
+    tree = parse_condition_tree({"processor": "spam-category.value == spam"})
+    assert isinstance(tree, rules.ProcessorCondition)
+    assert tree.name == "spam-category"
+    assert tree.field == "value"
+    assert tree.op == "=="
+    assert tree.value == "spam"
+
+
+def test_processor_condition_numeric_confidence_comparand() -> None:
+    tree = parse_condition_tree({"processor": "urgency.confidence >= 0.85"})
+    assert isinstance(tree, rules.ProcessorCondition)
+    assert tree.field == "confidence"
+    assert tree.op == ">="
+    assert tree.value == 0.85
+
+
+def test_processor_condition_boolean_comparand() -> None:
+    tree = parse_condition_tree({"processor": "vibe-check.value == true"})
+    assert isinstance(tree, rules.ProcessorCondition)
+    assert tree.value is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "missing-dot-field == spam",  # no ".field"
+        "spam-category.value",  # no "op value"
+        "spam-category.value spam",  # no operator at all
+    ],
+)
+def test_processor_condition_malformed_shape_rejected(text: str) -> None:
+    with pytest.raises(ConfigError):
+        parse_condition_tree({"processor": text})
+
+
+def test_processor_condition_invalid_field_rejected() -> None:
+    with pytest.raises(ConfigError, match="'value' or 'confidence'"):
+        parse_condition_tree({"processor": "spam-category.bogus == spam"})
+
+
+def test_processor_condition_non_numeric_operator_rejected() -> None:
+    with pytest.raises(ConfigError, match="numeric comparand"):
+        parse_condition_tree({"processor": "spam-category.value >= spam"})
+
+
+def test_processor_condition_boolean_with_inequality_operator_rejected() -> None:
+    with pytest.raises(ConfigError, match="numeric comparand"):
+        parse_condition_tree({"processor": "vibe-check.value < true"})
+
+
+# --- `_parse_comparison`'s widened decimal grammar (jev-provider-plan §10) -
+
+
+@pytest.mark.parametrize("value", [">=0.85", ">0.5", "<=0.99", "==0.5", "!=0.1"])
+def test_processor_condition_decimal_comparisons_accepted(value: str) -> None:
+    tree = parse_condition_tree({"processor": f"urgency.confidence {value}"})
+    assert isinstance(tree, rules.ProcessorCondition)
+    assert isinstance(tree.value, float)
+
+
+@pytest.mark.parametrize(
+    "value,op,count",
+    [(">10", ">", 10), (">=5", ">=", 5)],
+)
+def test_recipient_count_integer_forms_still_work_after_widening(
+    value: str, op: str, count: int
+) -> None:
+    """The regex widened to accept decimals must not change existing
+    integer-only behaviour for `recipient-count`."""
+    tree = parse_condition_tree({"recipient-count": value})
+    assert isinstance(tree, rules.RecipientCount)
+    assert tree.op == op
+    assert tree.value == count
+    assert isinstance(tree.value, int)
+
+
+def test_recipient_count_rejects_a_decimal_comparand() -> None:
+    with pytest.raises(ConfigError, match="integer"):
+        parse_condition_tree({"recipient-count": ">1.5"})
+
+
+# --- `ProcessorConfig` validation (jev-provider-plan §2, §9) ----------------
+
+
+def _processors_config(
+    tmp_path: Path,
+    processors: Mapping[str, object],
+    when: list[object] | dict[str, object],
+) -> Path:
+    data = make_config_dict()
+    data["processors"] = processors
+    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = when
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["move_to:Archive"]
+    return write_config(tmp_path / "cfg.yaml", data)
+
+
+def test_noul_processor_with_question_shorthand(tmp_path: Path) -> None:
+    processors = {
+        "vibe-check": {
+            "model": "local",
+            "type": "noul",
+            "question": "Is this a routine newsletter?",
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "vibe-check.value == true"}]
+    )
+    cfg = load_config(path)
+    assert cfg.processors["vibe-check"].criteria == {
+        "true": "Is this a routine newsletter?"
+    }
+
+
+def test_noul_processor_explicit_criteria_requires_both_keys(tmp_path: Path) -> None:
+    processors = {
+        "vibe-check": {
+            "model": "local",
+            "type": "noul",
+            "criteria": {"true": "x"},
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "vibe-check.value == true"}]
+    )
+    with pytest.raises(ConfigError, match="exactly the keys"):
+        load_config(path)
+
+
+def test_noul_processor_question_and_criteria_both_set_rejected(tmp_path: Path) -> None:
+    processors = {
+        "vibe-check": {
+            "model": "local",
+            "type": "noul",
+            "question": "x?",
+            "criteria": {"true": "a", "false": "b"},
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "vibe-check.value == true"}]
+    )
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_choice_processor_requires_nonempty_options(tmp_path: Path) -> None:
+    processors = {"spam-category": {"model": "local", "type": "choice"}}
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "spam-category.value == spam"}]
+    )
+    with pytest.raises(ConfigError, match="options"):
+        load_config(path)
+
+
+def test_choice_processor_rejects_criteria_or_levels(tmp_path: Path) -> None:
+    processors = {
+        "spam-category": {
+            "model": "local",
+            "type": "choice",
+            "options": {"spam": "d"},
+            "levels": ["low", "high"],
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "spam-category.value == spam"}]
+    )
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_score_processor_requires_levels_between_2_and_10(tmp_path: Path) -> None:
+    processors = {
+        "urgency": {"model": "local", "type": "score", "levels": ["only-one"]}
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "urgency.value == only-one"}]
+    )
+    with pytest.raises(ConfigError, match="levels"):
+        load_config(path)
+
+
+def test_score_processor_more_than_10_levels_rejected(tmp_path: Path) -> None:
+    processors = {
+        "urgency": {
+            "model": "local",
+            "type": "score",
+            "levels": [str(i) for i in range(11)],
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "urgency.value == 0"}]
+    )
+    with pytest.raises(ConfigError, match="levels"):
+        load_config(path)
+
+
+def test_choice_processor_option_count_over_255_rejected(tmp_path: Path) -> None:
+    processors = {
+        "spam-category": {
+            "model": "local",
+            "type": "choice",
+            "options": {f"o{i}": "d" for i in range(256)},
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "spam-category.value == o1"}]
+    )
+    with pytest.raises(ConfigError, match="255"):
+        load_config(path)
+
+
+# --- Cross-reference: option/level vocabulary (jev-provider-plan §9) ------
+
+
+def test_choice_processor_atom_value_must_be_a_declared_option(tmp_path: Path) -> None:
+    processors = {
+        "spam-category": {
+            "model": "local",
+            "type": "choice",
+            "options": {"spam": "d", "personal": "d"},
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "spam-category.value == bogus"}]
+    )
+    with pytest.raises(ConfigError, match="not declared"):
+        load_config(path)
+
+
+def test_score_processor_atom_value_must_be_a_declared_level(tmp_path: Path) -> None:
+    processors = {
+        "urgency": {"model": "local", "type": "score", "levels": ["low", "high"]}
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "urgency.value == medium"}]
+    )
+    with pytest.raises(ConfigError, match="not declared"):
+        load_config(path)
+
+
+def test_choice_processor_atom_value_case_sensitive_match(tmp_path: Path) -> None:
+    processors = {
+        "spam-category": {"model": "local", "type": "choice", "options": {"spam": "d"}}
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "spam-category.value == Spam"}]
+    )
+    with pytest.raises(ConfigError, match="not declared"):
+        load_config(path)
+
+
+def test_noul_processor_atom_value_must_be_boolean_string(tmp_path: Path) -> None:
+    processors = {
+        "vibe-check": {"model": "local", "type": "noul", "question": "x?"},
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "vibe-check.value == maybe"}]
+    )
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_confidence_field_not_checked_against_vocabulary(tmp_path: Path) -> None:
+    """Only `.value` equality/inequality is checked against a declared
+    vocabulary; `.confidence` is a plain float with nothing to validate
+    against."""
+    processors = {
+        "urgency": {"model": "local", "type": "score", "levels": ["low", "high"]}
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "urgency.confidence >= 0.5"}]
+    )
+    load_config(path)  # should not raise
+
+
+# --- `task:<id>` routing cross-references (jev-provider-plan §7) -----------
+
+
+def test_task_routing_to_unknown_task_rejected(tmp_path: Path) -> None:
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["task:does-not-exist"]
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError, match="unknown task"):
+        load_config(path)
+
+
+def test_task_routing_cycle_rejected(tmp_path: Path) -> None:
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["task:second"]
+    data["tasks"]["second"] = {
+        "account": "personal",
+        "rules": [{"when": {"older-than": "1d"}, "actions": ["task:inbox-cleanup"]}],
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError, match="cycle"):
+        load_config(path)
+
+
+def test_task_routing_self_loop_rejected(tmp_path: Path) -> None:
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["task:inbox-cleanup"]
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError, match="cycle"):
+        load_config(path)
+
+
+def test_task_routing_dag_without_cycle_is_valid(tmp_path: Path) -> None:
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["task:second"]
+    data["tasks"]["second"] = {
+        "account": "personal",
+        "rules": [{"when": {"older-than": "1d"}, "actions": ["backup", "trash"]}],
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    load_config(path)  # should not raise
+
+
+def test_task_with_no_source_and_no_routing_target_is_unreachable(
+    tmp_path: Path,
+) -> None:
+    data = make_config_dict()
+    data["tasks"]["orphan"] = {
+        "account": "personal",
+        "rules": [{"when": {"older-than": "1d"}, "actions": ["backup", "trash"]}],
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError, match="no candidate source"):
+        load_config(path)
+
+
+def test_task_that_is_only_a_routing_target_is_reachable(tmp_path: Path) -> None:
+    """jev-provider-plan §7: `source_mailboxes` is optional -- a task
+    that exists purely as a `task:<id>` target, with no mailbox scan of
+    its own, is a valid, reachable task."""
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["task:downstream"]
+    data["tasks"]["downstream"] = {
+        "account": "personal",
+        "rules": [{"when": {"older-than": "1d"}, "actions": ["backup", "trash"]}],
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    cfg = load_config(path)
+    assert cfg.tasks["downstream"].source_mailboxes == []
+
+
+def test_task_action_does_not_count_as_a_remote_mutation(tmp_path: Path) -> None:
+    """jev-provider-plan §7: `task:<id>` composes freely with a real
+    remote mutation in the same action list."""
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = [
+        "backup",
+        "trash",
+        "task:second",
+    ]
+    data["tasks"]["second"] = {
+        "account": "personal",
+        "rules": [{"when": {"older-than": "1d"}, "actions": ["backup", "trash"]}],
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    load_config(path)  # should not raise
+
+
+def test_task_empty_target_rejected(tmp_path: Path) -> None:
+    data = make_config_dict()
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["task:"]
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError, match="task"):
+        load_config(path)
+
+
+# --- `jev` provider requirements (jev-provider-plan §1, §11) ----------------
+
+
+def test_jev_provider_requires_base_url_and_api_key(tmp_path: Path) -> None:
+    data = make_config_dict()
+    data["models"]["jev-primary"] = {"provider": "jev", "model": "jev-latest"}
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError, match="base_url"):
+        load_config(path)
+
+
+def test_jev_provider_requires_mails_per_request_one(tmp_path: Path) -> None:
+    data = make_config_dict()
+    data["models"]["jev-primary"] = {
+        "provider": "jev",
+        "model": "jev-latest",
+        "base_url": "https://api.example.com/v1/systemone",
+        "api_key": "k",
+        "mails_per_request": 5,
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError, match="mails_per_request"):
+        load_config(path)
+
+
+def test_jev_provider_valid_config_loads(tmp_path: Path) -> None:
+    data = make_config_dict()
+    data["models"]["jev-primary"] = {
+        "provider": "jev",
+        "model": "jev-latest",
+        "base_url": "https://api.example.com/v1/systemone",
+        "api_key": "k",
+        "mails_per_request": 1,
+    }
+    data["processors"] = {
+        "spam-category": {
+            "model": "jev-primary",
+            "type": "choice",
+            "options": {"spam": "d", "personal": "d"},
+        }
+    }
+    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
+        {"processor": "spam-category.value == spam"}
+    ]
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["move_to:Archive"]
+    path = write_config(tmp_path / "cfg.yaml", data)
+    cfg = load_config(path)
+    assert cfg.processors["spam-category"].model == "jev-primary"

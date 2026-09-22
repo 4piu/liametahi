@@ -8,6 +8,7 @@ import pytest
 
 from liametahi import state
 from liametahi.domain import MessageKey
+from liametahi.rules import ProcessorAnswer
 from tests.conftest import make_candidate
 
 
@@ -49,6 +50,7 @@ def test_open_database_creates_all_tables(tmp_path: Path) -> None:
             "result_items",
             "classifications",
             "llm_decision_cache",
+            "task_routes",
             "key_claims",
             "backups",
             "action_attempts",
@@ -58,7 +60,7 @@ def test_open_database_creates_all_tables(tmp_path: Path) -> None:
         version_row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 4
+        assert version_row["v"] == 5
     finally:
         state.close_database(conn)
 
@@ -70,7 +72,7 @@ def test_reopening_database_is_idempotent(tmp_path: Path) -> None:
     conn2 = state.open_database(db_path)  # must not re-run already-applied migrations
     try:
         count = conn2.execute("SELECT COUNT(*) AS c FROM schema_version").fetchone()
-        assert count["c"] == 4
+        assert count["c"] == 5
     finally:
         state.close_database(conn2)
 
@@ -138,7 +140,7 @@ def test_migrations_upgrade_a_v2_database_in_place(tmp_path: Path) -> None:
         version_row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 4
+        assert version_row["v"] == 5
 
         row = conn.execute(
             "SELECT candidate_id, fingerprint, subject, from_address, "
@@ -658,9 +660,10 @@ def test_result_item_and_classification_and_action_attempt_round_trip(
             candidate_id=candidate_id,
             input_level="metadata",
             input_hash="hash1",
-            offered_rules=["rule-1"],
-            matches=["rule-1"],
-            needs_content=False,
+            offered_processors=["spam-category"],
+            processor_answers={
+                "spam-category": ProcessorAnswer(value="spam", confidence=0.9)
+            },
             reason="ok",
             valid=True,
             error=None,
@@ -690,81 +693,84 @@ def test_result_item_and_classification_and_action_attempt_round_trip(
         state.close_database(conn)
 
 
-def test_decision_cache_round_trip_negative(tmp_path: Path) -> None:
+def test_processor_decision_cache_round_trip_string_value(tmp_path: Path) -> None:
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
         account_id = state.upsert_account(conn, name="personal", host="h", username="u")
         assert (
-            state.get_cached_decision(
+            state.get_cached_processor_decision(
                 conn,
                 account_id=account_id,
                 fingerprint="fp",
-                rule_id="r",
-                rule_text_hash="th",
+                processor_name="spam-category",
+                processor_hash="ph",
                 input_hash="ih",
                 model_id="m",
                 prompt_version=1,
             )
             is None
         )
-        state.record_decision(
+        state.record_processor_decision(
             conn,
             account_id=account_id,
             fingerprint="fp",
-            rule_id="r",
-            rule_text_hash="th",
+            processor_name="spam-category",
+            processor_hash="ph",
             input_hash="ih",
             model_id="m",
             prompt_version=1,
-            matched=False,
+            answer=ProcessorAnswer(value="spam", confidence=0.7),
         )
-        cached = state.get_cached_decision(
+        cached = state.get_cached_processor_decision(
             conn,
             account_id=account_id,
             fingerprint="fp",
-            rule_id="r",
-            rule_text_hash="th",
+            processor_name="spam-category",
+            processor_hash="ph",
             input_hash="ih",
             model_id="m",
             prompt_version=1,
         )
         assert cached is not None
-        assert cached["model_id"] == "m"
-        assert cached["matched"] is False
+        assert cached.value == "spam"
+        assert cached.confidence == 0.7
     finally:
         state.close_database(conn)
 
 
-def test_decision_cache_round_trip_positive(tmp_path: Path) -> None:
-    """A rule the model matched is cached too (spec §13): a re-run reuses
-    the "yes" and goes straight to policy/execution rather than asking
-    again."""
+def test_processor_decision_cache_round_trip_bool_value_no_confidence(
+    tmp_path: Path,
+) -> None:
+    """A chat-backed `noul` processor's answer has no confidence field;
+    it must round-trip as `None`, not a type error or a fabricated
+    number."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
         account_id = state.upsert_account(conn, name="personal", host="h", username="u")
-        state.record_decision(
+        state.record_processor_decision(
             conn,
             account_id=account_id,
             fingerprint="fp",
-            rule_id="r",
-            rule_text_hash="th",
+            processor_name="vibe-check",
+            processor_hash="ph",
             input_hash="ih",
             model_id="m",
             prompt_version=1,
-            matched=True,
+            answer=ProcessorAnswer(value=True, confidence=None),
         )
-        cached = state.get_cached_decision(
+        cached = state.get_cached_processor_decision(
             conn,
             account_id=account_id,
             fingerprint="fp",
-            rule_id="r",
-            rule_text_hash="th",
+            processor_name="vibe-check",
+            processor_hash="ph",
             input_hash="ih",
             model_id="m",
             prompt_version=1,
         )
         assert cached is not None
-        assert cached["matched"] is True
+        assert cached.value is True
+        assert cached.confidence is None
     finally:
         state.close_database(conn)
 
@@ -819,32 +825,35 @@ def test_backup_insert_and_restore(tmp_path: Path) -> None:
         state.close_database(conn)
 
 
-def test_cached_decision_is_scoped_to_the_model_that_made_it(tmp_path: Path) -> None:
+def test_processor_cached_decision_is_scoped_to_the_model_that_made_it(
+    tmp_path: Path,
+) -> None:
     """A verdict must not outlive the model that produced it: pointing a
-    task at a different model is usually a request for better judgement,
-    so silently reusing the weaker model's answers defeats the purpose.
-    `model_id` is part of the cache key, not just a stored column."""
+    processor at a different model is usually a request for better
+    judgement, so silently reusing the weaker model's answers defeats the
+    purpose. `model_id` is part of the cache key, not just a stored
+    column."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
         account_id = state.upsert_account(conn, name="a", host="h", username="u")
-        state.record_decision(
+        state.record_processor_decision(
             conn,
             account_id=account_id,
             fingerprint="fp",
-            rule_id="junk",
-            rule_text_hash="th",
+            processor_name="junk",
+            processor_hash="ph",
             input_hash="ih",
             model_id="qwen2.5-7b",
             prompt_version=1,
-            matched=True,
+            answer=ProcessorAnswer(value=True, confidence=None),
         )
         assert (
-            state.get_cached_decision(
+            state.get_cached_processor_decision(
                 conn,
                 account_id=account_id,
                 fingerprint="fp",
-                rule_id="junk",
-                rule_text_hash="th",
+                processor_name="junk",
+                processor_hash="ph",
                 input_hash="ih",
                 model_id="qwen2.5-7b",
                 prompt_version=1,
@@ -853,12 +862,12 @@ def test_cached_decision_is_scoped_to_the_model_that_made_it(tmp_path: Path) -> 
         )
         # A different model has no cached answer for the same message.
         assert (
-            state.get_cached_decision(
+            state.get_cached_processor_decision(
                 conn,
                 account_id=account_id,
                 fingerprint="fp",
-                rule_id="junk",
-                rule_text_hash="th",
+                processor_name="junk",
+                processor_hash="ph",
                 input_hash="ih",
                 model_id="claude-haiku-4-5",
                 prompt_version=1,
@@ -869,31 +878,33 @@ def test_cached_decision_is_scoped_to_the_model_that_made_it(tmp_path: Path) -> 
         state.close_database(conn)
 
 
-def test_cached_decision_is_scoped_to_the_prompt_version(tmp_path: Path) -> None:
-    """A rule's own `llm` text is covered by `rule_text_hash`, but the
-    system prompt wrapped around it was covered by nothing. Bumping
+def test_processor_cached_decision_is_scoped_to_the_prompt_version(
+    tmp_path: Path,
+) -> None:
+    """A processor's own definition is covered by `processor_hash`, but
+    the system prompt wrapped around it was covered by nothing. Bumping
     `prompt.PROMPT_VERSION` must invalidate."""
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
         account_id = state.upsert_account(conn, name="a", host="h", username="u")
-        state.record_decision(
+        state.record_processor_decision(
             conn,
             account_id=account_id,
             fingerprint="fp",
-            rule_id="junk",
-            rule_text_hash="th",
+            processor_name="junk",
+            processor_hash="ph",
             input_hash="ih",
             model_id="m",
             prompt_version=1,
-            matched=False,
+            answer=ProcessorAnswer(value=False, confidence=None),
         )
         assert (
-            state.get_cached_decision(
+            state.get_cached_processor_decision(
                 conn,
                 account_id=account_id,
                 fingerprint="fp",
-                rule_id="junk",
-                rule_text_hash="th",
+                processor_name="junk",
+                processor_hash="ph",
                 input_hash="ih",
                 model_id="m",
                 prompt_version=1,
@@ -901,17 +912,73 @@ def test_cached_decision_is_scoped_to_the_prompt_version(tmp_path: Path) -> None
             is not None
         )
         assert (
-            state.get_cached_decision(
+            state.get_cached_processor_decision(
                 conn,
                 account_id=account_id,
                 fingerprint="fp",
-                rule_id="junk",
-                rule_text_hash="th",
+                processor_name="junk",
+                processor_hash="ph",
                 input_hash="ih",
                 model_id="m",
                 prompt_version=2,
             )
             is None
+        )
+    finally:
+        state.close_database(conn)
+
+
+# --- Task routing (jev-provider-plan §7) -----------------------------------
+
+
+def test_task_route_round_trip(tmp_path: Path) -> None:
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        assert (
+            state.routed_fingerprints(conn, account_id=account_id, target_task="t2")
+            == []
+        )
+        state.record_task_route(
+            conn, account_id=account_id, fingerprint="fp1", target_task="t2"
+        )
+        assert state.routed_fingerprints(
+            conn, account_id=account_id, target_task="t2"
+        ) == ["fp1"]
+    finally:
+        state.close_database(conn)
+
+
+def test_task_route_is_idempotent_on_repeated_insert(tmp_path: Path) -> None:
+    """jev-provider-plan §7's contract: exactly once per (candidate,
+    target task), even if the same rule matches again for the same
+    candidate on a later run."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        state.record_task_route(
+            conn, account_id=account_id, fingerprint="fp1", target_task="t2"
+        )
+        state.record_task_route(
+            conn, account_id=account_id, fingerprint="fp1", target_task="t2"
+        )
+        assert state.routed_fingerprints(
+            conn, account_id=account_id, target_task="t2"
+        ) == ["fp1"]
+    finally:
+        state.close_database(conn)
+
+
+def test_task_route_is_scoped_to_target_task(tmp_path: Path) -> None:
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="a", host="h", username="u")
+        state.record_task_route(
+            conn, account_id=account_id, fingerprint="fp1", target_task="t2"
+        )
+        assert (
+            state.routed_fingerprints(conn, account_id=account_id, target_task="t3")
+            == []
         )
     finally:
         state.close_database(conn)

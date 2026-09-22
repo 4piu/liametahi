@@ -32,11 +32,9 @@ def _raw(subject: str, message_id: str) -> bytes:
     ).encode()
 
 
-def _rule(rule_id: str, actions: list[str]) -> RuleConfig:
+def _rule(actions: list[str]) -> RuleConfig:
     return RuleConfig.model_validate(
         {
-            "id": rule_id,
-            "priority": 0,
             "when": {"older-than": "1d"},
             "actions": actions,
         }
@@ -330,7 +328,7 @@ def test_acceptance_12_uidvalidity_change_reidentifies_by_fingerprint(
 
         # 2) Act on M1: move it out of INBOX for good (a stand-in for
         # "trash", without pulling backup's requirements into this test).
-        rule = _rule("archive", ["move_to:Trash"])
+        rule = _rule(["move_to:Trash"])
         actions = policy.resolve_actions(rule, trash_mailbox=None)
         run_id = state.new_run_id()
         _setup_run(conn, account_id=account_id, run_id=run_id)
@@ -339,7 +337,7 @@ def test_acceptance_12_uidvalidity_change_reidentifies_by_fingerprint(
             key=MessageKey(account_id, "INBOX", 1000, 11),
             fingerprint=fp_m1,
             message_id="<m1@test>",
-            winning_rule="archive",
+            winning_rule="rule #1 of 1",
             actions=actions,
         )
         summary = execute.execute_items(
@@ -429,7 +427,7 @@ def test_acceptance_12_uidvalidity_change_reidentifies_by_fingerprint(
             key=MessageKey(account_id, "INBOX", 1000, 11),
             fingerprint=fp_m1,
             message_id="<m1@test>",
-            winning_rule="archive",
+            winning_rule="rule #1 of 1",
             actions=actions,
         )
         replay = execute.execute_items(

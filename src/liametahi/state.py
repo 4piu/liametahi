@@ -22,10 +22,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from liametahi import rules
 from liametahi.domain import Candidate, MessageKey
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
-_LATEST_SCHEMA_VERSION = 4
+_LATEST_SCHEMA_VERSION = 5
 
 _CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
 
@@ -360,6 +361,21 @@ def find_candidates_by_fingerprint(
     return [(int(row["candidate_id"]), _row_to_candidate(row)) for row in rows]
 
 
+def find_live_candidates_by_fingerprint(
+    conn: sqlite3.Connection, *, account_id: int, fingerprint: str
+) -> list[tuple[int, Candidate]]:
+    """As `find_candidates_by_fingerprint`, excluding retired rows
+    (jev-provider-plan §7: `runner.py` uses this to resolve a `task:<id>`
+    routing entry back to a live candidate row -- a message already
+    moved/vanished has nothing left to route)."""
+    rows = conn.execute(
+        "SELECT * FROM candidates WHERE account_id=? AND fingerprint=? "
+        "AND retired_at IS NULL",
+        (account_id, fingerprint),
+    ).fetchall()
+    return [(int(row["candidate_id"]), _row_to_candidate(row)) for row in rows]
+
+
 def update_candidate_flags(
     conn: sqlite3.Connection,
     *,
@@ -642,29 +658,31 @@ def insert_classification(
     candidate_id: int,
     input_level: str,
     input_hash: str,
-    offered_rules: Sequence[str],
-    matches: Sequence[str],
-    needs_content: bool,
+    offered_processors: Sequence[str],
+    processor_answers: Mapping[str, rules.ProcessorAnswer],
     reason: str | None,
     valid: bool,
     error: str | None,
     latency_ms: int | None,
 ) -> int:
+    answers_json = {
+        name: {"value": answer.value, "confidence": answer.confidence}
+        for name, answer in processor_answers.items()
+    }
     cur = conn.execute(
         """
         INSERT INTO classifications (
-            run_id, candidate_id, input_level, input_hash, offered_rules,
-            matches, needs_content, reason, valid, error, latency_ms, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            run_id, candidate_id, input_level, input_hash, offered_processors,
+            processor_answers, reason, valid, error, latency_ms, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run_id,
             candidate_id,
             input_level,
             input_hash,
-            json.dumps(list(offered_rules)),
-            json.dumps(list(matches)),
-            int(needs_content),
+            json.dumps(list(offered_processors)),
+            json.dumps(answers_json),
             reason,
             int(valid),
             error,
@@ -676,36 +694,39 @@ def insert_classification(
     return int(cur.lastrowid)
 
 
-# --- LLM decision cache (spec §13) ----------------------------------------
+# --- LLM decision cache (spec §13; jev-provider-plan §0, §10) -------------
 #
-# One row per (account, fingerprint, rule, rule text, input) -- `matched`
-# records which way the model answered, so a re-run can reuse either a
-# prior "no" (elide the rule) or a prior "yes" (skip straight to policy/
-# execution) without asking again.
+# One row per (account, fingerprint, processor, processor definition,
+# input) -- `value_json`/`confidence` record how the processor answered,
+# so a re-run can reuse it (whatever it was) without asking again. Unlike
+# the old rule-scoped cache, a hit here does not by itself decide whether
+# any rule matches: `rules.evaluate(..., processor_values=...)` still has
+# to run against the resolved answer.
 
 
-def get_cached_decision(
+def get_cached_processor_decision(
     conn: sqlite3.Connection,
     *,
     account_id: int,
     fingerprint: str,
-    rule_id: str,
-    rule_text_hash: str,
+    processor_name: str,
+    processor_hash: str,
     input_hash: str,
     model_id: str,
     prompt_version: int,
-) -> Mapping[str, Any] | None:
+) -> rules.ProcessorAnswer | None:
     row = conn.execute(
         """
-        SELECT model_id, decided_at, matched FROM llm_decision_cache
-        WHERE account_id=? AND fingerprint=? AND rule_id=? AND rule_text_hash=?
-          AND input_hash=? AND model_id=? AND prompt_version=?
+        SELECT value_json, confidence FROM llm_decision_cache
+        WHERE account_id=? AND fingerprint=? AND processor_name=?
+          AND processor_hash=? AND input_hash=? AND model_id=?
+          AND prompt_version=?
         """,
         (
             account_id,
             fingerprint,
-            rule_id,
-            rule_text_hash,
+            processor_name,
+            processor_hash,
             input_hash,
             model_id,
             prompt_version,
@@ -713,49 +734,90 @@ def get_cached_decision(
     ).fetchone()
     if row is None:
         return None
-    return {
-        "model_id": row["model_id"],
-        "decided_at": row["decided_at"],
-        "matched": bool(row["matched"]),
-    }
+    value = json.loads(row["value_json"])
+    confidence = row["confidence"]
+    return rules.ProcessorAnswer(
+        value=value, confidence=float(confidence) if confidence is not None else None
+    )
 
 
-def record_decision(
+def record_processor_decision(
     conn: sqlite3.Connection,
     *,
     account_id: int,
     fingerprint: str,
-    rule_id: str,
-    rule_text_hash: str,
+    processor_name: str,
+    processor_hash: str,
     input_hash: str,
     model_id: str,
     prompt_version: int,
-    matched: bool,
+    answer: rules.ProcessorAnswer,
 ) -> None:
     conn.execute(
         """
         INSERT INTO llm_decision_cache (
-            account_id, fingerprint, rule_id, rule_text_hash, input_hash,
-            model_id, prompt_version, decided_at, matched
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (account_id, fingerprint, rule_id, rule_text_hash, input_hash,
-                     model_id, prompt_version)
+            account_id, fingerprint, processor_name, processor_hash, input_hash,
+            model_id, prompt_version, decided_at, value_json, confidence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (account_id, fingerprint, processor_name, processor_hash,
+                     input_hash, model_id, prompt_version)
         DO UPDATE SET
             decided_at = excluded.decided_at,
-            matched = excluded.matched
+            value_json = excluded.value_json,
+            confidence = excluded.confidence
         """,
         (
             account_id,
             fingerprint,
-            rule_id,
-            rule_text_hash,
+            processor_name,
+            processor_hash,
             input_hash,
             model_id,
             prompt_version,
             _iso_now(),
-            int(matched),
+            json.dumps(answer.value),
+            answer.confidence,
         ),
     )
+
+
+# --- Task routing (jev-provider-plan §7) ----------------------------------
+#
+# `task:<id>` is a local-only action: a candidate whose matched rule
+# includes it becomes part of the target task's candidate pool from that
+# point on, without the target needing to independently rediscover it via
+# `source_mailboxes`. Idempotent on (account_id, fingerprint, target_task)
+# -- the same rule matching the same candidate again on a later run writes
+# no second row -- and never touches IMAP.
+
+
+def record_task_route(
+    conn: sqlite3.Connection, *, account_id: int, fingerprint: str, target_task: str
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO task_routes (account_id, fingerprint, target_task, routed_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (account_id, fingerprint, target_task) DO NOTHING
+        """,
+        (account_id, fingerprint, target_task, _iso_now()),
+    )
+
+
+def routed_fingerprints(
+    conn: sqlite3.Connection, *, account_id: int, target_task: str
+) -> list[str]:
+    """Every fingerprint ever routed to `target_task` for this account.
+    Safe to call every run: resolving a fingerprint back to a live
+    candidate row (`find_candidates_by_fingerprint`, filtering out
+    retired rows) is itself idempotent, so returning the same fingerprint
+    on every subsequent run costs nothing once its candidate is retired
+    or otherwise no longer live."""
+    rows = conn.execute(
+        "SELECT fingerprint FROM task_routes WHERE account_id = ? AND target_task = ?",
+        (account_id, target_task),
+    ).fetchall()
+    return [str(row["fingerprint"]) for row in rows]
 
 
 # --- Key claims (spec §10, contracts §4 notes) ---------------------------

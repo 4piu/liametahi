@@ -235,15 +235,19 @@ def config_check(
     cfg, path = _load(config)
 
     typer.echo(f"config OK: {path}")
-    typer.echo(f"  accounts: {', '.join(sorted(cfg.accounts))}")
-    typer.echo(f"  models:   {', '.join(sorted(cfg.models))}")
-    typer.echo(f"  tasks:    {', '.join(sorted(cfg.tasks))}")
+    typer.echo(f"  accounts:   {', '.join(sorted(cfg.accounts))}")
+    typer.echo(f"  models:     {', '.join(sorted(cfg.models))}")
+    typer.echo(f"  processors: {', '.join(sorted(cfg.processors)) or '(none)'}")
+    typer.echo(f"  tasks:      {', '.join(sorted(cfg.tasks))}")
     for task_name in sorted(cfg.tasks):
         task = cfg.tasks[task_name]
-        rule_ids = ", ".join(rule.id for rule in task.rules)
+        # jev-provider-plan §9: a rule has no id and a task has no single
+        # `model:` any more -- report a rule count and source mailboxes
+        # instead.
         typer.echo(
-            f"  task {task_name!r}: account={task.account!r} model={task.model!r} "
-            f"rules=[{rule_ids}] fetch_headers={list(task.fetch_headers)}"
+            f"  task {task_name!r}: account={task.account!r} "
+            f"source_mailboxes={list(task.source_mailboxes)} "
+            f"rules={len(task.rules)} fetch_headers={list(task.fetch_headers)}"
         )
 
     if not connect:

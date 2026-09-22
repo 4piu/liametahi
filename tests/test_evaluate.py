@@ -1,29 +1,50 @@
 """Tests for `liametahi.evaluate`: the safety-critical response
 validation boundary (spec section 4.2 steps 2-6, section 5.2, section
-5.3, section 5.4, section 13; contracts section 5.3).
+5.3, section 5.4, section 13; contracts section 5.3; jev-provider-plan
+§5, §6, §10).
 
 Contracts section 5.3 requires this validation to live exactly once, in
 the caller, never in an adapter, so it "cannot be skipped by adding a new
 adapter". These tests exercise that boundary directly against
 `FakeClassifier`, which stands in for *any* provider: the two adapter
 test files (`test_classifier_openai_compatible.py`,
-`test_classifier_anthropic.py`) each independently show that a hostile
-or malformed value survives their transport layer untouched, and these
-tests show the one place that actually rejects it.
+`test_classifier_anthropic.py`, `test_classifier_jev.py`) each
+independently show that a hostile or malformed value survives their
+transport layer untouched, and these tests show the one place that
+actually rejects it.
+
+jev-provider-plan retires the old single-`llm`-atom, yes/no/unsure
+vocabulary in favour of named `processor:` atoms answering with a
+resolved `value` (validated against a closed, declared vocabulary) plus
+an optional `confidence`. Consequently:
+
+- There is no `needs_content`/"unsure" state left at all -- a processor
+  either answers (validly or not) or it doesn't, this round.
+- `Classification.answers` is a dict keyed by processor name, so "the
+  same key repeated" is no longer representable on the wire; the old
+  duplicate-rule-id test is gone because there is nothing left to test.
+- Batching now groups every candidate in one `classify()` call by an
+  identical *processor* set (jev-provider-plan §6), which is a
+  structural invariant rather than an implementation detail -- so the
+  old "candidate B was offered a different rule set than candidate A in
+  the same batch" scenario cannot arise any more; what still needs
+  covering is the ordinary case, an answer for a processor name that was
+  not part of *this* call's offered set at all.
 """
 
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from liametahi import evaluate, state
+from liametahi import evaluate, prompt, state
 from liametahi.classifier import Classification, ClassifyOutcome
-from liametahi.config import ModelConfig, RuleConfig, TaskConfig
+from liametahi.config import Config, TaskConfig
+from liametahi.rules import ProcessorAnswer
 from tests.conftest import make_candidate
 from tests.fakes.fake_classifier import (
     FakeClassifier,
     outcome_malformed,
-    outcome_with_matches,
+    outcome_with_answers,
 )
 
 NOW = datetime(2026, 7, 1, tzinfo=UTC)
@@ -32,32 +53,44 @@ NOW = datetime(2026, 7, 1, tzinfo=UTC)
 # --- Test harness -----------------------------------------------------
 
 
-def _model_config(**overrides: object) -> ModelConfig:
-    base: dict[str, object] = {
+def _proc(question: str = "is this a match?") -> dict[str, object]:
+    return {"model": "m", "type": "noul", "question": question}
+
+
+def _rule_for(name: str, actions: list[str] | None = None) -> dict[str, object]:
+    return {
+        "when": {"processor": f"{name}.value == true"},
+        "actions": actions or ["move_to:Archive"],
+    }
+
+
+def _config(
+    rules_raw: list[dict[str, object]],
+    processors: dict[str, dict[str, object]] | None = None,
+    **model_overrides: object,
+) -> Config:
+    model: dict[str, object] = {
         "provider": "openai_compatible",
         "base_url": "http://local",
         "model": "m",
         "mails_per_request": 10,
     }
-    base.update(overrides)
-    return ModelConfig.model_validate(base)
-
-
-def _task(rules_raw: list[dict[str, object]]) -> TaskConfig:
-    return TaskConfig.model_validate({"account": "a", "model": "m", "rules": rules_raw})
-
-
-def _llm_rule(
-    rule_id: str,
-    description: str,
-    *,
-    actions: list[str] | None = None,
-) -> dict[str, object]:
-    return {
-        "id": rule_id,
-        "when": {"llm": description},
-        "actions": actions or ["move_to:Archive"],
-    }
+    model.update(model_overrides)
+    return Config.model_validate(
+        {
+            "version": 1,
+            "accounts": {"a": {"host": "h", "username": "u", "password": "p"}},
+            "models": {"m": model},
+            "processors": processors or {},
+            "tasks": {
+                "t": {
+                    "account": "a",
+                    "source_mailboxes": ["INBOX"],
+                    "rules": rules_raw,
+                }
+            },
+        }
+    )
 
 
 def _setup(tmp_path: Path) -> tuple[sqlite3.Connection, int]:
@@ -90,9 +123,9 @@ def _evaluate(
     account_id: int,
     run_id: str,
     task: TaskConfig,
+    config: Config,
     classifier: FakeClassifier,
     candidates: list[tuple[int, object]],
-    model_config: ModelConfig | None = None,
     reevaluate: bool = False,
 ) -> evaluate.EvaluateOutcome:
     return evaluate.evaluate_candidates(
@@ -100,136 +133,51 @@ def _evaluate(
         account_id=account_id,
         run_id=run_id,
         task=task,
-        model_config=model_config or _model_config(),
-        model_id="mi",
-        classifier=classifier,
+        config=config,
+        classifier_factory=lambda model_cfg: classifier,
         candidates=candidates,  # type: ignore[arg-type]
         now=NOW,
         reevaluate=reevaluate,
     )
 
 
+def _processor_hash(config: Config, name: str) -> str:
+    cfg = config.processors[name]
+    return prompt.compute_processor_hash(evaluate._offered_processor(name, cfg))
+
+
+def _metadata_hash(candidate: object) -> str:
+    return prompt.build_candidate_payload(candidate, payload_id="c0").input_hash  # type: ignore[arg-type]
+
+
 # =========================================================================
-# A rule offered somewhere in the batch, but not to THIS candidate
+# An answer naming a processor never offered this call is rejected
 # =========================================================================
-#
-# `evaluate_candidates()`'s current batching groups a `classify()` call by
-# identical remaining-rule-set (spec section 5.4), so every item inside
-# one real call happens to share one offered set today. The validation
-# in `_resolve_item` is nonetheless written to check strictly against
-# `item.remaining_rule_ids` -- the per-candidate offered set -- and NOT
-# against whatever the request's `offered_rules` union or the model's
-# response for a sibling candidate says. To prove that distinction
-# holds regardless of how batching groups candidates (and not merely as
-# an accident of today's homogeneous grouping), these tests drive
-# `evaluate._apply_outcome` directly with a hand-built batch whose two
-# items carry genuinely different offered sets, exactly as if a future
-# batching strategy (or a hostile model exploiting a batching quirk)
-# produced a heterogeneous batch.
 
 
-def _rules_by_id(task: TaskConfig) -> dict[str, RuleConfig]:
-    return {rule.id: rule for rule in task.rules}
-
-
-def _require_input_hash(result: evaluate.CandidateResult) -> str:
-    assert result.input_hash is not None
-    return result.input_hash
-
-
-def test_rule_offered_to_sibling_candidate_in_same_batch_is_rejected(
-    tmp_path: Path,
-) -> None:
+def test_answer_for_unoffered_processor_is_rejected(tmp_path: Path) -> None:
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task(
-        [
-            _llm_rule("rule-a", "condition A"),
-            _llm_rule("rule-b", "condition B"),
-        ]
-    )
-    cand_a = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "a" * 60)
-    cand_b = make_candidate(account_id=account_id, uid=2, fingerprint="fp" + "b" * 60)
-    cid_a = state.upsert_candidate(conn, cand_a)
-    cid_b = state.upsert_candidate(conn, cand_b)
-
-    item_a = evaluate._BatchItem(
-        candidate_id=cid_a,
-        candidate=cand_a,
-        resolved_matches=(),
-        cache_hit=False,
-        remaining_rule_ids=("rule-a", "rule-b"),
-        input_hash="hash-a",
-    )
-    item_b = evaluate._BatchItem(
-        candidate_id=cid_b,
-        candidate=cand_b,
-        resolved_matches=(),
-        cache_hit=False,
-        # candidate B was only ever offered rule-a.
-        remaining_rule_ids=("rule-a",),
-        input_hash="hash-b",
-    )
-    item_by_payload_id = {"c1": item_a, "c2": item_b}
-
-    # The model claims candidate B (payload c2) matched rule-b, which
-    # WAS offered somewhere in this batch (to candidate A) but never to
-    # candidate B itself.
-    outcome = ClassifyOutcome(
-        results=(
-            Classification(
-                payload_id="c2",
-                matches=("rule-b",),
-                needs_content=False,
-                reason=None,
-            ),
-        ),
-        invalid=(),
-        missing=(),
-        structured_output_level="none",
-        input_tokens=None,
-        output_tokens=None,
-        latency_ms=1,
-    )
-
-    per_candidate: dict[int, evaluate.CandidateResult] = {}
-    evaluate._apply_outcome(
-        conn,
-        outcome,
-        item_by_payload_id,
-        rules_by_id=_rules_by_id(task),
-        run_id=run_id,
-        account_id=account_id,
-        model_id="mi",
-        per_candidate=per_candidate,
-    )
-
-    result_b = per_candidate[cid_b]
-    assert result_b.matches == ()
-    assert result_b.status == "no_match"
-    assert result_b.valid is True
-
-
-def test_rule_never_offered_to_any_candidate_in_batch_is_also_rejected(
-    tmp_path: Path,
-) -> None:
-    """Sanity check in the other direction: a rule id that was not
-    offered to *any* candidate in the batch is rejected exactly the same
-    way as one offered only to a sibling."""
-    conn, account_id = _setup(tmp_path)
-    run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
+    config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
+    task = config.tasks["t"]
     cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "c" * 60)
     cid = state.upsert_candidate(conn, cand)
 
     fc = FakeClassifier(
-        [outcome_with_matches(matches_by_payload={"c1": ["nonexistent-rule"]})]
+        [
+            outcome_with_answers(
+                answers_by_payload={
+                    "c1": {"nonexistent-processor": ProcessorAnswer(True, None)}
+                }
+            )
+        ]
     )
     result = _evaluate(
         conn,
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=[(cid, cand)],
     ).results[0]
@@ -247,14 +195,15 @@ def test_response_candidate_id_outside_batch_is_dropped_without_affecting_batch(
 ) -> None:
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
+    config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
+    task = config.tasks["t"]
     cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "d" * 60)
     cid = state.upsert_candidate(conn, cand)
 
     fc = FakeClassifier(
         [
-            outcome_with_matches(
-                matches_by_payload={"c999": ["rule-a"]},
+            outcome_with_answers(
+                answers_by_payload={"c999": {"rule-a": ProcessorAnswer(True, None)}}
             )
         ]
     )
@@ -263,6 +212,7 @@ def test_response_candidate_id_outside_batch_is_dropped_without_affecting_batch(
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=[(cid, cand)],
     )
@@ -274,35 +224,6 @@ def test_response_candidate_id_outside_batch_is_dropped_without_affecting_batch(
 
 
 # =========================================================================
-# Duplicate rule id for one candidate
-# =========================================================================
-
-
-def test_duplicate_rule_id_for_one_candidate_counted_only_once(tmp_path: Path) -> None:
-    conn, account_id = _setup(tmp_path)
-    run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
-    cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "e" * 60)
-    cid = state.upsert_candidate(conn, cand)
-
-    fc = FakeClassifier(
-        [outcome_with_matches(matches_by_payload={"c1": ["rule-a", "rule-a"]})]
-    )
-    result = _evaluate(
-        conn,
-        account_id=account_id,
-        run_id=run_id,
-        task=task,
-        classifier=fc,
-        candidates=[(cid, cand)],
-    ).results[0]
-    assert len(result.matches) == 1
-    assert result.matches[0].rule_id == "rule-a"
-    # The first occurrence wins; the repeat is dropped, never double
-    # counted or double cached (spec §5.3: "must appear at most once").
-
-
-# =========================================================================
 # `reason` is capped at 200 chars and never influences a decision
 # =========================================================================
 
@@ -310,7 +231,8 @@ def test_duplicate_rule_id_for_one_candidate_counted_only_once(tmp_path: Path) -
 def test_reason_capped_at_200_chars(tmp_path: Path) -> None:
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
+    config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
+    task = config.tasks["t"]
     cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "j" * 60)
     cid = state.upsert_candidate(conn, cand)
 
@@ -321,8 +243,7 @@ def test_reason_capped_at_200_chars(tmp_path: Path) -> None:
                 results=(
                     Classification(
                         payload_id="c1",
-                        matches=("rule-a",),
-                        needs_content=False,
+                        answers={"rule-a": ProcessorAnswer(True, None)},
                         reason=long_reason,
                     ),
                 ),
@@ -340,6 +261,7 @@ def test_reason_capped_at_200_chars(tmp_path: Path) -> None:
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=[(cid, cand)],
     ).results[0]
@@ -348,13 +270,14 @@ def test_reason_capped_at_200_chars(tmp_path: Path) -> None:
 
 
 def test_reason_text_never_influences_the_outcome(tmp_path: Path) -> None:
-    """A `reason` string that mentions a rule id, or reads like an
-    instruction, must have zero effect: only the `matches` field can
-    ever select a rule (spec section 5.3: reason is "never read by the
-    policy engine")."""
+    """A `reason` string that mentions a processor name, or reads like an
+    instruction, must have zero effect: only `answers` can ever select a
+    rule (spec section 5.3: reason is "never read by the policy
+    engine")."""
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
+    config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
+    task = config.tasks["t"]
     cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "k" * 60)
     cid = state.upsert_candidate(conn, cand)
 
@@ -365,8 +288,7 @@ def test_reason_text_never_influences_the_outcome(tmp_path: Path) -> None:
                 results=(
                     Classification(
                         payload_id="c1",
-                        matches=(),  # no real match claimed
-                        needs_content=False,
+                        answers={},  # no real answer claimed
                         reason=hostile_reason,
                     ),
                 ),
@@ -384,6 +306,7 @@ def test_reason_text_never_influences_the_outcome(tmp_path: Path) -> None:
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=[(cid, cand)],
     ).results[0]
@@ -392,24 +315,40 @@ def test_reason_text_never_influences_the_outcome(tmp_path: Path) -> None:
 
 
 # =========================================================================
-# `needs_content` without escalation capability produces no action and
-# does not poison the negative-decision cache (spec section 5.3, section
-# 4.2 step 7 -- escalation is Unit 5's orchestration, unavailable here)
+# An answer whose value is outside the processor's declared vocabulary is
+# rejected (contracts section 5.3, extended to processor answers)
 # =========================================================================
 
 
-def test_needs_content_produces_no_accepted_match(tmp_path: Path) -> None:
+def test_answer_value_outside_declared_vocabulary_is_rejected(tmp_path: Path) -> None:
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
-    cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "l" * 60)
+    processors: dict[str, dict[str, object]] = {
+        "spam-category": {
+            "model": "m",
+            "type": "choice",
+            "options": {"spam": "d", "personal": "d"},
+        }
+    }
+    config = _config(
+        [
+            {
+                "when": {"processor": "spam-category.value == spam"},
+                "actions": ["move_to:Archive"],
+            }
+        ],
+        processors=processors,
+    )
+    task = config.tasks["t"]
+    cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "x" * 60)
     cid = state.upsert_candidate(conn, cand)
 
     fc = FakeClassifier(
         [
-            outcome_with_matches(
-                matches_by_payload={"c1": ["rule-a"]},
-                needs_content={"c1": True},
+            outcome_with_answers(
+                answers_by_payload={
+                    "c1": {"spam-category": ProcessorAnswer("not-a-real-option", None)}
+                }
             )
         ]
     )
@@ -418,105 +357,12 @@ def test_needs_content_produces_no_accepted_match(tmp_path: Path) -> None:
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=[(cid, cand)],
     ).results[0]
     assert result.matches == ()
     assert result.status == "no_match"
-
-
-def test_needs_content_does_not_cache_a_negative_decision(tmp_path: Path) -> None:
-    """The model deferred, it did not decline -- caching a "no" here
-    would permanently suppress a legitimate future re-ask once
-    escalation becomes available."""
-    conn, account_id = _setup(tmp_path)
-    run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
-    cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "m" * 60)
-    cid = state.upsert_candidate(conn, cand)
-
-    fc = FakeClassifier(
-        [
-            outcome_with_matches(
-                matches_by_payload={"c1": []},
-                needs_content={"c1": True},
-            )
-        ]
-    )
-    result = _evaluate(
-        conn,
-        account_id=account_id,
-        run_id=run_id,
-        task=task,
-        classifier=fc,
-        candidates=[(cid, cand)],
-    ).results[0]
-    cached = state.get_cached_decision(
-        conn,
-        account_id=account_id,
-        fingerprint=cand.fingerprint,
-        rule_id="rule-a",
-        rule_text_hash=evaluate._rule_text_hash(task.rules[0]),
-        input_hash=_require_input_hash(result),
-        model_id="mi",
-        prompt_version=1,
-    )
-    assert cached is None
-
-
-def test_acceptance_04_unsure_classification_is_a_no_op_and_caches_nothing(
-    tmp_path: Path,
-) -> None:
-    """Spec §14 acceptance test 4: an `unsure` classification
-    (`needs_content: true`) with content escalation unavailable (this
-    module has no mailbox access, spec §4.2 step 7) results in a no-op
-    result item, and nothing is cached for ANY rule offered on that item
-    -- even a rule the same response also happened to name in `matches`."""
-    conn, account_id = _setup(tmp_path)
-    run_id = _new_run(conn, account_id)
-    task = _task(
-        [
-            _llm_rule("rule-a", "condition A"),
-            _llm_rule("rule-b", "condition B"),
-        ]
-    )
-    cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "z" * 60)
-    cid = state.upsert_candidate(conn, cand)
-
-    fc = FakeClassifier(
-        [
-            outcome_with_matches(
-                # The model both claims rule-a AND marks the item unsure;
-                # per spec §5.3 the whole response is discarded when
-                # `needs_content` is set, so `matches` here must have no
-                # effect at all.
-                matches_by_payload={"c1": ["rule-a"]},
-                needs_content={"c1": True},
-            )
-        ]
-    )
-    result = _evaluate(
-        conn,
-        account_id=account_id,
-        run_id=run_id,
-        task=task,
-        classifier=fc,
-        candidates=[(cid, cand)],
-    ).results[0]
-    assert result.matches == ()
-    assert result.status == "no_match"
-    for rule_id, rule in zip(("rule-a", "rule-b"), task.rules, strict=True):
-        cached = state.get_cached_decision(
-            conn,
-            account_id=account_id,
-            fingerprint=cand.fingerprint,
-            rule_id=rule_id,
-            rule_text_hash=evaluate._rule_text_hash(rule),
-            input_hash=_require_input_hash(result),
-            model_id="mi",
-            prompt_version=1,
-        )
-        assert cached is None, f"{rule_id} must not be cached from an unsure item"
 
 
 # =========================================================================
@@ -531,32 +377,40 @@ def test_accepted_match_is_cached(tmp_path: Path) -> None:
     the next run instead of being reclassified from scratch."""
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
+    config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
+    task = config.tasks["t"]
     cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "n" * 60)
     cid = state.upsert_candidate(conn, cand)
 
-    fc = FakeClassifier([outcome_with_matches(matches_by_payload={"c1": ["rule-a"]})])
+    fc = FakeClassifier(
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(True, None)}}
+            )
+        ]
+    )
     result = _evaluate(
         conn,
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=[(cid, cand)],
     ).results[0]
     assert result.status is None
-    cached = state.get_cached_decision(
+    cached = state.get_cached_processor_decision(
         conn,
         account_id=account_id,
         fingerprint=cand.fingerprint,
-        rule_id="rule-a",
-        rule_text_hash=evaluate._rule_text_hash(task.rules[0]),
-        input_hash=_require_input_hash(result),
-        model_id="mi",
-        prompt_version=1,
+        processor_name="rule-a",
+        processor_hash=_processor_hash(config, "rule-a"),
+        input_hash=_metadata_hash(cand),
+        model_id="m",
+        prompt_version=prompt.PROMPT_VERSION,
     )
     assert cached is not None
-    assert cached["matched"] is True
+    assert cached.value is True
 
 
 def test_matched_and_unselected_rules_are_both_cached_correctly(
@@ -564,69 +418,87 @@ def test_matched_and_unselected_rules_are_both_cached_correctly(
 ) -> None:
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task(
-        [
-            _llm_rule("matched-rule", "condition A"),
-            _llm_rule("unselected-rule", "condition B"),
-        ]
+    config = _config(
+        [_rule_for("matched-proc"), _rule_for("unselected-proc")],
+        processors={"matched-proc": _proc(), "unselected-proc": _proc()},
     )
+    task = config.tasks["t"]
     cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "o" * 60)
     cid = state.upsert_candidate(conn, cand)
 
     fc = FakeClassifier(
-        [outcome_with_matches(matches_by_payload={"c1": ["matched-rule"]})]
+        [
+            outcome_with_answers(
+                answers_by_payload={
+                    "c1": {
+                        "matched-proc": ProcessorAnswer(True, None),
+                        "unselected-proc": ProcessorAnswer(False, None),
+                    }
+                }
+            )
+        ]
     )
-    result = _evaluate(
+    _evaluate(
         conn,
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=[(cid, cand)],
-    ).results[0]
-    matched_cached = state.get_cached_decision(
-        conn,
-        account_id=account_id,
-        fingerprint=cand.fingerprint,
-        rule_id="matched-rule",
-        rule_text_hash=evaluate._rule_text_hash(task.rules[0]),
-        input_hash=_require_input_hash(result),
-        model_id="mi",
-        prompt_version=1,
     )
-    unselected_cached = state.get_cached_decision(
+    matched_cached = state.get_cached_processor_decision(
         conn,
         account_id=account_id,
         fingerprint=cand.fingerprint,
-        rule_id="unselected-rule",
-        rule_text_hash=evaluate._rule_text_hash(task.rules[1]),
-        input_hash=_require_input_hash(result),
-        model_id="mi",
-        prompt_version=1,
+        processor_name="matched-proc",
+        processor_hash=_processor_hash(config, "matched-proc"),
+        input_hash=_metadata_hash(cand),
+        model_id="m",
+        prompt_version=prompt.PROMPT_VERSION,
+    )
+    unselected_cached = state.get_cached_processor_decision(
+        conn,
+        account_id=account_id,
+        fingerprint=cand.fingerprint,
+        processor_name="unselected-proc",
+        processor_hash=_processor_hash(config, "unselected-proc"),
+        input_hash=_metadata_hash(cand),
+        model_id="m",
+        prompt_version=prompt.PROMPT_VERSION,
     )
     assert matched_cached is not None
-    assert matched_cached["matched"] is True
+    assert matched_cached.value is True
     assert unselected_cached is not None
-    assert unselected_cached["matched"] is False
+    assert unselected_cached.value is False
 
 
 def test_cached_match_is_reused_without_a_model_call(tmp_path: Path) -> None:
-    """The core payoff (spec §13): once a rule's match is cached, a later
-    run with the same rule text and input skips the model entirely and
-    still produces an accepted match -- e.g. because the previous run's
-    remote mutation failed and the message is still a live candidate."""
+    """The core payoff (spec §13): once a processor's answer is cached, a
+    later run with the same processor definition and input skips the
+    model entirely and still produces an accepted match -- e.g. because
+    the previous run's remote mutation failed and the message is still a
+    live candidate."""
     conn, account_id = _setup(tmp_path)
-    task = _task([_llm_rule("rule-a", "condition A")])
+    config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
+    task = config.tasks["t"]
     cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "p" * 60)
     cid = state.upsert_candidate(conn, cand)
 
     run_1 = _new_run(conn, account_id)
-    fc_1 = FakeClassifier([outcome_with_matches(matches_by_payload={"c1": ["rule-a"]})])
+    fc_1 = FakeClassifier(
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(True, None)}}
+            )
+        ]
+    )
     _evaluate(
         conn,
         account_id=account_id,
         run_id=run_1,
         task=task,
+        config=config,
         classifier=fc_1,
         candidates=[(cid, cand)],
     )
@@ -639,12 +511,13 @@ def test_cached_match_is_reused_without_a_model_call(tmp_path: Path) -> None:
         account_id=account_id,
         run_id=run_2,
         task=task,
+        config=config,
         classifier=fc_2,
         candidates=[(cid, cand)],
     ).results[0]
     assert fc_2.call_count == 0
     assert result_2.status is None
-    assert [m.rule_id for m in result_2.matches] == ["rule-a"]
+    assert [m.rule_index for m in result_2.matches] == [0]
 
 
 # =========================================================================
@@ -655,15 +528,8 @@ def test_cached_match_is_reused_without_a_model_call(tmp_path: Path) -> None:
 def test_fully_deterministic_rule_never_calls_classifier(tmp_path: Path) -> None:
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task(
-        [
-            {
-                "id": "deterministic-rule",
-                "when": {"older-than": "1d"},
-                "actions": ["move_to:Archive"],
-            }
-        ]
-    )
+    config = _config([{"when": {"older-than": "1d"}, "actions": ["move_to:Archive"]}])
+    task = config.tasks["t"]
     cand = make_candidate(
         account_id=account_id,
         uid=1,
@@ -678,13 +544,12 @@ def test_fully_deterministic_rule_never_calls_classifier(tmp_path: Path) -> None
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=[(cid, cand)],
     )
     assert fc.call_count == 0
-    assert outcome.results[0].matches == (
-        evaluate.ValidatedMatch("deterministic-rule"),
-    )
+    assert outcome.results[0].matches == (evaluate.ValidatedMatch(0),)
     assert outcome.results[0].status is None
 
 
@@ -693,15 +558,10 @@ def test_all_rules_deterministically_false_yields_no_match_without_model_call(
 ) -> None:
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task(
-        [
-            {
-                "id": "deterministic-rule",
-                "when": {"older-than": "1000d"},
-                "actions": ["move_to:Archive"],
-            }
-        ]
+    config = _config(
+        [{"when": {"older-than": "1000d"}, "actions": ["move_to:Archive"]}]
     )
+    task = config.tasks["t"]
     cand = make_candidate(
         account_id=account_id,
         uid=1,
@@ -716,6 +576,7 @@ def test_all_rules_deterministically_false_yields_no_match_without_model_call(
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=[(cid, cand)],
     )
@@ -732,14 +593,15 @@ def test_all_rules_deterministically_false_yields_no_match_without_model_call(
 def test_structured_output_level_surfaces_on_evaluate_outcome(tmp_path: Path) -> None:
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
+    config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
+    task = config.tasks["t"]
     cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "r" * 60)
     cid = state.upsert_candidate(conn, cand)
 
     fc = FakeClassifier(
         [
-            outcome_with_matches(
-                matches_by_payload={"c1": []},
+            outcome_with_answers(
+                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(False, None)}},
                 structured_output_level="json_object",
             )
         ]
@@ -749,6 +611,7 @@ def test_structured_output_level_surfaces_on_evaluate_outcome(tmp_path: Path) ->
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=[(cid, cand)],
     )
@@ -756,14 +619,17 @@ def test_structured_output_level_surfaces_on_evaluate_outcome(tmp_path: Path) ->
 
 
 # =========================================================================
-# Batching: chunking by batch_size and grouping by remaining rule set
+# Batching: chunking by batch_size
 # =========================================================================
 
 
 def test_batch_size_chunks_a_larger_group_into_multiple_calls(tmp_path: Path) -> None:
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
+    config = _config(
+        [_rule_for("rule-a")], processors={"rule-a": _proc()}, mails_per_request=2
+    )
+    task = config.tasks["t"]
     candidates = []
     for i in range(3):
         cand = make_candidate(
@@ -774,8 +640,15 @@ def test_batch_size_chunks_a_larger_group_into_multiple_calls(tmp_path: Path) ->
 
     fc = FakeClassifier(
         [
-            outcome_with_matches(matches_by_payload={"c1": [], "c2": []}),
-            outcome_with_matches(matches_by_payload={"c1": []}),
+            outcome_with_answers(
+                answers_by_payload={
+                    "c1": {"rule-a": ProcessorAnswer(False, None)},
+                    "c2": {"rule-a": ProcessorAnswer(False, None)},
+                }
+            ),
+            outcome_with_answers(
+                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(False, None)}}
+            ),
         ]
     )
     outcome = _evaluate(
@@ -783,9 +656,9 @@ def test_batch_size_chunks_a_larger_group_into_multiple_calls(tmp_path: Path) ->
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=candidates,  # type: ignore[arg-type]
-        model_config=_model_config(mails_per_request=2),
     )
     assert fc.call_count == 2
     assert len(outcome.results) == 3
@@ -805,7 +678,8 @@ def test_acceptance_03_single_invalid_item_is_a_no_op_others_apply(
     independently (spec section 5.4 point 1)."""
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
+    config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
+    task = config.tasks["t"]
     candidates = []
     for i in range(10):
         cand = make_candidate(
@@ -814,9 +688,11 @@ def test_acceptance_03_single_invalid_item_is_a_no_op_others_apply(
         cid = state.upsert_candidate(conn, cand)
         candidates.append((cid, cand))
 
-    matches_by_payload = {f"c{i + 1}": ["rule-a"] for i in range(9)}
-    matches_by_payload["c10"] = []  # the 10th is a legitimate no-match
-    valid_outcome = outcome_with_matches(matches_by_payload=matches_by_payload)
+    answers_by_payload = {
+        f"c{i + 1}": {"rule-a": ProcessorAnswer(True, None)} for i in range(9)
+    }
+    answers_by_payload["c10"] = {"rule-a": ProcessorAnswer(False, None)}
+    valid_outcome = outcome_with_answers(answers_by_payload=answers_by_payload)
     # Make the 10th item structurally invalid instead of a clean
     # no-match, by re-wrapping it as a partially-invalid ClassifyOutcome.
     outcome_with_one_invalid = ClassifyOutcome(
@@ -834,6 +710,7 @@ def test_acceptance_03_single_invalid_item_is_a_no_op_others_apply(
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=candidates,  # type: ignore[arg-type]
     )
@@ -841,7 +718,7 @@ def test_acceptance_03_single_invalid_item_is_a_no_op_others_apply(
     by_id = {r.candidate_id: r for r in outcome.results}
     for i in range(9):
         assert by_id[candidates[i][0]].status is None
-        assert by_id[candidates[i][0]].matches[0].rule_id == "rule-a"
+        assert by_id[candidates[i][0]].matches[0].rule_index == 0
     assert by_id[candidates[9][0]].status == "invalid_response"
     assert by_id[candidates[9][0]].matches == ()
 
@@ -857,7 +734,8 @@ def test_acceptance_03_wholly_invalid_batch_splits_and_both_halves_apply(
     or duplicate results from either side."""
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
+    config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
+    task = config.tasks["t"]
     candidates = []
     for i in range(10):
         cand = make_candidate(
@@ -869,13 +747,17 @@ def test_acceptance_03_wholly_invalid_batch_splits_and_both_halves_apply(
     # Call 1: the whole batch of 10 comes back wholly invalid.
     initial = outcome_malformed([f"c{i + 1}" for i in range(10)])
     # Call 2 (left half, candidates 0-4 -> c1..c5): all valid.
-    left = outcome_with_matches(
-        matches_by_payload={f"c{i + 1}": ["rule-a"] for i in range(5)}
+    left = outcome_with_answers(
+        answers_by_payload={
+            f"c{i + 1}": {"rule-a": ProcessorAnswer(True, None)} for i in range(5)
+        }
     )
     # Call 3 (right half, candidates 5-9 -> c1..c5 again, payload ids are
     # batch-local): 4 valid, 1 still invalid after the retry.
-    right_valid = outcome_with_matches(
-        matches_by_payload={f"c{i + 1}": [] for i in range(4)}
+    right_valid = outcome_with_answers(
+        answers_by_payload={
+            f"c{i + 1}": {"rule-a": ProcessorAnswer(False, None)} for i in range(4)
+        }
     )
     right = ClassifyOutcome(
         results=right_valid.results,
@@ -893,6 +775,7 @@ def test_acceptance_03_wholly_invalid_batch_splits_and_both_halves_apply(
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=candidates,  # type: ignore[arg-type]
     )
@@ -903,7 +786,7 @@ def test_acceptance_03_wholly_invalid_batch_splits_and_both_halves_apply(
     for i in range(5):
         result = by_id[candidates[i][0]]
         assert result.status is None
-        assert result.matches[0].rule_id == "rule-a"
+        assert result.matches[0].rule_index == 0
     # Right half (candidates 5-8): valid no-matches.
     for i in range(5, 9):
         result = by_id[candidates[i][0]]
@@ -921,7 +804,8 @@ def test_split_retry_does_not_recurse_a_second_time(tmp_path: Path) -> None:
     be exactly initial + 2 calls, never a further split."""
     conn, account_id = _setup(tmp_path)
     run_id = _new_run(conn, account_id)
-    task = _task([_llm_rule("rule-a", "condition A")])
+    config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
+    task = config.tasks["t"]
     candidates = []
     for i in range(4):
         cand = make_candidate(
@@ -942,6 +826,7 @@ def test_split_retry_does_not_recurse_a_second_time(tmp_path: Path) -> None:
         account_id=account_id,
         run_id=run_id,
         task=task,
+        config=config,
         classifier=fc,
         candidates=candidates,  # type: ignore[arg-type]
     )
@@ -951,9 +836,9 @@ def test_split_retry_does_not_recurse_a_second_time(tmp_path: Path) -> None:
 
 
 # Note: acceptance test 4 (spec §14 item 4, "unsure classification with
-# content escalation unavailable") lives above as
-# `test_acceptance_04_unsure_classification_is_a_no_op_and_caches_nothing`,
-# next to the other `needs_content` tests it belongs with. There used to
-# be a below-threshold-confidence variant of this test here; that concept
-# no longer exists (spec §5.3: the model's output is yes/no/unsure, not a
-# score to threshold).
+# content escalation unavailable") no longer has an analog: the
+# yes/no/unsure vocabulary it exercised (`needs_content`) does not exist
+# in the jev-provider-plan redesign -- a processor either answers or it
+# doesn't, this round, with no separate "I looked and I'm unsure" signal
+# (jev-provider-plan §5's chat-compiled schema deliberately has no
+# invented field for it). See the final report.

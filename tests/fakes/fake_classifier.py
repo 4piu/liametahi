@@ -1,26 +1,25 @@
 """`FakeClassifier`: a scripted stand-in for `classifier.Classifier`
-(contracts §5.3, §6.3).
+(contracts §5.3, §6.3; jev-provider-plan §5, §10).
 
-`OfferedRule`, `CandidatePayload`, `Classification`, `ClassifyOutcome`,
-and `Classifier` are imported from `liametahi.classifier`, which is Unit
-3's fixed cross-unit interface (contracts §5.3) — this fake used to hold
-verbatim local copies because that module did not exist yet when Unit 1
-landed; now that it does, this file imports from it per contracts §5.4's
-instruction. `Classifier` is a `Protocol`, so `FakeClassifier` keeps
-satisfying it structurally without any change to the class below.
+`OfferedProcessor`, `CandidatePayload`, `Classification`, `ClassifyOutcome`,
+and `Classifier` are imported from `liametahi.classifier`, which is the
+fixed cross-unit interface (contracts §5.3). `Classifier` is a
+`Protocol`, so `FakeClassifier` keeps satisfying it structurally without
+any change to the class below.
 
-Per contracts §5.3: "validation against the offered rule and candidate
-vocabulary happens in the caller, not the adapter." `FakeClassifier`
-therefore happily returns semantically-invalid `Classification`s (an
-unoffered rule id, an unknown candidate id) inside `results` when
-scripted to — that is exactly what lets a downstream validation layer's
-tests exercise its rejection logic. Only transport-level failure
-(unparseable/wholly invalid response) belongs in `invalid`/`missing`.
+Per contracts §5.3: "validation against the offered [processor] and
+candidate vocabulary happens in the caller, not the adapter."
+`FakeClassifier` therefore happily returns semantically-invalid
+`Classification`s (an unoffered processor name, an unknown candidate id,
+an answer value outside a processor's declared vocabulary) inside
+`results` when scripted to — that is exactly what lets a downstream
+validation layer's tests exercise its rejection logic. Only
+transport-level failure (unparseable/wholly invalid response) belongs in
+`invalid`/`missing`.
 
-The model's output is yes/no/unsure, not a score (spec §5.3): a rule id
-in `matches` is a confident yes, an offered rule id absent from
-`matches` is a confident no, and `needs_content: true` marks the whole
-item unsure. There is no confidence anywhere in this fake's API.
+Per jev-provider-plan: a processor's answer is a resolved `value` (bool
+for `noul`, a declared option/level string for `choice`/`score`) plus an
+optional `confidence` -- there is no yes/no/unsure vocabulary left.
 """
 
 from collections.abc import Mapping, Sequence
@@ -30,8 +29,9 @@ from liametahi.classifier import (
     Classification,
     Classifier,
     ClassifyOutcome,
-    OfferedRule,
+    OfferedProcessor,
 )
+from liametahi.rules import ProcessorAnswer
 
 __all__ = [
     "CandidatePayload",
@@ -39,12 +39,13 @@ __all__ = [
     "Classifier",
     "ClassifyOutcome",
     "FakeClassifier",
-    "OfferedRule",
+    "OfferedProcessor",
+    "ProcessorAnswer",
     "outcome_malformed",
     "outcome_missing",
-    "outcome_with_matches",
+    "outcome_with_answers",
     "outcome_with_unknown_candidate",
-    "outcome_with_unknown_rule",
+    "outcome_with_unknown_processor",
 ]
 
 
@@ -59,7 +60,7 @@ class FakeClassifier:
     def __init__(self, scripted: Sequence[ClassifyOutcome | Exception] = ()) -> None:
         self._scripted: list[ClassifyOutcome | Exception] = list(scripted)
         self._calls: list[
-            tuple[tuple[CandidatePayload, ...], tuple[OfferedRule, ...]]
+            tuple[tuple[CandidatePayload, ...], tuple[OfferedProcessor, ...]]
         ] = []
 
     def queue(self, outcome: ClassifyOutcome | Exception) -> None:
@@ -68,7 +69,7 @@ class FakeClassifier:
     @property
     def calls(
         self,
-    ) -> tuple[tuple[tuple[CandidatePayload, ...], tuple[OfferedRule, ...]], ...]:
+    ) -> tuple[tuple[tuple[CandidatePayload, ...], tuple[OfferedProcessor, ...]], ...]:
         return tuple(self._calls)
 
     @property
@@ -76,9 +77,11 @@ class FakeClassifier:
         return len(self._calls)
 
     def classify(
-        self, candidates: Sequence[CandidatePayload], rules: Sequence[OfferedRule]
+        self,
+        candidates: Sequence[CandidatePayload],
+        processors: Sequence[OfferedProcessor],
     ) -> ClassifyOutcome:
-        self._calls.append((tuple(candidates), tuple(rules)))
+        self._calls.append((tuple(candidates), tuple(processors)))
         if not self._scripted:
             raise AssertionError(
                 "FakeClassifier.classify() called with no scripted response queued"
@@ -93,24 +96,17 @@ class FakeClassifier:
 # --- contracts §6.3 -------------------------------------------------
 
 
-def outcome_with_matches(
+def outcome_with_answers(
     *,
-    matches_by_payload: Mapping[str, Sequence[str]],
-    needs_content: Mapping[str, bool] | None = None,
+    answers_by_payload: Mapping[str, Mapping[str, ProcessorAnswer]],
     structured_output_level: str = "json_schema",
     latency_ms: int = 5,
 ) -> ClassifyOutcome:
     """A normal, fully valid outcome: every payload id gets a
-    `Classification` built from its list of matched rule ids."""
-    needs_content = needs_content or {}
+    `Classification` built from its per-processor answer map."""
     results = tuple(
-        Classification(
-            payload_id=payload_id,
-            matches=tuple(matches),
-            needs_content=needs_content.get(payload_id, False),
-            reason=None,
-        )
-        for payload_id, matches in matches_by_payload.items()
+        Classification(payload_id=payload_id, answers=dict(answers), reason=None)
+        for payload_id, answers in answers_by_payload.items()
     )
     return ClassifyOutcome(
         results=results,
@@ -123,17 +119,27 @@ def outcome_with_matches(
     )
 
 
-def outcome_with_unknown_rule(payload_id: str, unknown_rule_id: str) -> ClassifyOutcome:
-    """Names a rule id that was never offered for this candidate; the
+def outcome_with_unknown_processor(
+    payload_id: str, unknown_processor_name: str
+) -> ClassifyOutcome:
+    """Names a processor that was never offered for this candidate; the
     caller's validation layer must reject it."""
-    return outcome_with_matches(matches_by_payload={payload_id: [unknown_rule_id]})
+    return outcome_with_answers(
+        answers_by_payload={
+            payload_id: {unknown_processor_name: ProcessorAnswer(True, None)}
+        }
+    )
 
 
 def outcome_with_unknown_candidate(
-    unknown_payload_id: str, rule_id: str
+    unknown_payload_id: str, processor_name: str
 ) -> ClassifyOutcome:
     """Names a payload id absent from the submitted batch."""
-    return outcome_with_matches(matches_by_payload={unknown_payload_id: [rule_id]})
+    return outcome_with_answers(
+        answers_by_payload={
+            unknown_payload_id: {processor_name: ProcessorAnswer(True, None)}
+        }
+    )
 
 
 def outcome_malformed(payload_ids: Sequence[str]) -> ClassifyOutcome:
@@ -151,11 +157,11 @@ def outcome_malformed(payload_ids: Sequence[str]) -> ClassifyOutcome:
 
 
 def outcome_missing(
-    present: Mapping[str, Sequence[str]], missing_ids: Sequence[str]
+    present: Mapping[str, Mapping[str, ProcessorAnswer]], missing_ids: Sequence[str]
 ) -> ClassifyOutcome:
     """Some payload ids got a decision; others are simply absent from an
     otherwise-valid response (spec §5.4 point 3)."""
-    base = outcome_with_matches(matches_by_payload=present)
+    base = outcome_with_answers(answers_by_payload=present)
     return ClassifyOutcome(
         results=base.results,
         invalid=(),

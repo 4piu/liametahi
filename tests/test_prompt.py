@@ -1,11 +1,23 @@
 """Tests for `liametahi.prompt`: payload construction, capping,
 sanitisation, hashing, and the canonical request/response wire shape
-(spec section 5.1, 5.2, 5.3; contracts section 5.3, section 7).
+(spec section 5.1, 5.2, 5.3; contracts section 5.3, section 7;
+jev-provider-plan §5, §10).
 """
 
+from typing import Any, cast
+
 from liametahi import prompt
-from liametahi.classifier import CandidatePayload, OfferedRule
+from liametahi.classifier import CandidatePayload, OfferedProcessor
+from liametahi.rules import ProcessorAnswer
 from tests.conftest import make_candidate
+
+
+def _nested(obj: object, *keys: str) -> Any:  # noqa: ANN401 - test-only navigation
+    current: Any = obj
+    for key in keys:
+        current = cast("dict[str, object]", current)[key]
+    return current
+
 
 # --- Sanitisation (spec section 5.2) -------------------------------------
 
@@ -44,7 +56,7 @@ def test_sanitize_text_leaves_ordinary_text_untouched() -> None:
 
 def test_subject_over_cap_is_truncated_and_flagged() -> None:
     candidate = make_candidate(subject="x" * 250)
-    built = prompt.build_candidate_payload(candidate, payload_id="c1", offered=())
+    built = prompt.build_candidate_payload(candidate, payload_id="c1")
     subject = built.payload.fields["subject"]
     assert isinstance(subject, str)
     assert len(subject) == prompt.SUBJECT_CAP
@@ -53,14 +65,14 @@ def test_subject_over_cap_is_truncated_and_flagged() -> None:
 
 def test_subject_under_cap_is_not_truncated() -> None:
     candidate = make_candidate(subject="short subject")
-    built = prompt.build_candidate_payload(candidate, payload_id="c1", offered=())
+    built = prompt.build_candidate_payload(candidate, payload_id="c1")
     assert built.payload.fields["subject"] == "short subject"
     assert built.truncated is False
 
 
 def test_display_name_over_cap_is_truncated() -> None:
     candidate = make_candidate(from_display="y" * 150)
-    built = prompt.build_candidate_payload(candidate, payload_id="c1", offered=())
+    built = prompt.build_candidate_payload(candidate, payload_id="c1")
     from_field = built.payload.fields["from"]
     assert isinstance(from_field, dict)
     assert len(from_field["display_name"]) == prompt.DISPLAY_NAME_CAP
@@ -69,7 +81,7 @@ def test_display_name_over_cap_is_truncated() -> None:
 
 def test_address_over_cap_is_truncated() -> None:
     candidate = make_candidate(from_address="a" * 250 + "@example.com")
-    built = prompt.build_candidate_payload(candidate, payload_id="c1", offered=())
+    built = prompt.build_candidate_payload(candidate, payload_id="c1")
     from_field = built.payload.fields["from"]
     assert isinstance(from_field, dict)
     assert len(from_field["address"]) == prompt.ADDRESS_CAP
@@ -78,7 +90,7 @@ def test_address_over_cap_is_truncated() -> None:
 
 def test_list_id_over_cap_is_truncated() -> None:
     candidate = make_candidate(list_id="l" * 250)
-    built = prompt.build_candidate_payload(candidate, payload_id="c1", offered=())
+    built = prompt.build_candidate_payload(candidate, payload_id="c1")
     list_id = built.payload.fields["list_id"]
     assert isinstance(list_id, str)
     assert len(list_id) == prompt.LIST_ID_CAP
@@ -88,7 +100,7 @@ def test_list_id_over_cap_is_truncated() -> None:
 def test_recipients_over_cap_overflow_into_cc_count() -> None:
     recipients = tuple(f"r{i}@example.com" for i in range(8))
     candidate = make_candidate(recipients=recipients, cc_count=1)
-    built = prompt.build_candidate_payload(candidate, payload_id="c1", offered=())
+    built = prompt.build_candidate_payload(candidate, payload_id="c1")
     to_field = built.payload.fields["to"]
     assert isinstance(to_field, list)
     assert len(to_field) == prompt.RECIPIENTS_CAP
@@ -99,7 +111,7 @@ def test_recipients_over_cap_overflow_into_cc_count() -> None:
 
 def test_recipients_under_cap_not_truncated() -> None:
     candidate = make_candidate(recipients=("a@example.com", "b@example.com"))
-    built = prompt.build_candidate_payload(candidate, payload_id="c1", offered=())
+    built = prompt.build_candidate_payload(candidate, payload_id="c1")
     assert built.payload.fields["to"] == ["a@example.com", "b@example.com"]
     assert built.truncated is False
 
@@ -107,7 +119,7 @@ def test_recipients_under_cap_not_truncated() -> None:
 def test_recipient_address_itself_capped() -> None:
     long_addr = "z" * 250 + "@example.com"
     candidate = make_candidate(recipients=(long_addr,))
-    built = prompt.build_candidate_payload(candidate, payload_id="c1", offered=())
+    built = prompt.build_candidate_payload(candidate, payload_id="c1")
     to_field = built.payload.fields["to"]
     assert isinstance(to_field, list)
     assert len(to_field[0]) == prompt.ADDRESS_CAP
@@ -117,11 +129,7 @@ def test_recipient_address_itself_capped() -> None:
 def test_excerpt_capped_at_max_chars() -> None:
     candidate = make_candidate()
     built = prompt.build_excerpt_payload(
-        candidate,
-        payload_id="c1",
-        offered=(),
-        excerpt_text="e" * 5000,
-        max_chars=2000,
+        candidate, payload_id="c1", excerpt_text="e" * 5000, max_chars=2000
     )
     excerpt = built.payload.fields["excerpt"]
     assert isinstance(excerpt, str)
@@ -132,11 +140,7 @@ def test_excerpt_capped_at_max_chars() -> None:
 def test_excerpt_under_cap_not_truncated_and_metadata_fields_preserved() -> None:
     candidate = make_candidate(subject="short")
     built = prompt.build_excerpt_payload(
-        candidate,
-        payload_id="c1",
-        offered=(),
-        excerpt_text="short body text",
-        max_chars=2000,
+        candidate, payload_id="c1", excerpt_text="short body text", max_chars=2000
     )
     assert built.payload.fields["excerpt"] == "short body text"
     assert built.payload.fields["subject"] == "short"
@@ -151,7 +155,7 @@ def test_metadata_field_set_is_exactly_fixed() -> None:
     dates, ages, or flags -- because it is what keeps the section 13
     cache's input_hash stable."""
     candidate = make_candidate()
-    built = prompt.build_candidate_payload(candidate, payload_id="c1", offered=())
+    built = prompt.build_candidate_payload(candidate, payload_id="c1")
     assert set(built.payload.fields.keys()) == {
         "from",
         "to",
@@ -168,7 +172,7 @@ def test_metadata_field_set_is_exactly_fixed() -> None:
 
 def test_metadata_field_set_never_carries_dates_ages_or_flags() -> None:
     candidate = make_candidate(flags=frozenset({"\\Seen", "\\Flagged"}))
-    built = prompt.build_candidate_payload(candidate, payload_id="c1", offered=())
+    built = prompt.build_candidate_payload(candidate, payload_id="c1")
     serialised = str(built.payload.fields)
     assert "internaldate" not in serialised
     assert "flags" not in built.payload.fields
@@ -179,7 +183,7 @@ def test_metadata_field_set_never_carries_dates_ages_or_flags() -> None:
 def test_excerpt_payload_adds_exactly_one_field_to_the_fixed_set() -> None:
     candidate = make_candidate()
     built = prompt.build_excerpt_payload(
-        candidate, payload_id="c1", offered=(), excerpt_text="hi", max_chars=100
+        candidate, payload_id="c1", excerpt_text="hi", max_chars=100
     )
     assert set(built.payload.fields.keys()) == {
         "from",
@@ -199,9 +203,9 @@ def test_excerpt_payload_adds_exactly_one_field_to_the_fixed_set() -> None:
 def test_input_hash_stable_for_identical_content() -> None:
     c1 = make_candidate(subject="same subject", uid=1)
     c2 = make_candidate(subject="same subject", uid=2)
-    built1 = prompt.build_candidate_payload(c1, payload_id="c1", offered=("r1",))
-    built2 = prompt.build_candidate_payload(c2, payload_id="c9", offered=("r2", "r3"))
-    # payload_id and offered do not participate in the hash: only the
+    built1 = prompt.build_candidate_payload(c1, payload_id="c1")
+    built2 = prompt.build_candidate_payload(c2, payload_id="c9")
+    # payload_id does not participate in the hash: only the
     # capped/sanitised field content, input level, and truncation flag.
     assert built1.input_hash == built2.input_hash
 
@@ -209,16 +213,16 @@ def test_input_hash_stable_for_identical_content() -> None:
 def test_input_hash_changes_when_content_differs() -> None:
     c1 = make_candidate(subject="subject A")
     c2 = make_candidate(subject="subject B")
-    built1 = prompt.build_candidate_payload(c1, payload_id="c1", offered=())
-    built2 = prompt.build_candidate_payload(c2, payload_id="c1", offered=())
+    built1 = prompt.build_candidate_payload(c1, payload_id="c1")
+    built2 = prompt.build_candidate_payload(c2, payload_id="c1")
     assert built1.input_hash != built2.input_hash
 
 
 def test_input_hash_changes_when_input_level_differs() -> None:
     candidate = make_candidate()
-    meta = prompt.build_candidate_payload(candidate, payload_id="c1", offered=())
+    meta = prompt.build_candidate_payload(candidate, payload_id="c1")
     excerpt = prompt.build_excerpt_payload(
-        candidate, payload_id="c1", offered=(), excerpt_text="", max_chars=100
+        candidate, payload_id="c1", excerpt_text="", max_chars=100
     )
     assert meta.input_hash != excerpt.input_hash
 
@@ -245,72 +249,138 @@ def test_truncated_and_untruncated_candidate_with_same_final_field_differ() -> N
     the case section 5.2 requires to be visible."""
     exact = make_candidate(subject="s" * prompt.SUBJECT_CAP)
     over = make_candidate(subject="s" * (prompt.SUBJECT_CAP + 1))
-    built_exact = prompt.build_candidate_payload(exact, payload_id="c1", offered=())
-    built_over = prompt.build_candidate_payload(over, payload_id="c1", offered=())
+    built_exact = prompt.build_candidate_payload(exact, payload_id="c1")
+    built_over = prompt.build_candidate_payload(over, payload_id="c1")
     assert built_exact.payload.fields["subject"] == built_over.payload.fields["subject"]
     assert built_exact.truncated is False
     assert built_over.truncated is True
     assert built_exact.input_hash != built_over.input_hash
 
 
-def test_rule_text_hash_changes_when_description_edited() -> None:
-    h1 = prompt.compute_rule_text_hash("Original description.")
-    h2 = prompt.compute_rule_text_hash("Original description, edited.")
+# --- Processor identity hash (jev-provider-plan §10) -----------------------
+
+
+def _choice_processor(name: str = "spam-category") -> OfferedProcessor:
+    return OfferedProcessor(
+        name=name,
+        type="choice",
+        options={"spam": "unsolicited", "personal": "legit"},
+    )
+
+
+def test_processor_hash_changes_when_options_edited() -> None:
+    h1 = prompt.compute_processor_hash(_choice_processor())
+    edited = OfferedProcessor(
+        name="spam-category",
+        type="choice",
+        options={"spam": "unsolicited", "personal": "legit", "digest": "newsletter"},
+    )
+    h2 = prompt.compute_processor_hash(edited)
     assert h1 != h2
 
 
-def test_rule_text_hash_stable_for_identical_text() -> None:
-    assert prompt.compute_rule_text_hash("same text") == prompt.compute_rule_text_hash(
-        "same text"
-    )
+def test_processor_hash_stable_for_identical_definition() -> None:
+    assert prompt.compute_processor_hash(
+        _choice_processor()
+    ) == prompt.compute_processor_hash(_choice_processor())
 
 
-# --- Canonical request shape (spec section 5.3) ----------------------------
+def test_processor_hash_ignores_name() -> None:
+    """The hash is over the processor's own declared shape, not its
+    config key -- renaming a processor without changing its definition
+    should not by itself invalidate the cache (name is part of the
+    surrounding cache key, not the definition hash)."""
+    a = _choice_processor(name="spam-category")
+    b = _choice_processor(name="renamed")
+    assert prompt.compute_processor_hash(a) == prompt.compute_processor_hash(b)
 
 
-def test_build_request_payload_offers_only_per_candidate_rules() -> None:
-    """Each candidate's `offered_rules` entry must contain only the rule
-    ids offered for *that* candidate, even when other candidates in the
-    same batch are offered different rules."""
-    rules = [
-        OfferedRule(rule_id="r1", description="d1"),
-        OfferedRule(rule_id="r2", description="d2"),
-        OfferedRule(rule_id="r3", description="d3"),
+# --- Canonical request shape (spec section 5.3; jev-provider-plan §5) ------
+
+
+def test_build_request_payload_includes_every_offered_processor() -> None:
+    processors = [
+        OfferedProcessor(name="spam-category", type="choice", options={"spam": "d"}),
+        OfferedProcessor(name="urgency", type="score", levels=("low", "high")),
     ]
-    payloads = [
-        CandidatePayload(payload_id="c1", fields={}, offered=("r1",)),
-        CandidatePayload(payload_id="c2", fields={}, offered=("r2", "r3")),
-    ]
-    request = prompt.build_request_payload(payloads, rules)
-    offered = request["offered_rules"]
+    payloads = [CandidatePayload(payload_id="c1", fields={})]
+    request = prompt.build_request_payload(payloads, processors)
+    offered = request["processors"]
     assert isinstance(offered, dict)
-    assert {entry["id"] for entry in offered["c1"]} == {"r1"}
-    assert {entry["id"] for entry in offered["c2"]} == {"r2", "r3"}
-
-
-def test_build_request_payload_drops_rule_ids_not_in_rules_list() -> None:
-    """A candidate's `offered` tuple naming a rule id absent from the
-    `rules` argument (should never happen from evaluate.py, but the
-    request builder must not fabricate a description for it) is simply
-    omitted from that candidate's offered list."""
-    payloads = [CandidatePayload(payload_id="c1", fields={}, offered=("ghost",))]
-    request = prompt.build_request_payload(payloads, rules=[])
-    offered = request["offered_rules"]
-    assert isinstance(offered, dict)
-    assert offered["c1"] == []
+    assert set(offered.keys()) == {"spam-category", "urgency"}
+    assert offered["spam-category"]["type"] == "choice"
+    assert offered["urgency"]["levels"] == ["low", "high"]
 
 
 def test_build_request_payload_includes_candidate_id_field() -> None:
-    payloads = [
-        CandidatePayload(payload_id="c1", fields={"subject": "hi"}, offered=("r1",))
-    ]
-    request = prompt.build_request_payload(
-        payloads, rules=[OfferedRule(rule_id="r1", description="d")]
-    )
+    payloads = [CandidatePayload(payload_id="c1", fields={"subject": "hi"})]
+    request = prompt.build_request_payload(payloads, processors=[])
     candidates = request["candidates"]
     assert isinstance(candidates, list)
     assert candidates[0]["id"] == "c1"
     assert candidates[0]["subject"] == "hi"
+
+
+# --- Response schema (jev-provider-plan §5) --------------------------------
+
+
+def test_response_schema_contains_exactly_declared_fields_noul() -> None:
+    processor = OfferedProcessor(
+        name="vibe-check", type="noul", criteria={"true": "x", "false": "y"}
+    )
+    schema = prompt.build_response_schema([processor])
+    answer_props = _nested(
+        schema,
+        "properties",
+        "results",
+        "items",
+        "properties",
+        "answers",
+        "properties",
+    )
+    value_schema = answer_props["vibe-check"]["properties"]["value"]
+    assert value_schema == {"type": "boolean"}
+    # No auto-injected confidence field anywhere in the compiled schema.
+    assert "confidence" not in answer_props["vibe-check"]["properties"]
+
+
+def test_response_schema_choice_enumerates_option_keys() -> None:
+    processor = OfferedProcessor(
+        name="spam-category",
+        type="choice",
+        options={"spam": "d1", "personal": "d2"},
+    )
+    schema = prompt.build_response_schema([processor])
+    answer_props = _nested(
+        schema,
+        "properties",
+        "results",
+        "items",
+        "properties",
+        "answers",
+        "properties",
+    )
+    value_schema = answer_props["spam-category"]["properties"]["value"]
+    assert value_schema["type"] == "string"
+    assert set(value_schema["enum"]) == {"spam", "personal"}
+
+
+def test_response_schema_score_enumerates_levels() -> None:
+    processor = OfferedProcessor(
+        name="urgency", type="score", levels=("low", "medium", "high")
+    )
+    schema = prompt.build_response_schema([processor])
+    answer_props = _nested(
+        schema,
+        "properties",
+        "results",
+        "items",
+        "properties",
+        "answers",
+        "properties",
+    )
+    value_schema = answer_props["urgency"]["properties"]["value"]
+    assert value_schema["enum"] == ["low", "medium", "high"]
 
 
 # --- Response parsing (spec section 5.3, section 5.4) ----------------------
@@ -319,8 +389,8 @@ def test_build_request_payload_includes_candidate_id_field() -> None:
 def test_parse_valid_response() -> None:
     raw = (
         '{"results": [{"candidate": "c1", '
-        '"matches": ["r1"], '
-        '"needs_content": false, "reason": "ok"}]}'
+        '"answers": {"spam-category": {"value": "spam", "confidence": 0.9}}, '
+        '"reason": "ok"}]}'
     )
     parsed = prompt.parse_classification_response(raw, ["c1"])
     assert parsed.invalid == ()
@@ -328,22 +398,32 @@ def test_parse_valid_response() -> None:
     assert len(parsed.results) == 1
     result = parsed.results[0]
     assert result.payload_id == "c1"
-    assert result.matches[0] == "r1"
-    assert result.needs_content is False
+    assert result.answers["spam-category"] == ProcessorAnswer(
+        value="spam", confidence=0.9
+    )
     assert result.reason == "ok"
 
 
-def test_parse_empty_matches_means_no_match() -> None:
-    raw = '{"results": [{"candidate": "c1", "matches": []}]}'
+def test_parse_answer_without_confidence_defaults_to_none() -> None:
+    raw = (
+        '{"results": [{"candidate": "c1", "answers": {"vibe-check": {"value": true}}}]}'
+    )
+    parsed = prompt.parse_classification_response(raw, ["c1"])
+    assert parsed.results[0].answers["vibe-check"] == ProcessorAnswer(
+        value=True, confidence=None
+    )
+
+
+def test_parse_empty_answers_is_valid() -> None:
+    raw = '{"results": [{"candidate": "c1", "answers": {}}]}'
     parsed = prompt.parse_classification_response(raw, ["c1"])
     assert len(parsed.results) == 1
-    assert parsed.results[0].matches == ()
+    assert parsed.results[0].answers == {}
 
 
-def test_parse_needs_content_and_reason_are_optional() -> None:
-    raw = '{"results": [{"candidate": "c1", "matches": []}]}'
+def test_parse_reason_is_optional() -> None:
+    raw = '{"results": [{"candidate": "c1", "answers": {}}]}'
     parsed = prompt.parse_classification_response(raw, ["c1"])
-    assert parsed.results[0].needs_content is False
     assert parsed.results[0].reason is None
 
 
@@ -367,35 +447,35 @@ def test_parse_results_not_a_list_marks_every_requested_id_invalid() -> None:
 
 
 def test_parse_item_missing_from_response_is_reported_missing() -> None:
-    raw = '{"results": [{"candidate": "c1", "matches": []}]}'
+    raw = '{"results": [{"candidate": "c1", "answers": {}}]}'
     parsed = prompt.parse_classification_response(raw, ["c1", "c2"])
     assert parsed.missing == ("c2",)
 
 
 def test_parse_item_with_non_string_candidate_id_is_dropped_silently() -> None:
-    raw = '{"results": [{"candidate": 42, "matches": []}]}'
+    raw = '{"results": [{"candidate": 42, "answers": {}}]}'
     parsed = prompt.parse_classification_response(raw, ["c1"])
     assert parsed.results == ()
     assert parsed.invalid == ()
     assert parsed.missing == ("c1",)
 
 
-def test_parse_item_with_matches_not_a_list_is_invalid() -> None:
-    raw = '{"results": [{"candidate": "c1", "matches": "nope"}]}'
+def test_parse_item_with_answers_not_an_object_is_invalid() -> None:
+    raw = '{"results": [{"candidate": "c1", "answers": "nope"}]}'
     parsed = prompt.parse_classification_response(raw, ["c1"])
     assert parsed.results == ()
     assert parsed.invalid == ("c1",)
 
 
-def test_parse_item_with_non_string_rule_id_is_invalid() -> None:
-    raw = '{"results": [{"candidate": "c1", "matches": [1]}]}'
+def test_parse_item_with_answer_missing_value_is_invalid() -> None:
+    raw = '{"results": [{"candidate": "c1", "answers": {"p": {}}}]}'
     parsed = prompt.parse_classification_response(raw, ["c1"])
     assert parsed.results == ()
     assert parsed.invalid == ("c1",)
 
 
 def test_parse_item_with_non_string_reason_is_invalid() -> None:
-    raw = '{"results": [{"candidate": "c1", "matches": [], "reason": 5}]}'
+    raw = '{"results": [{"candidate": "c1", "answers": {}, "reason": 5}]}'
     parsed = prompt.parse_classification_response(raw, ["c1"])
     assert parsed.results == ()
     assert parsed.invalid == ("c1",)
@@ -404,9 +484,9 @@ def test_parse_item_with_non_string_reason_is_invalid() -> None:
 def test_parse_partial_batch_one_invalid_rest_valid() -> None:
     raw = (
         '{"results": ['
-        '{"candidate": "c1", "matches": []}, '
-        '{"candidate": "c2", "matches": "broken"}, '
-        '{"candidate": "c3", "matches": []}'
+        '{"candidate": "c1", "answers": {}}, '
+        '{"candidate": "c2", "answers": "broken"}, '
+        '{"candidate": "c3", "answers": {}}'
         "]}"
     )
     parsed = prompt.parse_classification_response(raw, ["c1", "c2", "c3"])

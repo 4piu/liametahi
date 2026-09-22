@@ -11,8 +11,9 @@ from pathlib import Path
 from liametahi import runner as runner_mod
 from liametahi import state
 from liametahi.config import load_config
+from liametahi.rules import ProcessorAnswer
 from tests.conftest import make_config_dict, write_config
-from tests.fakes.fake_classifier import FakeClassifier, outcome_with_matches
+from tests.fakes.fake_classifier import FakeClassifier, outcome_with_answers
 from tests.fakes.fake_mailbox import FakeMailbox, _StoredMessage
 
 MESSAGE_ID = "<msg1@example.com>"
@@ -26,9 +27,12 @@ def _config_with_state(tmp_path: Path) -> Path:
         "backup_dir": str(tmp_path / "backups"),
         "task_lock_dir": str(tmp_path / "locks"),
     }
+    data["processors"] = {
+        "junk-check": {"model": "local", "type": "noul", "question": "junk?"},
+    }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
         {"older-than": "1h"},
-        {"llm": "always trash"},
+        {"processor": "junk-check.value == true"},
     ]
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["backup", "trash"]
     return write_config(tmp_path / "cfg.yaml", data)
@@ -71,7 +75,11 @@ def test_completed_trash_excludes_candidate_from_future_runs(tmp_path: Path) -> 
 
     mb = _mailbox()
     clf_1 = FakeClassifier(
-        [outcome_with_matches(matches_by_payload={"c1": ["old-weekly-digest"]})]
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+            )
+        ]
     )
     outcome_1 = runner_mod.run_task(
         config=cfg,
@@ -131,7 +139,11 @@ def test_restored_message_is_skipped_not_re_trashed(tmp_path: Path) -> None:
 
     mb = _mailbox()
     clf_1 = FakeClassifier(
-        [outcome_with_matches(matches_by_payload={"c1": ["old-weekly-digest"]})]
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+            )
+        ]
     )
     outcome_1 = runner_mod.run_task(
         config=cfg,
@@ -196,7 +208,11 @@ def test_restored_message_is_retired_so_it_is_skipped_only_once(
 
     mb = _mailbox()
     clf_1 = FakeClassifier(
-        [outcome_with_matches(matches_by_payload={"c1": ["old-weekly-digest"]})]
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+            )
+        ]
     )
     runner_mod.run_task(
         config=cfg,
@@ -258,7 +274,11 @@ def test_stale_candidate_for_an_already_gone_message_retires(tmp_path: Path) -> 
 
     mb = _mailbox()
     clf_1 = FakeClassifier(
-        [outcome_with_matches(matches_by_payload={"c1": ["old-weekly-digest"]})]
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+            )
+        ]
     )
     runner_mod.run_task(
         config=cfg,
@@ -322,7 +342,11 @@ def test_restored_message_reevaluate_does_not_override_fix_d(tmp_path: Path) -> 
 
     mb = _mailbox()
     clf_1 = FakeClassifier(
-        [outcome_with_matches(matches_by_payload={"c1": ["old-weekly-digest"]})]
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+            )
+        ]
     )
     runner_mod.run_task(
         config=cfg,
@@ -339,7 +363,11 @@ def test_restored_message_reevaluate_does_not_override_fix_d(tmp_path: Path) -> 
     mb.move(1, "INBOX")
 
     clf_2 = FakeClassifier(
-        [outcome_with_matches(matches_by_payload={"c1": ["old-weekly-digest"]})]
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+            )
+        ]
     )
     outcome_2 = runner_mod.run_task(
         config=cfg,

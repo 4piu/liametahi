@@ -1,15 +1,15 @@
-# Liametahi example config. Copy this file, fill in your own account/model
-# details, and set restrictive permissions before pointing liametahi at it:
+# Liametahi example configuration (jev-provider-plan §11).
 #
-#   mkdir -p ~/.config/liametahi && chmod 700 ~/.config/liametahi
-#   cp config.example.yaml ~/.config/liametahi/config.yaml
-#   chmod 600 ~/.config/liametahi/config.yaml
+# Copy this to your platform config path (see the README's Quickstart),
+# fill in real credentials, and `chmod 600` it -- this file holds literal
+# secrets once you do. `liametahi config check` refuses to load a config
+# file that is world- or group-readable, or not owned by you.
 #
-# This file holds literal credentials once filled in, so it must never be
-# committed — the default .gitignore already excludes config.yaml,
-# liametahi.yaml/.yml, and *.local.yaml for this reason.
-#
-# Full reference for every key: README.md "Configuration reference".
+# This example shows the two-task, two-processor pattern the
+# `processors:`/`task:` redesign is built around: a cheap, unconditional
+# first pass (`jev-primary`, a structured decision model) filters most
+# mail outright or routes the uncertain remainder to a second task, which
+# only then pays for a slower, body-reading chat model.
 
 version: 1
 
@@ -22,34 +22,98 @@ accounts:
     trash_mailbox: "[Gmail]/Trash"
 
 models:
+  # A jev model: not a chat model, a decision model reached through
+  # POST /v1/systemone, answering one of noul/choice/score with a
+  # resolved value plus a calibrated confidence. mails_per_request must
+  # be exactly 1 -- jev answers one candidate per HTTP call, never a
+  # batch. Raise throughput with max_concurrent_requests instead.
+  jev-primary:
+    provider: jev
+    base_url: https://api.typesafe.ai/v1/systemone
+    api_key: "${TYPESAFE_API_KEY}"
+    model: jev-latest
+    mails_per_request: 1
+    max_concurrent_requests: 8
+
+  # An ordinary chat model, for the rarer, body-reading second pass.
   local:
     provider: openai_compatible
     base_url: http://127.0.0.1:8080/v1/chat/completions
     model: qwen2.5-7b-instruct
 
-tasks:
-  inbox-cleanup:
-    account: personal
+processors:
+  # Cheap first pass: every candidate in inbox-classify's pool goes
+  # through this. Running it unconditionally on every candidate is the
+  # point -- a decision model is far cheaper and faster than a chat
+  # completion.
+  spam-category:
+    model: jev-primary
+    type: choice
+    question: "Is this email spam or a personal/legitimate message?"
+    options:
+      spam: "Unsolicited bulk mail, phishing, or scam content"
+      personal: "A legitimate message, whether personal or business"
+
+  # Expensive second pass: only ever invoked for candidates in
+  # inbox-review's pool -- which is to say, only the ones inbox-classify
+  # explicitly routed there via the `task:` action below.
+  spam-review:
     model: local
+    type: noul
+    include_body: true
+    criteria:
+      "true": "This message is spam: unsolicited bulk mail, phishing, or a scam."
+      "false": "This message is a legitimate message that should be kept."
+
+tasks:
+  inbox-classify:
+    account: personal
     source_mailboxes: [INBOX]
-    # No implicit protection: list every flag/sender you want exempt.
     protect:
       flags: ['\Flagged', '\Answered']
       unread: true
     rules:
-      - id: old-digest
-        priority: 100
-        when:
+      # A rule has no id and no priority: this is a plain list, and the
+      # first rule to match, evaluated top to bottom, wins.
+      #
+      # jev was confident enough on its own -- trash outright, with no
+      # local backup: high-volume, low-stakes, and the account's own
+      # Trash folder retention is recovery enough for it. `in-mailbox`
+      # supplies the deterministic atom `trash` always requires (spec
+      # §5.2) -- a processor atom alone, however confident, is never
+      # sufficient by itself to delete mail.
+      - when:
+          - processor: "spam-category.value == spam"
+          - processor: "spam-category.confidence >= 0.85"
+          - in-mailbox: INBOX
+        actions: [trash]
+
+      # jev wasn't sure -- hand off to inbox-review. This is purely
+      # local bookkeeping; nothing appears in the mailbox from this
+      # action, and it is never visible as an IMAP flag or keyword.
+      - when:
+          - processor: "spam-category.confidence < 0.85"
+        actions: [task:inbox-review]
+
+      # An ordinary deterministic rule, unrelated to either processor --
+      # composes with the rules above exactly as it always has.
+      - when:
           - older-than: 30d
           - list-id-contains: digest
         actions: [backup, trash]
 
-      - id: stale-notifications
-        priority: 10
-        when:
-          - older-than: 7d
-          - llm: >
-              An automated notification, receipt, or update that is safe
-              to discard, except bills, account-security notices, or mail
-              that asks the recipient to act.
+  inbox-review:
+    account: personal
+    # No source_mailboxes: every candidate here arrives via
+    # inbox-classify's `task:` routing action above, not an independent
+    # mailbox scan.
+    rules:
+      # The murkier, rarer path: keep a local backup even though it is
+      # no longer mandatory before `trash` (jev-provider-plan §8).
+      # `in-mailbox` supplies the deterministic atom `trash` always
+      # requires (spec §5.2) -- a processor atom alone, however
+      # confident, is never sufficient by itself to delete mail.
+      - when:
+          - processor: "spam-review.value == true"
+          - in-mailbox: INBOX
         actions: [backup, trash]

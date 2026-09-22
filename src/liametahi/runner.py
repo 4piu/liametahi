@@ -41,7 +41,7 @@ import re
 import sqlite3
 import ssl
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email import message_from_bytes
@@ -50,15 +50,15 @@ from html import unescape
 from pathlib import Path
 from typing import Literal
 
-from liametahi import backup, evaluate, execute, policy, prompt, report, rules, state
-from liametahi.classifier import Classifier, OfferedRule
+from liametahi import backup, evaluate, execute, policy, report, rules, state
+from liametahi.classifier import Classifier
 from liametahi.classifier.anthropic import AnthropicClassifier
+from liametahi.classifier.jev import JevClassifier
 from liametahi.classifier.openai_compatible import OpenAICompatibleClassifier
 from liametahi.config import (
     AccountConfig,
     Config,
     ModelConfig,
-    RuleConfig,
     TaskConfig,
 )
 from liametahi.domain import Candidate, MessageKey
@@ -107,11 +107,14 @@ def default_mailbox_factory(account: AccountConfig) -> MailboxAdapter:
 
 def default_classifier_factory(model: ModelConfig) -> Classifier:
     """Selects the real adapter for a model's configured provider (spec
-    §8). Tests inject `FakeClassifier` via `classifier_factory` instead."""
+    §8; jev-provider-plan §1). Tests inject `FakeClassifier` via
+    `classifier_factory` instead."""
     if model.provider == "openai_compatible":
         return OpenAICompatibleClassifier(model)
     if model.provider == "anthropic":
         return AnthropicClassifier(model)
+    if model.provider == "jev":
+        return JevClassifier(model)
     raise ValueError(f"unknown model provider: {model.provider!r}")  # pragma: no cover
 
 
@@ -241,9 +244,17 @@ def _run_locked(
     """Everything from here on runs with the task lock held (spec §10)."""
     task = config.tasks[task_name]
     account_cfg = config.accounts[task.account]
-    model_cfg = config.models[task.model]
     register_secret(account_cfg.password)
-    register_secret(model_cfg.api_key)
+    # jev-provider-plan §9: a task no longer names one `model:` -- each
+    # of its rules' referenced processors carries its own. Register every
+    # configured model's api_key up front rather than trying to figure
+    # out in advance which ones this particular task will actually touch;
+    # registering an unused one is harmless.
+    for model_cfg in config.models.values():
+        register_secret(model_cfg.api_key)
+    model_name_summary, provider_summary, model_id_summary = _summarize_task_models(
+        task, config
+    )
 
     try:
         conn = state.open_database(config.settings.state_db)
@@ -272,9 +283,9 @@ def _run_locked(
             run_id=run_id,
             task=task_name,
             account_id=account_id,
-            model_name=task.model,
-            provider=model_cfg.provider,
-            model_id=model_cfg.model,
+            model_name=model_name_summary,
+            provider=provider_summary,
+            model_id=model_id_summary,
             dry_run=dry_run,
             reevaluate=reevaluate,
             fetch_headers=task.fetch_headers,
@@ -291,7 +302,6 @@ def _run_locked(
                 task_name=task_name,
                 account_id=account_id,
                 account_cfg=account_cfg,
-                model_cfg=model_cfg,
                 run_id=run_id,
                 dry_run=dry_run,
                 fail_fast=fail_fast,
@@ -394,7 +404,6 @@ def _run_phases(
     task_name: str,
     account_id: int,
     account_cfg: AccountConfig,
-    model_cfg: ModelConfig,
     run_id: str,
     dry_run: bool,
     fail_fast: bool,
@@ -404,9 +413,6 @@ def _run_phases(
     now: datetime,
     progress: Progress,
 ) -> RunOutcome:
-    rules_by_id = {rule.id: rule for rule in task.rules}
-    rule_order = {rule.id: index for index, rule in enumerate(task.rules)}
-
     # --- Phase 1: scan (spec §4.1) + reconcile (spec §4.0) -------------
     logger.info("run %s: connecting to account %s", run_id, task.account)
     scan_mailbox = _connect(mailbox_factory, account_cfg)
@@ -455,8 +461,16 @@ def _run_phases(
         _close_mailbox(scan_mailbox)
 
     # --- Phase 2: evaluate (spec §4.2) -- no mailbox connection open ---
-    live_candidates = _live_candidates(
-        conn, account_id=account_id, mailboxes=task.source_mailboxes
+    # jev-provider-plan §7: this task's pool is the union of its own
+    # mailbox scan and whatever another task's rule routed here via
+    # `task:<id>`, this run or a previous one.
+    live_candidates = _merge_routed_candidates(
+        conn,
+        account_id=account_id,
+        task_name=task_name,
+        scanned=_live_candidates(
+            conn, account_id=account_id, mailboxes=task.source_mailboxes
+        ),
     )
     protected_ids: set[int] = set()
     eligible: list[tuple[int, Candidate]] = []
@@ -484,18 +498,37 @@ def _run_phases(
         len(eligible),
         len(protected_ids),
     )
-    classifier = classifier_factory(model_cfg)
+    # jev-provider-plan §2: `include_body` is a static per-processor
+    # switch, not a dynamic escalation -- if a still-undecided rule
+    # needs a body-requiring processor answered, fetch the excerpt now,
+    # before asking anything, rather than after an unsure round-trip.
+    excerpt_candidate_ids = _candidates_needing_excerpt(task, config, eligible, now)
+    excerpts: dict[int, str] = {}
+    if excerpt_candidate_ids:
+        logger.info(
+            "run %s: fetching %d body excerpt(s) for include_body processor(s)",
+            run_id,
+            len(excerpt_candidate_ids),
+        )
+        excerpts = _fetch_excerpts(
+            conn,
+            mailbox_factory=mailbox_factory,
+            account_cfg=account_cfg,
+            account_id=account_id,
+            candidates_by_id=dict(eligible),
+            candidate_ids=excerpt_candidate_ids,
+        )
     evaluate_outcome = evaluate.evaluate_candidates(
         conn,
         account_id=account_id,
         run_id=run_id,
         task=task,
-        model_config=model_cfg,
-        model_id=model_cfg.model,
-        classifier=classifier,
+        config=config,
+        classifier_factory=classifier_factory,
         candidates=eligible,
         now=now,
         reevaluate=reevaluate,
+        excerpts=excerpts,
         progress=progress,
     )
     logger.info(
@@ -506,23 +539,7 @@ def _run_phases(
         if evaluate_outcome.structured_output_level
         else "",
     )
-    candidates_by_id = dict(eligible)
     results_by_id = {r.candidate_id: r for r in evaluate_outcome.results}
-
-    _run_body_excerpt(
-        conn,
-        run_id=run_id,
-        account_id=account_id,
-        task=task,
-        rules_by_id=rules_by_id,
-        model_cfg=model_cfg,
-        classifier=classifier,
-        account_cfg=account_cfg,
-        mailbox_factory=mailbox_factory,
-        candidates_by_id=candidates_by_id,
-        results_by_id=results_by_id,
-        progress=progress,
-    )
 
     # Fix D (sync-fix-brief Finding 3): the LLM decision cache is keyed on
     # `fingerprint`, which is stable across a move (spec §11) -- so a
@@ -602,16 +619,15 @@ def _run_phases(
 
             matched = [
                 policy.MatchedRule(
-                    rule_id=m.rule_id,
-                    priority=rules_by_id[m.rule_id].priority,
-                    config_order=rule_order[m.rule_id],
+                    rule_index=m.rule_index,
+                    label=policy.rule_label(m.rule_index, len(task.rules)),
                 )
                 for m in result.matches
             ]
             decision = policy.decide(
                 protected=False,
                 matches=matched,
-                rules_by_id=rules_by_id,
+                rules_by_index=task.rules,
                 trash_mailbox=account_cfg.trash_mailbox,
             )
             if decision.status != "matched" or decision.winning_rule is None:
@@ -840,272 +856,101 @@ def _drop_unsupported_for_dry_run(
     return kept
 
 
-# --- Content escalation (spec §4.2 step 7, §5.1, §5.3) --------------------
+# --- Task-model summary (jev-provider-plan §9) ----------------------------
 #
-# `evaluate.py` deliberately has no mailbox access and therefore discards
-# (never accepts, never caches) any response whose `needs_content` flag
-# is set (see its module docstring); it records `needs_content` on the
-# `classifications` row so this module -- which *does* have mailbox
-# access -- can find and re-drive exactly those candidates. Honours both
-# switches named in the work-unit brief, in this precedence:
-#   1. Per rule `allow_body_excerpt` -- the only opt-in; only rules
-#      that set it are re-offered, and if none of a candidate's
-#      originally-offered rules opt in, escalation is unavailable for it
-#      (spec §5.3's "if escalation is unavailable for any reason, the
-#      item is treated as unknown"). There is deliberately no separate
-#      model-level on/off switch alongside this one (spec §5.1) -- a rule
-#      opting in is already the enable signal.
-#   2. `model.body_excerpt.max_messages_per_run` -- caps how many
-#      candidates get an excerpt fetch in this run at all, applied in
-#      the same oldest-first order candidates are otherwise processed.
+# A task no longer names one `model:` -- each of its rules' referenced
+# processors carries its own (config.py's `ProcessorConfig.model`).
+# `runs.model_name`/`provider`/`model_id` are still single-value, NOT
+# NULL columns (contracts §4's DDL, unaltered by this migration), so this
+# collapses whatever models a task's rules actually reference into one
+# display-only summary per column: the single value if there is exactly
+# one, else a sorted comma-joined list. This is a deliberate,
+# documented choice (see the final report) filling a gap the plan
+# doesn't address, not a spec/contracts requirement.
 
 
-def _run_body_excerpt(
+def _summarize_task_models(task: TaskConfig, config: Config) -> tuple[str, str, str]:
+    processor_names: set[str] = set()
+    for rule in task.rules:
+        processor_names |= rules.processor_names(rule.when)
+    model_names = sorted(
+        {
+            config.processors[name].model
+            for name in processor_names
+            if name in config.processors
+        }
+    )
+    if not model_names:
+        return "(none)", "(none)", "(none)"
+    if len(model_names) == 1:
+        model_cfg = config.models[model_names[0]]
+        return model_names[0], model_cfg.provider, model_cfg.model
+    providers = sorted({config.models[name].provider for name in model_names})
+    model_ids = sorted({config.models[name].model for name in model_names})
+    return ",".join(model_names), ",".join(providers), ",".join(model_ids)
+
+
+# --- Task routing (jev-provider-plan §7) ----------------------------------
+#
+# `task:<id>` is a local-only action: a candidate whose matched rule
+# includes it becomes part of the target task's candidate pool from that
+# point on, without the target needing to independently rediscover it via
+# `source_mailboxes`. `state.routed_fingerprints`/
+# `find_live_candidates_by_fingerprint` do the actual lookup; this module
+# only merges the result into the task's own mailbox-scan pool, restoring
+# oldest-first order (spec §4.1) across the merge.
+
+
+def _merge_routed_candidates(
     conn: sqlite3.Connection,
     *,
-    run_id: str,
     account_id: int,
+    task_name: str,
+    scanned: list[tuple[int, Candidate]],
+) -> list[tuple[int, Candidate]]:
+    merged: dict[int, Candidate] = dict(scanned)
+    for fingerprint in state.routed_fingerprints(
+        conn, account_id=account_id, target_task=task_name
+    ):
+        for candidate_id, candidate in state.find_live_candidates_by_fingerprint(
+            conn, account_id=account_id, fingerprint=fingerprint
+        ):
+            merged.setdefault(candidate_id, candidate)
+    return sorted(merged.items(), key=lambda pair: pair[1].internaldate)
+
+
+# --- Body-excerpt prefetch (spec §5.1; jev-provider-plan §2, §6) ----------
+#
+# `include_body` is a static per-processor switch, not a dynamic
+# escalation (jev-provider-plan §2: "there is no dynamically-triggered
+# second pass"). `evaluate.py` has no mailbox access at all, so this
+# module determines up front -- via the same pure, no-cache first pass
+# `evaluate.processors_needed_for_candidate` exposes -- which eligible
+# candidates reference a body-requiring processor from a still-undecided
+# rule, fetches a bounded plain-text excerpt for exactly those, and hands
+# the text to `evaluate.evaluate_candidates(..., excerpts=...)`. A
+# candidate absent from the returned mapping (fetch failed, message
+# vanished, `UIDVALIDITY` moved) simply leaves that processor unresolved
+# for this round, the same as a processor that was never asked at all.
+
+
+def _candidates_needing_excerpt(
     task: TaskConfig,
-    rules_by_id: Mapping[str, RuleConfig],
-    model_cfg: ModelConfig,
-    classifier: Classifier,
-    account_cfg: AccountConfig,
-    mailbox_factory: MailboxFactory,
-    candidates_by_id: dict[int, Candidate],
-    results_by_id: dict[int, evaluate.CandidateResult],
-    progress: Progress | None = None,
-) -> None:
-    rows = conn.execute(
-        "SELECT candidate_id, offered_rules FROM classifications "
-        "WHERE run_id = ? AND needs_content = 1 AND valid = 1",
-        (run_id,),
-    ).fetchall()
-    if not rows:
-        return
-
-    plan: list[tuple[int, tuple[str, ...]]] = []
-    for row in rows:
-        candidate_id = int(row["candidate_id"])
-        result = results_by_id.get(candidate_id)
-        if result is None or result.matches:
-            continue  # already has an accepted (deterministic) match
-        offered = tuple(json.loads(row["offered_rules"]))
-        allowed = tuple(
-            rule_id
-            for rule_id in offered
-            if getattr(rules_by_id.get(rule_id), "allow_body_excerpt", False)
-        )
-        if not allowed:
-            continue
-        plan.append((candidate_id, allowed))
-    if not plan:
-        return
-
-    # This phase used to be entirely silent, which was its own bug: each
-    # escalated message costs a full-body fetch *and* its own un-batched
-    # model call, so a run with a couple of dozen unsure messages can sit
-    # here for minutes with nothing between "evaluate complete" and
-    # "executing N item(s)" to say why.
-    reporter = progress or NullProgress()
-    logger.info(
-        "run %s: escalating %d mail(s) to a body excerpt "
-        "(one model call each, not batched)",
-        run_id,
-        len(plan),
-    )
-    reporter.start("fetching excerpts", total=len(plan))
-    excerpts = _fetch_excerpts(
-        conn,
-        mailbox_factory=mailbox_factory,
-        account_cfg=account_cfg,
-        account_id=account_id,
-        candidates_by_id=candidates_by_id,
-        candidate_ids=[cid for cid, _ in plan],
-    )
-
-    reporter.stop()
-    max_chars = model_cfg.body_excerpt.max_chars
-    escalated = 0
-    reporter.start("re-classifying", total=len(plan))
-    for candidate_id, allowed_rules in plan:
-        # Advanced up front, not after the work: three paths below bail
-        # out with `continue`, and a bar that silently stalled on them
-        # would be worse than none at all. The counter therefore means
-        # "attempted", while `escalated` counts what actually landed.
-        reporter.advance()
-        excerpt_text = excerpts.get(candidate_id)
-        if excerpt_text is None:
-            continue
-        candidate = candidates_by_id[candidate_id]
-        built = prompt.build_excerpt_payload(
-            candidate,
-            payload_id="c1",
-            offered=allowed_rules,
-            excerpt_text=excerpt_text,
-            max_chars=max_chars,
-        )
-        offered_payload = [
-            OfferedRule(
-                rule_id=rule_id,
-                description=_llm_description(rules_by_id[rule_id]),
-            )
-            for rule_id in allowed_rules
-        ]
-        try:
-            outcome = classifier.classify([built.payload], offered_payload)
-        except Exception as exc:  # noqa: BLE001 - recorded, not raised
-            state.append_audit_event(
-                conn,
-                run_id=run_id,
-                kind="escalation_classify_failed",
-                subject=str(candidate_id),
-                data={"error": str(exc)},
-            )
-            continue
-        classification = next(
-            (c for c in outcome.results if c.payload_id == "c1"), None
-        )
-        if classification is None:
-            continue
-        results_by_id[candidate_id] = _resolve_escalation_response(
-            conn,
-            classification=classification,
-            candidate=candidate,
-            candidate_id=candidate_id,
-            allowed_rules=allowed_rules,
-            rules_by_id=rules_by_id,
-            run_id=run_id,
-            account_id=account_id,
-            model_id=model_cfg.model,
-            input_hash=built.input_hash,
-        )
-        escalated += 1
-
-    reporter.stop()
-    logger.info("run %s: escalation complete: %d re-classified", run_id, escalated)
-
-
-def _llm_description(rule: RuleConfig) -> str:
-    llm_condition = rules.llm_atom(rule.when)
-    assert llm_condition is not None
-    return llm_condition.description
-
-
-def _rule_text_hash(rule: RuleConfig) -> str:
-    llm_condition = rules.llm_atom(rule.when)
-    assert llm_condition is not None
-    return prompt.compute_rule_text_hash(llm_condition.description)
-
-
-def _resolve_escalation_response(
-    conn: sqlite3.Connection,
-    *,
-    classification: object,
-    candidate: Candidate,
-    candidate_id: int,
-    allowed_rules: tuple[str, ...],
-    rules_by_id: Mapping[str, RuleConfig],
-    run_id: str,
-    account_id: int,
-    model_id: str,
-    input_hash: str,
-) -> evaluate.CandidateResult:
-    """Validate the excerpt-level response with exactly the same rigour
-    as `evaluate._resolve_item` (that function is module-private to
-    `evaluate.py` and not part of the cross-unit interface, so its logic
-    is reimplemented here rather than reached into): every returned rule
-    id must have been offered for *this* candidate and must appear at
-    most once (spec §5.2, §5.3). There is no confidence to threshold —
-    every rule id that survives vocabulary validation is accepted
-    outright. Nothing here ever accepts a rule id outside `allowed_rules`.
-    """
-    offered_set = set(allowed_rules)
-    accepted: list[evaluate.ValidatedMatch] = []
-    seen: set[str] = set()
-    matches: tuple[str, ...] = tuple(getattr(classification, "matches", ()))
-    needs_content = bool(getattr(classification, "needs_content", False))
-    raw_for_audit = list(matches)
-
-    if not needs_content:
-        for rule_id in matches:
-            if rule_id not in offered_set or rule_id in seen:
-                continue
-            seen.add(rule_id)
-            accepted.append(evaluate.ValidatedMatch(rule_id=rule_id))
-        # Cache the verdict against the **metadata-level** input hash,
-        # not the excerpt-level one this response was actually produced
-        # from. That looks wrong and is deliberate.
-        #
-        # An excerpt-keyed entry is unusable by construction: computing
-        # that hash requires the excerpt, so finding out an answer is
-        # already known would mean fetching the body first -- the
-        # expensive half of what the cache exists to avoid. Worse, the
-        # metadata pass never caches a `needs_content` verdict (it is a
-        # deferral, not a decision -- see `evaluate._resolve_item`), so
-        # nothing short-circuits the *next* run either: a persistently
-        # unsure message paid a metadata call, a body fetch and its own
-        # un-batched excerpt call on every single run, forever.
-        #
-        # Keying on the metadata hash makes `evaluate.py`'s existing
-        # lookup find it, so the rule resolves from cache and neither the
-        # fetch nor either model call happens again. It is sound because
-        # the cache answers "does this rule apply to this message", and
-        # that answer does not depend on how much context was needed to
-        # reach it. The message itself stays pinned: `fingerprint` is
-        # part of the key, and a changed body changes `rfc822_size`,
-        # which changes the fingerprint.
-        #
-        # `offered` does not participate in `input_hash` (see
-        # `prompt.compute_input_hash`), so rebuilding the payload here
-        # with just the escalated subset yields exactly the hash
-        # `evaluate.py` computed from the full unknown set.
-        metadata_input_hash = prompt.build_candidate_payload(
-            candidate, payload_id="c0", offered=allowed_rules
-        ).input_hash
-        for rule_id in offered_set:
-            rule_cfg = rules_by_id[rule_id]
-            state.record_decision(
-                conn,
-                account_id=account_id,
-                fingerprint=candidate.fingerprint,
-                rule_id=rule_id,
-                rule_text_hash=_rule_text_hash(rule_cfg),
-                input_hash=metadata_input_hash,
-                model_id=model_id,
-                prompt_version=prompt.PROMPT_VERSION,
-                matched=rule_id in seen,
-            )
-
-    reason = getattr(classification, "reason", None)
-    if reason is not None and len(reason) > _REASON_CAP:
-        reason = reason[:_REASON_CAP]
-
-    state.insert_classification(
-        conn,
-        run_id=run_id,
-        candidate_id=candidate_id,
-        input_level="excerpt",
-        input_hash=input_hash,
-        offered_rules=allowed_rules,
-        matches=raw_for_audit,
-        needs_content=needs_content,
-        reason=reason,
-        valid=True,
-        error=None,
-        latency_ms=None,
-    )
-
-    status = None if accepted else "no_match"
-    return evaluate.CandidateResult(
-        candidate_id=candidate_id,
-        matches=tuple(accepted),
-        status=status,
-        reason=reason,
-        offered_rules=allowed_rules,
-        input_hash=input_hash,
-        valid=True,
-        error=None,
-    )
+    config: Config,
+    eligible: Sequence[tuple[int, Candidate]],
+    now: datetime,
+) -> list[int]:
+    body_processors = {
+        name for name, cfg in config.processors.items() if cfg.include_body
+    }
+    if not body_processors:
+        return []
+    result: list[int] = []
+    for candidate_id, candidate in eligible:
+        needed = evaluate.processors_needed_for_candidate(task.rules, candidate, now)
+        if needed & body_processors:
+            result.append(candidate_id)
+    return result
 
 
 def _fetch_excerpts(

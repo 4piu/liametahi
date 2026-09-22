@@ -11,7 +11,7 @@ from pathlib import Path
 
 from liametahi import runner as runner_mod
 from liametahi import state
-from liametahi.classifier import CandidatePayload, ClassifyOutcome, OfferedRule
+from liametahi.classifier import CandidatePayload, ClassifyOutcome, OfferedProcessor
 from liametahi.config import load_config
 from tests.conftest import make_config_dict, write_config
 from tests.fakes.fake_mailbox import FakeMailbox, _StoredMessage
@@ -24,7 +24,9 @@ class _InterruptingClassifier:
     as a real classifier would if SIGINT/SIGTERM landed mid-HTTP-call."""
 
     def classify(
-        self, candidates: Sequence[CandidatePayload], rules: Sequence[OfferedRule]
+        self,
+        candidates: Sequence[CandidatePayload],
+        processors: Sequence[OfferedProcessor],
     ) -> ClassifyOutcome:
         raise KeyboardInterrupt
 
@@ -37,9 +39,12 @@ def _config_with_state(tmp_path: Path) -> Path:
         "backup_dir": str(tmp_path / "backups"),
         "task_lock_dir": str(tmp_path / "locks"),
     }
+    data["processors"] = {
+        "junk-check": {"model": "local", "type": "noul", "question": "junk?"},
+    }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
         {"older-than": "1h"},
-        {"llm": "always trash"},
+        {"processor": "junk-check.value == true"},
     ]
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["backup", "trash"]
     return write_config(tmp_path / "cfg.yaml", data)

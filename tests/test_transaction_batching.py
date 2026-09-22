@@ -173,7 +173,7 @@ def test_action_attempt_writes_stay_individually_durable(tmp_path: Path) -> None
             uidvalidity={"INBOX": 1000, "Trash": 1000},
         )
         rule = RuleConfig.model_validate(
-            {"id": "r", "when": {"older-than": "1d"}, "actions": ["backup", "trash"]}
+            {"when": {"older-than": "1d"}, "actions": ["backup", "trash"]}
         )
         item = execute.ExecutionItem(
             candidate_id=candidate_id,

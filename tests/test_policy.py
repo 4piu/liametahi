@@ -1,47 +1,40 @@
-"""Tests for `liametahi.policy` (spec section 7.4)."""
+"""Tests for `liametahi.policy` (spec section 7.4; jev-provider-plan §7,
+§8, §9)."""
 
 from liametahi import policy
 from liametahi.config import RuleConfig
 
 
-def _rule(
-    rule_id: str,
-    actions: list[str],
-    *,
-    allow_trash_without_backup: bool = False,
-) -> RuleConfig:
-    return RuleConfig.model_validate(
-        {
-            "id": rule_id,
-            "when": {"older-than": "1d"},
-            "actions": actions,
-            "allow_trash_without_backup": allow_trash_without_backup,
-        }
-    )
+def _rule(actions: list[str]) -> RuleConfig:
+    return RuleConfig.model_validate({"when": {"older-than": "1d"}, "actions": actions})
 
 
-# --- select_winner / decide: winner-takes-all (spec section 7.4) --------
+# --- select_winner / decide: winner-takes-all by config order -------------
 
 
 def test_select_winner_empty_is_none() -> None:
     assert policy.select_winner([]) is None
 
 
-def test_select_winner_highest_priority_wins() -> None:
-    low = policy.MatchedRule("low", priority=10, config_order=0)
-    high = policy.MatchedRule("high", priority=100, config_order=1)
-    assert policy.select_winner([low, high]) is high
+def test_select_winner_first_listed_wins() -> None:
+    """jev-provider-plan §9: a matching rule's rank is simply its
+    position in `task.rules` -- there is no separate priority number any
+    more."""
+    later = policy.MatchedRule(rule_index=1, label="rule #2 of 2")
+    earlier = policy.MatchedRule(rule_index=0, label="rule #1 of 2")
+    assert policy.select_winner([later, earlier]) is earlier
 
 
-def test_select_winner_ties_broken_by_config_order() -> None:
-    first = policy.MatchedRule("first", priority=50, config_order=0)
-    second = policy.MatchedRule("second", priority=50, config_order=1)
+def test_select_winner_order_of_input_list_does_not_matter() -> None:
+    first = policy.MatchedRule(rule_index=0, label="rule #1 of 2")
+    second = policy.MatchedRule(rule_index=1, label="rule #2 of 2")
     assert policy.select_winner([second, first]) is first
+    assert policy.select_winner([first, second]) is first
 
 
 def test_decide_no_matches_is_no_match() -> None:
     decision = policy.decide(
-        protected=False, matches=[], rules_by_id={}, trash_mailbox="Trash"
+        protected=False, matches=[], rules_by_index=[], trash_mailbox="Trash"
     )
     assert decision.status == "no_match"
     assert decision.winning_rule is None
@@ -49,12 +42,12 @@ def test_decide_no_matches_is_no_match() -> None:
 
 
 def test_decide_protected_short_circuits_even_with_matches() -> None:
-    rule = _rule("r1", ["backup", "trash"])
-    matched = policy.MatchedRule("r1", priority=100, config_order=0)
+    rule = _rule(["backup", "trash"])
+    matched = policy.MatchedRule(rule_index=0, label="rule #1 of 1")
     decision = policy.decide(
         protected=True,
         matches=[matched],
-        rules_by_id={"r1": rule},
+        rules_by_index=[rule],
         trash_mailbox="Trash",
     )
     assert decision.status == "protected"
@@ -63,55 +56,57 @@ def test_decide_protected_short_circuits_even_with_matches() -> None:
 
 
 def test_decide_winner_takes_all_reports_shadowed() -> None:
-    winner_rule = _rule("winner", ["move_to:Archive"])
-    loser_rule = _rule("loser", ["backup", "trash"])
+    winner_rule = _rule(["move_to:Archive"])
+    loser_rule = _rule(["backup", "trash"])
+    rules_by_index = [winner_rule, loser_rule]
     matches = [
-        policy.MatchedRule("loser", priority=10, config_order=1),
-        policy.MatchedRule("winner", priority=100, config_order=0),
+        policy.MatchedRule(rule_index=1, label="rule #2 of 2"),
+        policy.MatchedRule(rule_index=0, label="rule #1 of 2"),
     ]
     decision = policy.decide(
         protected=False,
         matches=matches,
-        rules_by_id={"winner": winner_rule, "loser": loser_rule},
+        rules_by_index=rules_by_index,
         trash_mailbox="Trash",
     )
     assert decision.status == "matched"
-    assert decision.winning_rule == "winner"
-    assert decision.shadowed == ("loser",)
+    assert decision.winning_rule == "rule #1 of 2"
+    assert decision.shadowed == ("rule #2 of 2",)
     # The loser's actions (backup+trash) never resolve or run: only the
     # winner's full action list is present.
     assert [a.action for a in decision.actions] == ["move_to:Archive"]
 
 
-# --- resolve_actions ------------------------------------------------------
+# --- resolve_actions --------------------------------------------------------
 
 
 def test_resolve_actions_backup_is_not_a_remote_mutation() -> None:
-    rule = _rule("r", ["backup"])
+    rule = _rule(["backup"])
     (action,) = policy.resolve_actions(rule, trash_mailbox=None)
     assert action.kind == "backup"
     assert action.is_remote_mutation is False
     assert action.requires_prior_backup is False
 
 
-def test_resolve_actions_trash_requires_prior_backup_by_default() -> None:
-    rule = _rule("r", ["backup", "trash"])
+def test_resolve_actions_trash_never_requires_prior_backup() -> None:
+    """jev-provider-plan §8: backup-before-trash is no longer mandatory
+    -- `requires_prior_backup` is always False now, with or without a
+    preceding `backup` action."""
+    rule = _rule(["backup", "trash"])
     backup_action, trash_action = policy.resolve_actions(rule, trash_mailbox="Trash")
     assert backup_action.kind == "backup"
     assert trash_action.kind == "trash"
     assert trash_action.destination == "Trash"
-    assert trash_action.requires_prior_backup is True
+    assert trash_action.requires_prior_backup is False
     assert trash_action.is_remote_mutation is True
 
-
-def test_resolve_actions_trash_allow_without_backup() -> None:
-    rule = _rule("r", ["trash"], allow_trash_without_backup=True)
-    (trash_action,) = policy.resolve_actions(rule, trash_mailbox="Trash")
-    assert trash_action.requires_prior_backup is False
+    bare_rule = _rule(["trash"])
+    (bare_trash_action,) = policy.resolve_actions(bare_rule, trash_mailbox="Trash")
+    assert bare_trash_action.requires_prior_backup is False
 
 
 def test_resolve_actions_trash_without_trash_mailbox_raises() -> None:
-    rule = _rule("r", ["trash"], allow_trash_without_backup=True)
+    rule = _rule(["trash"])
     try:
         policy.resolve_actions(rule, trash_mailbox=None)
     except policy.PolicyConfigError:
@@ -121,7 +116,7 @@ def test_resolve_actions_trash_without_trash_mailbox_raises() -> None:
 
 
 def test_resolve_actions_move_to() -> None:
-    rule = _rule("r", ["move_to:Archive"])
+    rule = _rule(["move_to:Archive"])
     (action,) = policy.resolve_actions(rule, trash_mailbox=None)
     assert action.kind == "move_to"
     assert action.destination == "Archive"
@@ -130,11 +125,22 @@ def test_resolve_actions_move_to() -> None:
 
 
 def test_resolve_actions_label() -> None:
-    rule = _rule("r", ["label:Important"])
+    rule = _rule(["label:Important"])
     (action,) = policy.resolve_actions(rule, trash_mailbox=None)
     assert action.kind == "label"
     assert action.destination == "Important"
     assert action.is_remote_mutation is True
+
+
+def test_resolve_actions_task_is_not_a_remote_mutation() -> None:
+    """jev-provider-plan §7: `task:<id>` is local-only bookkeeping,
+    never an IMAP mutation."""
+    rule = _rule(["task:inbox-review"])
+    (action,) = policy.resolve_actions(rule, trash_mailbox=None)
+    assert action.kind == "task"
+    assert action.destination == "inbox-review"
+    assert action.is_remote_mutation is False
+    assert action.requires_prior_backup is False
 
 
 # --- property: winner-takes-all is total and deterministic --------------
@@ -142,9 +148,9 @@ def test_resolve_actions_label() -> None:
 
 def test_winner_selection_is_deterministic_across_orderings() -> None:
     matches = [
-        policy.MatchedRule("a", priority=5, config_order=2),
-        policy.MatchedRule("b", priority=5, config_order=0),
-        policy.MatchedRule("c", priority=9, config_order=1),
+        policy.MatchedRule(rule_index=2, label="rule #3 of 3"),
+        policy.MatchedRule(rule_index=0, label="rule #1 of 3"),
+        policy.MatchedRule(rule_index=1, label="rule #2 of 3"),
     ]
     import itertools
 
@@ -152,17 +158,22 @@ def test_winner_selection_is_deterministic_across_orderings() -> None:
     for perm in itertools.permutations(matches):
         winner = policy.select_winner(list(perm))
         assert winner is not None
-        winners.add(winner.rule_id)
-    assert winners == {"c"}  # highest priority always wins regardless of input order
+        winners.add(winner.rule_index)
+    assert winners == {0}  # first-listed rule always wins regardless of input order
 
 
 def test_shadowed_never_includes_the_winner() -> None:
-    rule = _rule("r1", ["move_to:Archive"])
-    matches = [policy.MatchedRule("r1", priority=1, config_order=0)]
+    rule = _rule(["move_to:Archive"])
+    matches = [policy.MatchedRule(rule_index=0, label="rule #1 of 1")]
     decision = policy.decide(
         protected=False,
         matches=matches,
-        rules_by_id={"r1": rule},
+        rules_by_index=[rule],
         trash_mailbox=None,
     )
     assert decision.winning_rule not in decision.shadowed
+
+
+def test_rule_label_is_one_indexed() -> None:
+    assert policy.rule_label(0, 3) == "rule #1 of 3"
+    assert policy.rule_label(2, 3) == "rule #3 of 3"

@@ -1,51 +1,48 @@
-"""The evaluate phase (spec §4.2, steps 2-6): three-valued rule
-evaluation against the LLM decision cache, batched LLM classification,
-response validation, and split-and-retry failure handling.
+"""The evaluate phase (spec §4.2, steps 2-6; jev-provider-plan §6, §10):
+three-valued rule evaluation against the LLM decision cache, batched
+processor classification, response validation, and split-and-retry
+failure handling.
 
-This module is the callable Unit 5's `runner.py` will sequence for
-phase 2 — deliberately not named `runner.py` itself, which is Unit 5's
-file. `evaluate_candidates()` consumes already-scanned candidates plus a
-task's configuration and produces, per candidate, either a set of
-validated matched rules (deterministic and/or LLM, ready for the policy
-engine to pick a winner — Unit 4's job, not this module's) or a terminal
-no-op status drawn from the spec §9 vocabulary
-(`no_match`/`cached_no_match`/`invalid_response`/`no_llm_response`).
+This module is the callable `runner.py` sequences for phase 2.
+`evaluate_candidates()` consumes already-scanned candidates plus a task's
+configuration and produces, per candidate, either a set of validated
+matched rules (deterministic and/or processor-backed, ready for the
+policy engine to pick a winner) or a terminal no-op status drawn from the
+spec §9 vocabulary (`no_match`/`cached_no_match`/`invalid_response`/
+`no_llm_response`).
 
-The model's output is yes/no/unsure, not a score (spec §5.3): a rule id
-appearing in a `Classification`'s `matches` is accepted outright once it
-passes vocabulary validation (offered for this candidate, not a
-duplicate); there is no confidence threshold anywhere in this module. An
-item with `needs_content: true` is unsure and nothing about it is
-accepted or cached (see `_resolve_item`).
+jev-provider-plan §6 generalises the old "the one `llm` atom, ask once,
+finalize" loop into: collect the distinct **processor names** referenced
+by any still-`Tri.UNKNOWN` rule (`rules.processor_names`), resolve as many
+as possible from the decision cache, group whatever remains by the model
+each references, ask each group once per candidate that still needs it
+(deduplicated by *processor*, not by rule -- two rules sharing one named
+processor invoke it once), merge every answer into one per-candidate
+`processor_values` map, and re-run `rules.evaluate(...,
+processor_values=...)` to finalize. A processor with `include_body: true`
+needs an excerpt this module has no mailbox access to fetch; `runner.py`
+fetches it up front (a static, always-needed fetch now, not a dynamic
+"escalation" -- jev-provider-plan §6's history doc explicitly rejects a
+`when:`-gated processor) and passes the text in via `excerpts`. A
+candidate whose only unresolved processor needs a body that was not
+available this round (fetch failed, or `runner.py` never called for it)
+simply stays unresolved for whatever rules reference that processor --
+the exact same "no answer this round" shape a cache miss followed by no
+ask at all would produce.
 
-Scope boundaries, deliberately:
-
-- Deterministic protected-message exclusion (spec §4.2 step 1) is
-  `rules.is_protected`, already provided by Unit 1; this module assumes
-  its caller has already filtered those out, so a protected message is
-  never even passed in here and can never reach a model.
-- Winner selection and action resolution (spec §4.2 step 8) are Unit 4's
-  `policy.py`. This module only ever narrows "which rules could this
-  message plausibly match", never picks a single winner.
-- Content escalation (spec §4.2 step 7) needs a mailbox re-fetch, which
-  is Unit 2's territory and unavailable to this module in isolation.
-  Per spec §5.3 ("if escalation is unavailable for any reason, the item
-  is treated as unknown and produces no action"), a candidate whose only
-  surviving classification requested `needs_content` is left with no
-  accepted match; Unit 5 may re-invoke this module with an excerpt-level
-  payload once it has fetched one, but that orchestration lives outside
-  this unit.
-
-Safety-critical property enforced here, not in either adapter: a
+Safety-critical property enforced here, not in any adapter: a
 `Classification` returned by a `Classifier` is untrusted until every
-single field has been checked against what was actually offered for
-that exact candidate. See `_resolve_item` below.
+field has been checked against what was actually offered for that exact
+candidate and processor -- including that an answer's `value` is one of
+the processor's declared options/levels (contracts §5.3's rule, extended
+per jev-provider-plan's classifier docstring: never let an adapter
+response widen what an action may do). See `_validate_answer` below.
 """
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from liametahi import prompt, rules, state
@@ -54,12 +51,19 @@ from liametahi.classifier import (
     Classification,
     Classifier,
     ClassifyOutcome,
-    OfferedRule,
+    OfferedProcessor,
 )
-from liametahi.config import ModelConfig, RuleConfig, TaskConfig
+from liametahi.config import (
+    Config,
+    ModelConfig,
+    ProcessorConfig,
+    RuleConfig,
+    TaskConfig,
+)
 from liametahi.domain import Candidate
 from liametahi.logging import get_logger
 from liametahi.progress import NullProgress, Progress
+from liametahi.rules import ProcessorAnswer
 
 logger = get_logger(__name__)
 
@@ -67,18 +71,16 @@ logger = get_logger(__name__)
 #: never read by policy (spec §5.3).
 _REASON_CAP = 200
 
+ClassifierFactory = Callable[[ModelConfig], Classifier]
+
 
 @dataclass(frozen=True, slots=True)
 class ValidatedMatch:
-    """One rule that matched a candidate, having survived every
-    validation check in `_resolve_item` — either the deterministic tree
-    resolved to TRUE (spec §7.2), or the model confidently reported this
-    rule id in `matches` and the id was offered for this candidate and
-    not a duplicate. There is no confidence score to carry (spec §5.3):
-    the model's output is yes/no/unsure, not a threshold-worthy number.
-    """
+    """One rule (identified by its position in `task.rules`) that matched
+    a candidate: the tree resolved to TRUE against the accumulated
+    `processor_values` (jev-provider-plan §6)."""
 
-    rule_id: str
+    rule_index: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,16 +89,13 @@ class CandidateResult:
 
     `matches` non-empty means "hand this to the policy engine"; `status`
     is set exactly when `matches` is empty, explaining why (one of the
-    no-op statuses in spec §9). `valid`/`error` mirror the
-    `classifications` table columns (contracts §4) for audit.
+    no-op statuses in spec §9).
     """
 
     candidate_id: int
     matches: tuple[ValidatedMatch, ...]
     status: str | None
     reason: str | None
-    offered_rules: tuple[str, ...]
-    input_hash: str | None
     valid: bool
     error: str | None
 
@@ -113,28 +112,301 @@ class EvaluateOutcome:
 # --- Internal working state ------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class _BatchItem:
+@dataclass(slots=True)
+class _CandidateState:
     candidate_id: int
     candidate: Candidate
-    resolved_matches: tuple[ValidatedMatch, ...]
-    cache_hit: bool
-    remaining_rule_ids: tuple[str, ...]
-    input_hash: str
+    processor_values: dict[str, ProcessorAnswer] = field(default_factory=dict)
+    used_cache: bool = False
+    # A classify() call that raised, or a response item that failed
+    # structural validation, for a job this candidate was part of (spec
+    # §5.4 points 2-3): distinct from simply not having a match, and from
+    # `saw_missing` below (a well-formed response that just never
+    # mentioned this candidate).
+    saw_invalid: bool = False
+    saw_missing: bool = False
+    last_error: str | None = None
+    last_reason: str | None = None
+    finalized: CandidateResult | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _BatchAttempt:
-    """One completed model call and the items it covered -- the whole
-    result of the network half of a batch, carrying everything the
-    bookkeeping half needs so the two can happen on different threads.
-    `outcome is None` means the call failed or came back wholly invalid,
-    with `failure_reason` explaining which."""
+def _offered_processor(name: str, cfg: ProcessorConfig) -> OfferedProcessor:
+    return OfferedProcessor(
+        name=name,
+        type=cfg.type,
+        criteria=cfg.criteria,
+        options=cfg.options,
+        levels=tuple(cfg.levels) if cfg.levels else None,
+        include_body=cfg.include_body,
+    )
 
-    items: tuple[_BatchItem, ...]
-    item_by_payload_id: dict[str, _BatchItem]
-    outcome: ClassifyOutcome | None
-    failure_reason: str
+
+def _evaluate_rules(
+    task_rules: Sequence[RuleConfig],
+    candidate: Candidate,
+    now: datetime,
+    processor_values: Mapping[str, ProcessorAnswer],
+) -> tuple[list[ValidatedMatch], set[str]]:
+    """One pass over every rule with the processor answers resolved so
+    far. Pure and cheap, so the caller simply re-runs it whenever
+    `processor_values` grows rather than tracking incremental state by
+    hand."""
+    matches: list[ValidatedMatch] = []
+    needed: set[str] = set()
+    for index, rule in enumerate(task_rules):
+        tri = rules.evaluate(
+            rule.when, candidate, now=now, processor_values=processor_values
+        )
+        if tri is rules.Tri.TRUE:
+            matches.append(ValidatedMatch(index))
+        elif tri is rules.Tri.UNKNOWN:
+            needed |= rules.processor_names(rule.when)
+    return matches, needed
+
+
+def processors_needed_for_candidate(
+    task_rules: Sequence[RuleConfig], candidate: Candidate, now: datetime
+) -> frozenset[str]:
+    """Every processor name a still-`UNKNOWN` rule references for this
+    candidate, with no prior processor knowledge -- exactly pass 1 of
+    `evaluate_candidates`, exposed so `runner.py` can decide which
+    candidates need a body excerpt fetched *before* evaluation starts at
+    all (jev-provider-plan §2: `include_body` is a static per-processor
+    switch, not a dynamically-triggered second pass)."""
+    _, needed = _evaluate_rules(task_rules, candidate, now, {})
+    return frozenset(needed)
+
+
+def _finalize(state_item: _CandidateState, matches: list[ValidatedMatch]) -> None:
+    """Priority mirrors the old per-rule `_mark_invalid`/`_mark_missing`
+    semantics (spec §5.4 points 2-3), generalised to processors: a match
+    always reaches policy regardless of an unrelated processor's failure
+    elsewhere, but `valid`/`error` on the row still records that failure
+    for audit; a candidate with no match is `invalid_response` if any
+    job it needed raised or failed structural validation,
+    `no_llm_response` if a well-formed response simply never mentioned
+    it, `cached_no_match` if every remaining processor resolved from
+    cache, else a confident `no_match`.
+    """
+    invalid = state_item.saw_invalid or state_item.saw_missing
+    if matches:
+        status = None
+    elif state_item.saw_invalid:
+        status = "invalid_response"
+    elif state_item.saw_missing:
+        status = "no_llm_response"
+    elif state_item.used_cache:
+        status = "cached_no_match"
+    else:
+        status = "no_match"
+    state_item.finalized = CandidateResult(
+        candidate_id=state_item.candidate_id,
+        matches=tuple(matches),
+        status=status,
+        reason=state_item.last_reason,
+        valid=not invalid,
+        error=state_item.last_error if invalid else None,
+    )
+
+
+def _processor_input_hash(
+    candidate: Candidate,
+    cfg: ProcessorConfig,
+    model_cfg: ModelConfig,
+    excerpt_text: str | None,
+) -> str | None:
+    """The cache/request input hash for one processor against one
+    candidate. `None` means "cannot be resolved this round" -- an
+    `include_body` processor with no excerpt text available."""
+    if cfg.include_body:
+        if excerpt_text is None:
+            return None
+        return prompt.build_excerpt_payload(
+            candidate,
+            payload_id="c0",
+            excerpt_text=excerpt_text,
+            max_chars=model_cfg.body_excerpt.max_chars,
+        ).input_hash
+    return prompt.build_candidate_payload(candidate, payload_id="c0").input_hash
+
+
+# --- Entry point --------------------------------------------------------
+
+
+def evaluate_candidates(
+    conn: sqlite3.Connection,
+    *,
+    account_id: int,
+    run_id: str,
+    task: TaskConfig,
+    config: Config,
+    classifier_factory: ClassifierFactory,
+    candidates: Sequence[tuple[int, Candidate]],
+    now: datetime,
+    reevaluate: bool,
+    excerpts: Mapping[int, str] | None = None,
+    progress: Progress | None = None,
+) -> EvaluateOutcome:
+    """Run spec §4.2 steps 2-6 over already-scanned, already
+    protected-filtered candidates (jev-provider-plan §6).
+
+    `excerpts` maps a candidate id to already-fetched, already-cleaned
+    plain text (spec §5.1) for any candidate that needs one of this
+    task's `include_body: true` processors answered -- `runner.py`'s
+    job, since this module has no mailbox access. Absent from the map
+    means "no excerpt available this round"; a processor that needs one
+    simply stays unresolved for that candidate.
+    """
+    reporter = progress or NullProgress()
+    excerpts = excerpts or {}
+    states: dict[int, _CandidateState] = {
+        candidate_id: _CandidateState(candidate_id=candidate_id, candidate=candidate)
+        for candidate_id, candidate in candidates
+    }
+
+    # --- Pass 1: deterministic-only, no processor calls at all ----------
+    pending: list[int] = []
+    for candidate_id, item in states.items():
+        matches, needed = _evaluate_rules(task.rules, item.candidate, now, {})
+        if not needed:
+            _finalize(item, matches)
+        else:
+            pending.append(candidate_id)
+
+    if not pending:
+        return _assemble_outcome(states, candidates, _BatchStats(llm_calls=0))
+
+    # --- Pass 2: decision cache -----------------------------------------
+    still_pending: list[int] = []
+    for candidate_id in pending:
+        item = states[candidate_id]
+        _, needed = _evaluate_rules(
+            task.rules, item.candidate, now, item.processor_values
+        )
+        ask_now = _consult_cache(
+            conn,
+            config=config,
+            account_id=account_id,
+            reevaluate=reevaluate,
+            item=item,
+            needed=needed,
+            excerpts=excerpts,
+        )
+        matches, needed_after = _evaluate_rules(
+            task.rules, item.candidate, now, item.processor_values
+        )
+        if not needed_after or not ask_now:
+            _finalize(item, matches)
+        else:
+            still_pending.append(candidate_id)
+
+    if not still_pending:
+        return _assemble_outcome(states, candidates, _BatchStats(llm_calls=0))
+
+    # --- Pass 3: batch the rest by (model, exact processor set needed) --
+    to_ask: dict[int, set[str]] = {}
+    for candidate_id in still_pending:
+        item = states[candidate_id]
+        _, needed = _evaluate_rules(
+            task.rules, item.candidate, now, item.processor_values
+        )
+        if needed:
+            to_ask[candidate_id] = needed
+
+    stats = _BatchStats(llm_calls=0)
+    if to_ask:
+        reporter.start("classifying", total=len(to_ask))
+        try:
+            stats = _classify_all(
+                conn,
+                config=config,
+                classifier_factory=classifier_factory,
+                run_id=run_id,
+                account_id=account_id,
+                states=states,
+                to_ask=to_ask,
+                excerpts=excerpts,
+                reporter=reporter,
+            )
+        finally:
+            reporter.stop()
+
+    # --- Finalize everything left ---------------------------------------
+    for candidate_id in still_pending:
+        item = states[candidate_id]
+        if item.finalized is None:
+            matches, _ = _evaluate_rules(
+                task.rules, item.candidate, now, item.processor_values
+            )
+            _finalize(item, matches)
+
+    return _assemble_outcome(states, candidates, stats)
+
+
+def _assemble_outcome(
+    states: Mapping[int, _CandidateState],
+    candidates: Sequence[tuple[int, Candidate]],
+    stats: _BatchStats,
+) -> EvaluateOutcome:
+    results = []
+    for candidate_id, _ in candidates:
+        finalized = states[candidate_id].finalized
+        assert finalized is not None
+        results.append(finalized)
+    return EvaluateOutcome(
+        results=tuple(results),
+        llm_calls=stats.llm_calls,
+        structured_output_level=stats.structured_output_level,
+        input_tokens=stats.input_tokens,
+        output_tokens=stats.output_tokens,
+    )
+
+
+def _consult_cache(
+    conn: sqlite3.Connection,
+    *,
+    config: Config,
+    account_id: int,
+    reevaluate: bool,
+    item: _CandidateState,
+    needed: set[str],
+    excerpts: Mapping[int, str],
+) -> set[str]:
+    """Resolve as many of `needed` as possible from the decision cache
+    (spec §13), writing hits into `item.processor_values`. Returns the
+    subset that still needs a live ask this round (excludes anything
+    resolved from cache and anything that cannot be asked this round at
+    all, e.g. a body-needing processor with no excerpt available)."""
+    ask_now: set[str] = set()
+    for name in needed:
+        cfg = config.processors[name]
+        model_cfg = config.models[cfg.model]
+        excerpt_text = excerpts.get(item.candidate_id) if cfg.include_body else None
+        input_hash = _processor_input_hash(item.candidate, cfg, model_cfg, excerpt_text)
+        if input_hash is None:
+            continue
+        offered = _offered_processor(name, cfg)
+        processor_hash = prompt.compute_processor_hash(offered)
+        if not reevaluate:
+            cached = state.get_cached_processor_decision(
+                conn,
+                account_id=account_id,
+                fingerprint=item.candidate.fingerprint,
+                processor_name=name,
+                processor_hash=processor_hash,
+                input_hash=input_hash,
+                model_id=model_cfg.model,
+                prompt_version=prompt.PROMPT_VERSION,
+            )
+            if cached is not None:
+                item.processor_values[name] = cached
+                item.used_cache = True
+                continue
+        ask_now.add(name)
+    return ask_now
+
+
+# --- Batching and classification (spec §5.4; jev-provider-plan §6) ------
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,485 +435,374 @@ def _combine_stats(left: _BatchStats, right: _BatchStats) -> _BatchStats:
     )
 
 
-def _finalize_no_llm(
-    candidate_id: int,
-    resolved_matches: tuple[ValidatedMatch, ...],
-    *,
-    cache_hit: bool,
-) -> CandidateResult:
-    """A candidate whose rule set was fully resolved by deterministic
-    evaluation plus (optionally) the LLM decision cache, with no model
-    call this run (spec §4.2 step 4)."""
-    if resolved_matches:
-        status = None
-    elif cache_hit:
-        status = "cached_no_match"
-    else:
-        status = "no_match"
-    return CandidateResult(
-        candidate_id=candidate_id,
-        matches=resolved_matches,
-        status=status,
-        reason=None,
-        offered_rules=(),
-        input_hash=None,
-        valid=True,
-        error=None,
-    )
+def _group_by_model(
+    to_ask: Mapping[int, set[str]], config: Config
+) -> dict[str, dict[frozenset[str], list[int]]]:
+    """model name -> exact processor-name-set needed -> candidate ids
+    needing exactly that set from that model. A candidate whose needed
+    processors span two models appears once in each model's grouping,
+    with only that model's share of its needed names -- two independent
+    asks, exactly as jev-provider-plan §6 describes."""
+    grouped: dict[str, dict[frozenset[str], list[int]]] = {}
+    for candidate_id, names in to_ask.items():
+        by_model: dict[str, set[str]] = {}
+        for name in names:
+            model_name = config.processors[name].model
+            by_model.setdefault(model_name, set()).add(name)
+        for model_name, name_set in by_model.items():
+            per_key = grouped.setdefault(model_name, {})
+            per_key.setdefault(frozenset(name_set), []).append(candidate_id)
+    return grouped
 
 
-# --- Entry point --------------------------------------------------------
-
-
-def evaluate_candidates(
-    conn: sqlite3.Connection,
-    *,
-    account_id: int,
-    run_id: str,
-    task: TaskConfig,
-    model_config: ModelConfig,
-    model_id: str,
-    classifier: Classifier,
-    candidates: Sequence[tuple[int, Candidate]],
-    now: datetime,
-    reevaluate: bool,
-    progress: Progress | None = None,
-) -> EvaluateOutcome:
-    """Run spec §4.2 steps 2-6 over already-scanned, already
-    protected-filtered candidates.
-
-    `candidates` pairs each candidate with its `candidates.candidate_id`
-    primary key (contracts §4), needed for `result_items`/
-    `classifications` foreign keys and for the LLM decision cache's
-    `fingerprint` (read off the `Candidate` itself).
-    """
-    reporter = progress or NullProgress()
-    rules_by_id: dict[str, RuleConfig] = {rule.id: rule for rule in task.rules}
-    per_candidate: dict[int, CandidateResult] = {}
-    llm_items: list[_BatchItem] = []
-
-    for candidate_id, candidate in candidates:
-        resolved_matches: list[ValidatedMatch] = []
-        unknown_rule_ids: list[str] = []
-        for rule in task.rules:
-            tri = rules.evaluate(rule.when, candidate, now=now)
-            if tri is rules.Tri.TRUE:
-                resolved_matches.append(ValidatedMatch(rule.id))
-            elif tri is rules.Tri.UNKNOWN:
-                unknown_rule_ids.append(rule.id)
-
-        if not unknown_rule_ids:
-            per_candidate[candidate_id] = _finalize_no_llm(
-                candidate_id, tuple(resolved_matches), cache_hit=False
-            )
-            continue
-
-        built = prompt.build_candidate_payload(
-            candidate, payload_id="c0", offered=tuple(unknown_rule_ids)
-        )
-        cache_hit = False
-        remaining: list[str] = []
-        for rule_id in unknown_rule_ids:
-            rule_text_hash = _rule_text_hash(rules_by_id[rule_id])
-            if not reevaluate:
-                cached = state.get_cached_decision(
-                    conn,
-                    account_id=account_id,
-                    fingerprint=candidate.fingerprint,
-                    rule_id=rule_id,
-                    rule_text_hash=rule_text_hash,
-                    input_hash=built.input_hash,
-                    model_id=model_id,
-                    prompt_version=prompt.PROMPT_VERSION,
-                )
-                if cached is not None:
-                    cache_hit = True
-                    if cached["matched"]:
-                        # A cached "yes": skip straight to policy/execution
-                        # without asking again. This is what lets a message
-                        # whose remote mutation failed last run (wrong
-                        # trash_mailbox, an unadvertised capability, ...)
-                        # retry that mutation on the next run instead of
-                        # being reclassified from scratch every time.
-                        resolved_matches.append(ValidatedMatch(rule_id))
-                    continue
-            remaining.append(rule_id)
-
-        if not remaining:
-            per_candidate[candidate_id] = _finalize_no_llm(
-                candidate_id, tuple(resolved_matches), cache_hit=cache_hit
-            )
-            continue
-
-        llm_items.append(
-            _BatchItem(
-                candidate_id=candidate_id,
-                candidate=candidate,
-                resolved_matches=tuple(resolved_matches),
-                cache_hit=cache_hit,
-                remaining_rule_ids=tuple(remaining),
-                input_hash=built.input_hash,
-            )
-        )
-
-    stats = _BatchStats(llm_calls=0)
-    if llm_items:
-        batches = _group_into_batches(
-            llm_items, batch_size=model_config.mails_per_request
-        )
-        total_batches = len(batches)
-        concurrency = min(model_config.max_concurrent_requests, total_batches)
-        logger.info(
-            "run %s: %d mail(s) need an LLM call, in %d batch(es)%s",
-            run_id,
-            len(llm_items),
-            total_batches,
-            "" if concurrency == 1 else f", {concurrency} at a time",
-        )
-        reporter.start("classifying", total=len(llm_items))
-        try:
-            stats = _classify_all(
-                conn,
-                batches,
-                rules_by_id=rules_by_id,
-                classifier=classifier,
-                run_id=run_id,
-                account_id=account_id,
-                model_id=model_id,
-                per_candidate=per_candidate,
-                concurrency=concurrency,
-                reporter=reporter,
-            )
-        finally:
-            reporter.stop()
-
-    results = tuple(per_candidate[candidate_id] for candidate_id, _ in candidates)
-    return EvaluateOutcome(
-        results=results,
-        llm_calls=stats.llm_calls,
-        structured_output_level=stats.structured_output_level,
-        input_tokens=stats.input_tokens,
-        output_tokens=stats.output_tokens,
-    )
-
-
-def _rule_text_hash(rule: RuleConfig) -> str:
-    llm_condition = rules.llm_atom(rule.when)
-    assert llm_condition is not None, (
-        f"rule {rule.id!r} reached the LLM path without an 'llm' atom; "
-        "config validation guarantees every UNKNOWN rule has exactly one"
-    )
-    return prompt.compute_rule_text_hash(llm_condition.description)
-
-
-# --- Batching (spec §5.4) -----------------------------------------------
-
-
-def _group_into_batches(
-    items: Sequence[_BatchItem], *, batch_size: int
-) -> list[list[_BatchItem]]:
-    """Group candidates by identical remaining-rule-set "where
-    practical" (spec §5.4), then chunk each group to `batch_size`.
-    Candidates are processed in their given (oldest-first, spec §4.1)
-    order; grouping only reorders within that stability by rule-set key,
-    it never changes which candidates are considered."""
-    by_rule_set: dict[tuple[str, ...], list[_BatchItem]] = {}
-    order: list[tuple[str, ...]] = []
-    for item in items:
-        key = item.remaining_rule_ids
-        if key not in by_rule_set:
-            by_rule_set[key] = []
-            order.append(key)
-        by_rule_set[key].append(item)
-
-    batches: list[list[_BatchItem]] = []
-    for key in order:
-        group = by_rule_set[key]
-        for start in range(0, len(group), batch_size):
-            batches.append(group[start : start + batch_size])
-    return batches
-
-
-# --- Classification + split-and-retry (spec §5.4) ------------------------
-
-
-def _build_batch_request(
-    items: Sequence[_BatchItem], rules_by_id: dict[str, RuleConfig]
-) -> tuple[list[CandidatePayload], dict[str, _BatchItem], list[OfferedRule]]:
-    payloads: list[CandidatePayload] = []
-    item_by_payload_id: dict[str, _BatchItem] = {}
-    all_rule_ids: set[str] = set()
-    for index, item in enumerate(items, start=1):
-        payload_id = f"c{index}"
-        built = prompt.build_candidate_payload(
-            item.candidate, payload_id=payload_id, offered=item.remaining_rule_ids
-        )
-        payloads.append(built.payload)
-        item_by_payload_id[payload_id] = item
-        all_rule_ids.update(item.remaining_rule_ids)
-    offered_rules = [
-        OfferedRule(rule_id=rule_id, description=_llm_description(rules_by_id[rule_id]))
-        for rule_id in sorted(all_rule_ids)
-    ]
-    return payloads, item_by_payload_id, offered_rules
-
-
-def _llm_description(rule: RuleConfig) -> str:
-    llm_condition = rules.llm_atom(rule.when)
-    assert llm_condition is not None
-    return llm_condition.description
+@dataclass(frozen=True, slots=True)
+class _Job:
+    candidate_ids: tuple[int, ...]
+    processors: tuple[OfferedProcessor, ...]
+    needs_body: bool
 
 
 def _classify_all(
     conn: sqlite3.Connection,
-    batches: Sequence[Sequence[_BatchItem]],
     *,
-    rules_by_id: dict[str, RuleConfig],
-    classifier: Classifier,
+    config: Config,
+    classifier_factory: ClassifierFactory,
     run_id: str,
     account_id: int,
-    model_id: str,
-    per_candidate: dict[int, CandidateResult],
-    concurrency: int,
+    states: dict[int, _CandidateState],
+    to_ask: Mapping[int, set[str]],
+    excerpts: Mapping[int, str],
     reporter: Progress,
 ) -> _BatchStats:
-    """Classify every batch and record the results.
+    """Classify every still-needed candidate, model by model.
 
-    The model calls may overlap (`concurrency > 1`); the recording never
-    does. Every write goes through `conn` on this thread, in batch order
-    -- not completion order -- so the database, the audit trail, and the
-    report come out identical no matter what the concurrency is set to
-    or how the provider happened to schedule the requests. The only
-    thing `max_concurrent_requests` is allowed to change is how long the
-    phase takes.
-
-    `sqlite3` connections are not safe to share across threads, and
-    `state.transaction` is explicit that a transaction must never be
-    held open across network I/O; keeping every write on this thread is
-    what satisfies both at once.
+    Requests for the same model may overlap up to
+    `model_cfg.max_concurrent_requests` (the real throughput lever for a
+    first run over a large mailbox); the network half of each batch
+    (`_classify_network`) touches no shared state at all, so it is safe
+    to run on a worker thread, while every database write
+    (`_record_attempt`) always happens back on this thread, in job
+    submission order rather than completion order -- `executor.map`
+    already guarantees that ordering, which is what keeps the database,
+    the audit trail, and the report identical no matter the concurrency
+    setting or how a provider happened to schedule its responses.
     """
-    total = len(batches)
-
-    def label(index: int) -> str:
-        return f"{index}/{total}"
-
-    def network(index: int, batch: Sequence[_BatchItem]) -> list[_BatchAttempt]:
-        logger.info(
-            "run %s: classifying batch %d/%d (%d mails)",
-            run_id,
-            index,
-            total,
-            len(batch),
-        )
-        return _call_classifier(
-            batch,
-            rules_by_id=rules_by_id,
-            classifier=classifier,
-            run_id=run_id,
-            batch_label=label(index),
-        )
-
+    classifiers: dict[str, Classifier] = {}
+    grouped = _group_by_model(to_ask, config)
     stats = _BatchStats(llm_calls=0)
 
-    def record(batch: Sequence[_BatchItem], attempts: list[_BatchAttempt]) -> None:
-        nonlocal stats
-        for attempt in attempts:
-            stats = _combine_stats(
-                stats,
-                _apply_attempt(
-                    conn,
-                    attempt,
-                    rules_by_id=rules_by_id,
-                    run_id=run_id,
-                    account_id=account_id,
-                    model_id=model_id,
-                    per_candidate=per_candidate,
-                ),
+    for model_name, by_names in grouped.items():
+        model_cfg = config.models[model_name]
+        classifier = classifiers.setdefault(model_name, classifier_factory(model_cfg))
+        jobs: list[_Job] = []
+        for name_set, candidate_ids in by_names.items():
+            processors = tuple(
+                _offered_processor(name, config.processors[name])
+                for name in sorted(name_set)
             )
-        reporter.advance(len(batch))
+            needs_body = any(p.include_body for p in processors)
+            batch_size = model_cfg.mails_per_request
+            for start in range(0, len(candidate_ids), batch_size):
+                chunk = tuple(candidate_ids[start : start + batch_size])
+                jobs.append(_Job(chunk, processors, needs_body))
+        if not jobs:
+            continue
 
-    if concurrency <= 1:
-        for index, batch in enumerate(batches, start=1):
-            record(batch, network(index, batch))
-        return stats
+        def network(
+            job: _Job,
+            *,
+            classifier: Classifier = classifier,
+            model_cfg: ModelConfig = model_cfg,
+        ) -> list[_NetworkAttempt]:
+            return _classify_network(
+                classifier,
+                states,
+                job.candidate_ids,
+                job.processors,
+                needs_body=job.needs_body,
+                max_chars=model_cfg.body_excerpt.max_chars,
+                excerpts=excerpts,
+                run_id=run_id,
+            )
 
-    # `executor.map` yields in submission order, which is what keeps the
-    # recording deterministic. Interrupting mid-phase still has to wait
-    # for the requests already in flight to come back -- there is no way
-    # to abandon a socket a worker thread is blocked on -- but the ones
-    # merely queued are dropped rather than started.
-    executor = ThreadPoolExecutor(
-        max_workers=concurrency, thread_name_prefix="lia-classify"
-    )
-    try:
-        results = executor.map(network, range(1, total + 1), batches)
-        for batch, attempts in zip(batches, results, strict=True):
-            record(batch, attempts)
-    except BaseException:
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    else:
-        executor.shutdown(wait=True)
+        def record(job: _Job, attempts: list[_NetworkAttempt]) -> None:
+            nonlocal stats
+            for attempt in attempts:
+                stats = _combine_stats(
+                    stats,
+                    _record_attempt(
+                        conn,
+                        attempt,
+                        config=config,
+                        states=states,
+                        run_id=run_id,
+                        account_id=account_id,
+                        excerpts=excerpts,
+                    ),
+                )
+            reporter.advance(len(job.candidate_ids))
+
+        concurrency = min(model_cfg.max_concurrent_requests, len(jobs))
+        if concurrency <= 1:
+            for job in jobs:
+                record(job, network(job))
+            continue
+
+        executor = ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="lia-classify"
+        )
+        try:
+            results = executor.map(network, jobs)
+            for job, attempts in zip(jobs, results, strict=True):
+                record(job, attempts)
+        except BaseException:
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
     return stats
 
 
-def _call_classifier(
-    items: Sequence[_BatchItem],
+def _build_payloads(
+    states: dict[int, _CandidateState],
+    candidate_ids: Sequence[int],
     *,
-    rules_by_id: dict[str, RuleConfig],
+    needs_body: bool,
+    max_chars: int | None,
+    excerpts: Mapping[int, str],
+) -> tuple[list[CandidatePayload], dict[str, int], dict[str, str], str]:
+    payloads: list[CandidatePayload] = []
+    by_payload_id: dict[str, int] = {}
+    input_hash_by_payload_id: dict[str, str] = {}
+    input_level = "excerpt" if needs_body else "metadata"
+    for index, candidate_id in enumerate(candidate_ids, start=1):
+        payload_id = f"c{index}"
+        candidate = states[candidate_id].candidate
+        if needs_body and candidate_id in excerpts:
+            built = prompt.build_excerpt_payload(
+                candidate,
+                payload_id=payload_id,
+                excerpt_text=excerpts[candidate_id],
+                max_chars=max_chars,
+            )
+        else:
+            built = prompt.build_candidate_payload(candidate, payload_id=payload_id)
+        payloads.append(built.payload)
+        by_payload_id[payload_id] = candidate_id
+        input_hash_by_payload_id[payload_id] = built.input_hash
+    return payloads, by_payload_id, input_hash_by_payload_id, input_level
+
+
+@dataclass(frozen=True, slots=True)
+class _NetworkAttempt:
+    """The network half of classifying one batch, and nothing else --
+    touches no database and no shared mutable state, which is what makes
+    it safe to run for several batches at once (see `_classify_all`).
+    `outcome is None` means the call failed or came back wholly invalid;
+    a wholly-invalid attempt has already been split-and-retried once by
+    the time this is returned (spec section 5.4), so the caller never
+    retries it again."""
+
+    candidate_ids: tuple[int, ...]
+    by_payload_id: dict[str, int]
+    input_hash_by_payload_id: dict[str, str]
+    input_level: str
+    processors: tuple[OfferedProcessor, ...]
+    outcome: ClassifyOutcome | None
+    failure_reason: str = "classify() raised an exception"
+
+
+def _classify_network(
     classifier: Classifier,
+    states: dict[int, _CandidateState],
+    candidate_ids: Sequence[int],
+    processors: Sequence[OfferedProcessor],
+    *,
+    needs_body: bool,
+    max_chars: int | None,
+    excerpts: Mapping[int, str],
     run_id: str,
     allow_retry: bool = True,
-    batch_label: str = "1/1",
-) -> list[_BatchAttempt]:
-    """The network half of classifying one batch, and nothing else.
-
-    Touches no database and no shared mutable state, which is what makes
-    it safe to run for several batches at once (see
-    `_classify_concurrently`). Everything that has to be *written* comes
-    back in the returned attempts for the caller to apply.
-
-    If the response is unparseable or wholly invalid (spec §5.4 point 2),
-    the batch is split in half and each half retried exactly once
-    (`allow_retry=False` on the recursive call prevents a second split),
-    which is why this returns a list rather than a single attempt.
-    """
-    payloads, item_by_payload_id, offered_rules = _build_batch_request(
-        items, rules_by_id
+) -> list[_NetworkAttempt]:
+    payloads, by_payload_id, input_hash_by_payload_id, input_level = _build_payloads(
+        states,
+        candidate_ids,
+        needs_body=needs_body,
+        max_chars=max_chars,
+        excerpts=excerpts,
     )
 
-    outcome: ClassifyOutcome | None = None
+    failure_reason = "unparseable or wholly invalid model response"
     try:
-        completed = classifier.classify(payloads, offered_rules)
+        outcome = classifier.classify(payloads, processors)
     except Exception as exc:  # noqa: BLE001 - explicit recorded outcome below
-        wholly_invalid = True
         failure_reason = f"classifier raised {type(exc).__name__}: {exc}"
-        logger.debug(
-            "run %s: batch %s: classify() raised %s",
-            run_id,
-            batch_label,
-            failure_reason,
-        )
-    else:
-        outcome = completed
-        wholly_invalid = len(completed.results) == 0
-        failure_reason = "unparseable or wholly invalid model response"
-        logger.debug(
-            "run %s: batch %s: structured_output=%s latency_ms=%s "
-            "input_tokens=%s output_tokens=%s valid=%d invalid=%d missing=%d",
-            run_id,
-            batch_label,
-            outcome.structured_output_level,
-            outcome.latency_ms,
-            outcome.input_tokens,
-            outcome.output_tokens,
-            len(outcome.results),
-            len(outcome.invalid),
-            len(outcome.missing),
-        )
+        logger.debug("run %s: %s", run_id, failure_reason)
+        outcome = None
 
-    if wholly_invalid and allow_retry and len(items) > 1:
-        logger.debug(
-            "run %s: batch %s wholly invalid (%s); splitting %d item(s) and retrying",
-            run_id,
-            batch_label,
-            failure_reason,
-            len(items),
-        )
-        midpoint = len(items) // 2
-        halves = []
-        for half_index, half in enumerate(
-            (items[:midpoint], items[midpoint:]), start=1
-        ):
-            halves.extend(
-                _call_classifier(
+    wholly_invalid = outcome is None or len(outcome.results) == 0
+    if wholly_invalid and allow_retry and len(candidate_ids) > 1:
+        midpoint = len(candidate_ids) // 2
+        attempts: list[_NetworkAttempt] = []
+        for half in (candidate_ids[:midpoint], candidate_ids[midpoint:]):
+            attempts.extend(
+                _classify_network(
+                    classifier,
+                    states,
                     half,
-                    rules_by_id=rules_by_id,
-                    classifier=classifier,
+                    processors,
+                    needs_body=needs_body,
+                    max_chars=max_chars,
+                    excerpts=excerpts,
                     run_id=run_id,
                     allow_retry=False,
-                    batch_label=f"{batch_label} (retry {half_index}/2)",
                 )
             )
-        return halves
+        return attempts
 
     return [
-        _BatchAttempt(
-            items=tuple(items),
-            item_by_payload_id=item_by_payload_id,
+        _NetworkAttempt(
+            candidate_ids=tuple(candidate_ids),
+            by_payload_id=by_payload_id,
+            input_hash_by_payload_id=input_hash_by_payload_id,
+            input_level=input_level,
+            processors=tuple(processors),
             outcome=None if wholly_invalid else outcome,
             failure_reason=failure_reason,
         )
     ]
 
 
-def _apply_attempt(
+def _record_attempt(
     conn: sqlite3.Connection,
-    attempt: _BatchAttempt,
+    attempt: _NetworkAttempt,
     *,
-    rules_by_id: dict[str, RuleConfig],
+    config: Config,
+    states: dict[int, _CandidateState],
     run_id: str,
     account_id: int,
-    model_id: str,
-    per_candidate: dict[int, CandidateResult],
+    excerpts: Mapping[int, str],
 ) -> _BatchStats:
-    """The bookkeeping half: record what `_call_classifier` came back
+    """The bookkeeping half: record what `_classify_network` came back
     with. Pure local work -- one transaction per batch rather than one
     fsync per row (see `state.transaction`) -- and always on the thread
-    that owns `conn`, never inside a worker.
-
-    Items the model answered invalidly are `invalid_response`; a
-    well-formed response missing some ids finalises those as
-    `no_llm_response`."""
-    items = attempt.items
+    that owns `conn`, never inside a worker."""
+    by_payload_id = attempt.by_payload_id
+    input_hash_by_payload_id = attempt.input_hash_by_payload_id
+    input_level = attempt.input_level
+    processors = attempt.processors
     outcome = attempt.outcome
-    item_by_payload_id = attempt.item_by_payload_id
+    model_cfg = config.models[config.processors[processors[0].name].model]
 
-    if outcome is None:
-        failure_reason = attempt.failure_reason
-        with state.transaction(conn):
-            for item in items:
-                _mark_invalid(item, per_candidate, error=failure_reason)
+    with state.transaction(conn):
+        if outcome is None:
+            for payload_id, candidate_id in by_payload_id.items():
+                item = states[candidate_id]
+                item.saw_invalid = True
+                item.last_error = attempt.failure_reason
                 state.insert_classification(
                     conn,
                     run_id=run_id,
-                    candidate_id=item.candidate_id,
-                    input_level="metadata",
-                    input_hash=item.input_hash,
-                    offered_rules=item.remaining_rule_ids,
-                    matches=(),
-                    needs_content=False,
+                    candidate_id=candidate_id,
+                    input_level=input_level,
+                    input_hash=input_hash_by_payload_id[payload_id],
+                    offered_processors=[p.name for p in processors],
+                    processor_answers={},
                     reason=None,
                     valid=False,
-                    error=failure_reason,
+                    error=attempt.failure_reason,
                     latency_ms=None,
                 )
-        return _BatchStats(llm_calls=1)
+            return _BatchStats(llm_calls=1)
 
-    with state.transaction(conn):
-        _apply_outcome(
-            conn,
-            outcome,
-            item_by_payload_id,
-            rules_by_id=rules_by_id,
-            run_id=run_id,
-            account_id=account_id,
-            model_id=model_id,
-            per_candidate=per_candidate,
-        )
-    # Defence in depth: a well-behaved `Classifier` always partitions
-    # every requested payload id across `results`/`invalid`/`missing`
-    # (that invariant is what `prompt.parse_classification_response`
-    # guarantees), but `Classifier` is an adapter-implemented Protocol,
-    # not a sealed type, and its response is untrusted. If some future
-    # or third-party adapter ever violates that invariant, a candidate
-    # must still get a terminal result rather than silently vanishing
-    # from the run (and crashing `evaluate_candidates` with a KeyError
-    # when the final result tuple is assembled) -- treat it exactly like
-    # `missing`.
-    for item in items:
-        if item.candidate_id not in per_candidate:
-            _mark_missing(item, per_candidate)
+        seen_payload_ids: set[str] = set()
+        for classification in outcome.results:
+            payload_id = classification.payload_id
+            resolved_id = by_payload_id.get(payload_id)
+            if resolved_id is None:
+                state.append_audit_event(
+                    conn,
+                    run_id=run_id,
+                    kind="classifier_unknown_candidate_id",
+                    data={"payload_id": payload_id},
+                )
+                continue
+            if payload_id in seen_payload_ids:
+                state.append_audit_event(
+                    conn,
+                    run_id=run_id,
+                    kind="classifier_duplicate_candidate_id",
+                    subject=str(resolved_id),
+                    data={"payload_id": payload_id},
+                )
+                continue
+            seen_payload_ids.add(payload_id)
+            _resolve_item(
+                conn,
+                classification,
+                candidate_id=resolved_id,
+                item=states[resolved_id],
+                config=config,
+                processors=processors,
+                model_cfg=model_cfg,
+                run_id=run_id,
+                account_id=account_id,
+                excerpts=excerpts,
+                input_level=input_level,
+                input_hash=input_hash_by_payload_id[payload_id],
+            )
+
+        for payload_id in outcome.invalid:
+            if payload_id in seen_payload_ids:
+                continue
+            resolved_id = by_payload_id.get(payload_id)
+            if resolved_id is None:
+                continue
+            item = states[resolved_id]
+            item.saw_invalid = True
+            item.last_error = "response item failed structural validation"
+            state.insert_classification(
+                conn,
+                run_id=run_id,
+                candidate_id=resolved_id,
+                input_level=input_level,
+                input_hash=input_hash_by_payload_id[payload_id],
+                offered_processors=[p.name for p in processors],
+                processor_answers={},
+                reason=None,
+                valid=False,
+                error="response item failed structural validation",
+                latency_ms=outcome.latency_ms,
+            )
+
+        for payload_id in outcome.missing:
+            if payload_id in seen_payload_ids:
+                continue
+            resolved_id = by_payload_id.get(payload_id)
+            if resolved_id is None:
+                continue
+            item = states[resolved_id]
+            item.saw_missing = True
+            item.last_error = "absent from model response"
+
+        # Defence in depth: a well-behaved `Classifier` always partitions
+        # every requested payload id across `results`/`invalid`/`missing`
+        # (that invariant is what `prompt.parse_classification_response`
+        # guarantees), but `Classifier` is an adapter-implemented
+        # Protocol, not a sealed type, and its response is untrusted. If
+        # some future or third-party adapter ever violates that
+        # invariant, every candidate in this batch must still end up
+        # with *some* record of this attempt rather than silently
+        # falling through to "no processor ever answered" -- treat an
+        # untouched payload id exactly like `missing`.
+        for payload_id, candidate_id in by_payload_id.items():
+            if payload_id in seen_payload_ids or payload_id in outcome.invalid:
+                continue
+            if payload_id in outcome.missing:
+                continue
+            states[candidate_id].saw_missing = True
+            states[candidate_id].last_error = "absent from model response"
+
     return _BatchStats(
         llm_calls=1,
         structured_output_level=outcome.structured_output_level,
@@ -650,271 +811,111 @@ def _apply_attempt(
     )
 
 
-def _mark_invalid(
-    item: _BatchItem, per_candidate: dict[int, CandidateResult], *, error: str
-) -> None:
-    if item.resolved_matches:
-        per_candidate[item.candidate_id] = CandidateResult(
-            candidate_id=item.candidate_id,
-            matches=item.resolved_matches,
-            status=None,
-            reason=None,
-            offered_rules=item.remaining_rule_ids,
-            input_hash=item.input_hash,
-            valid=False,
-            error=error,
+# --- Response validation (spec §5.2, §5.3; jev-provider-plan's untrusted-
+# --- boundary note) -------------------------------------------------------
+
+
+def _validate_answer(cfg: ProcessorConfig, answer: ProcessorAnswer) -> bool:
+    """An answer is untrusted until its `value` is checked against the
+    processor's own declared vocabulary -- exactly the boundary
+    `classifier/__init__.py`'s module docstring requires: never let an
+    adapter response widen what an action may do."""
+    if cfg.type == "noul":
+        return isinstance(answer.value, bool)
+    if cfg.type == "choice":
+        return (
+            isinstance(answer.value, str)
+            and cfg.options is not None
+            and answer.value in cfg.options
         )
-    else:
-        per_candidate[item.candidate_id] = CandidateResult(
-            candidate_id=item.candidate_id,
-            matches=(),
-            status="invalid_response",
-            reason=None,
-            offered_rules=item.remaining_rule_ids,
-            input_hash=item.input_hash,
-            valid=False,
-            error=error,
-        )
-
-
-def _mark_missing(item: _BatchItem, per_candidate: dict[int, CandidateResult]) -> None:
-    if item.resolved_matches:
-        per_candidate[item.candidate_id] = CandidateResult(
-            candidate_id=item.candidate_id,
-            matches=item.resolved_matches,
-            status=None,
-            reason=None,
-            offered_rules=item.remaining_rule_ids,
-            input_hash=item.input_hash,
-            valid=False,
-            error="absent from model response",
-        )
-    else:
-        per_candidate[item.candidate_id] = CandidateResult(
-            candidate_id=item.candidate_id,
-            matches=(),
-            status="no_llm_response",
-            reason=None,
-            offered_rules=item.remaining_rule_ids,
-            input_hash=item.input_hash,
-            valid=False,
-            error="absent from model response",
-        )
-
-
-# --- Response validation (spec §5.2, §5.3) -------------------------------
-#
-# This is the safety boundary contracts §5.3 requires to exist exactly
-# once, in the caller, so it cannot be skipped per adapter. A
-# `Classification` arriving here is untrusted in every field: its
-# `payload_id` may not be one we sent, and its matches may name rules
-# never offered for that candidate or repeat a rule. None of that may
-# ever reach the policy engine; anything that fails is silently dropped,
-# never escalated into a wider action than what was actually offered.
-
-
-def _apply_outcome(
-    conn: sqlite3.Connection,
-    outcome: ClassifyOutcome,
-    item_by_payload_id: dict[str, _BatchItem],
-    *,
-    rules_by_id: dict[str, RuleConfig],
-    run_id: str,
-    account_id: int,
-    model_id: str,
-    per_candidate: dict[int, CandidateResult],
-) -> None:
-    seen_payload_ids: set[str] = set()
-
-    for classification in outcome.results:
-        payload_id = classification.payload_id
-        item = item_by_payload_id.get(payload_id)
-        if item is None:
-            # Names a candidate id never in this batch (spec §5.2: "an ID
-            # not present in the submitted batch is dropped"). There is
-            # no real candidate row to attach a status to; audit and move
-            # on — it cannot affect any real candidate's outcome.
-            state.append_audit_event(
-                conn,
-                run_id=run_id,
-                kind="classifier_unknown_candidate_id",
-                data={"payload_id": payload_id},
-            )
-            continue
-        if payload_id in seen_payload_ids:
-            # A candidate id must be present exactly once (spec §5.3);
-            # a repeat makes the whole item ambiguous.
-            _mark_invalid(
-                item, per_candidate, error="candidate id repeated in response"
-            )
-            continue
-        seen_payload_ids.add(payload_id)
-        _resolve_item(
-            conn,
-            classification,
-            item,
-            rules_by_id=rules_by_id,
-            run_id=run_id,
-            account_id=account_id,
-            model_id=model_id,
-            per_candidate=per_candidate,
-        )
-
-    for payload_id in outcome.invalid:
-        item = item_by_payload_id.get(payload_id)
-        if item is not None and payload_id not in seen_payload_ids:
-            _mark_invalid(
-                item, per_candidate, error="response item failed structural validation"
-            )
-            state.insert_classification(
-                conn,
-                run_id=run_id,
-                candidate_id=item.candidate_id,
-                input_level="metadata",
-                input_hash=item.input_hash,
-                offered_rules=item.remaining_rule_ids,
-                matches=(),
-                needs_content=False,
-                reason=None,
-                valid=False,
-                error="response item failed structural validation",
-                latency_ms=None,
-            )
-
-    for payload_id in outcome.missing:
-        item = item_by_payload_id.get(payload_id)
-        if item is not None and payload_id not in seen_payload_ids:
-            _mark_missing(item, per_candidate)
+    # score
+    return (
+        isinstance(answer.value, str)
+        and cfg.levels is not None
+        and answer.value in cfg.levels
+    )
 
 
 def _resolve_item(
     conn: sqlite3.Connection,
     classification: Classification,
-    item: _BatchItem,
     *,
-    rules_by_id: dict[str, RuleConfig],
+    candidate_id: int,
+    item: _CandidateState,
+    config: Config,
+    processors: Sequence[OfferedProcessor],
+    model_cfg: ModelConfig,
     run_id: str,
     account_id: int,
-    model_id: str,
-    per_candidate: dict[int, CandidateResult],
+    excerpts: Mapping[int, str],
+    input_level: str,
+    input_hash: str,
 ) -> None:
-    """Validate one candidate's `Classification` against exactly the
-    vocabulary it was offered, then decide its final status. This is
-    where a hostile response (an unoffered rule id, a duplicate) is
-    neutralised: none of those checks are optional, and every rejected
-    match is dropped rather than merely logged, so it can never influence
-    the policy engine. There is no confidence to threshold (spec §5.3):
-    every rule id that survives vocabulary validation is accepted
-    outright.
-    """
-    accepted: list[ValidatedMatch] = list(item.resolved_matches)
-    offered_set = set(item.remaining_rule_ids)
-    seen_rule_ids: set[str] = set()
-    raw_matches_for_audit: list[str] = list(classification.matches)
+    offered_by_name = {p.name: p for p in processors}
+    accepted_count = 0
+    for name, raw_answer in classification.answers.items():
+        offered = offered_by_name.get(name)
+        if offered is None:
+            # A processor name this candidate was never offered in this
+            # call -- exactly the shape of a hostile response trying to
+            # claim an answer to something it was not asked. Drop it.
+            state.append_audit_event(
+                conn,
+                run_id=run_id,
+                kind="classifier_unoffered_processor",
+                subject=str(candidate_id),
+                data={"processor": name},
+            )
+            continue
+        cfg = config.processors[name]
+        if not _validate_answer(cfg, raw_answer):
+            state.append_audit_event(
+                conn,
+                run_id=run_id,
+                kind="classifier_invalid_answer_value",
+                subject=str(candidate_id),
+                data={"processor": name, "value": str(raw_answer.value)},
+            )
+            continue
+        item.processor_values[name] = raw_answer
+        accepted_count += 1
 
-    if classification.needs_content:
-        # Escalation requested (spec §5.3). This module has no mailbox
-        # access to fetch an excerpt — that orchestration is Unit 5's
-        # (spec §4.2 step 7) — so, per "if escalation is unavailable for
-        # any reason, the item is treated as unknown and produces no
-        # action", the *entire* response for this candidate is
-        # discarded: no match is accepted from it, regardless of what
-        # `matches` also contained, and — critically — nothing is cached
-        # either way, because the model did not decline or confirm any
-        # of these rules, it deferred. Caching either answer here would
-        # permanently suppress a future re-ask once escalation is
-        # actually available.
-        state.append_audit_event(
-            conn,
-            run_id=run_id,
-            kind="classifier_needs_content_unavailable",
-            subject=str(item.candidate_id),
-            data={"offered_rules": sorted(offered_set)},
+        model_for_processor = config.models[cfg.model]
+        excerpt_text = excerpts.get(candidate_id) if cfg.include_body else None
+        cache_input_hash = _processor_input_hash(
+            item.candidate, cfg, model_for_processor, excerpt_text
         )
-    else:
-        for rule_id in classification.matches:
-            if rule_id not in offered_set:
-                # A rule id this candidate was never offered — exactly
-                # the shape of a prompt-injection attempt trying to
-                # claim an arbitrary rule. Drop it; it never reaches
-                # policy.
-                state.append_audit_event(
-                    conn,
-                    run_id=run_id,
-                    kind="classifier_unoffered_rule",
-                    subject=str(item.candidate_id),
-                    data={"rule_id": rule_id},
-                )
-                continue
-            if rule_id in seen_rule_ids:
-                state.append_audit_event(
-                    conn,
-                    run_id=run_id,
-                    kind="classifier_duplicate_rule",
-                    subject=str(item.candidate_id),
-                    data={"rule_id": rule_id},
-                )
-                continue
-
-            seen_rule_ids.add(rule_id)
-            accepted.append(ValidatedMatch(rule_id=rule_id))
-
-        # Every offered rule got a confident yes or no this run (a rule
-        # that requested escalation instead never reaches this branch at
-        # all — see the `needs_content` arm above) — cache it either way
-        # so a re-run does not re-ask (spec §13). Caching the "yes" too is
-        # what lets a message whose remote mutation failed last run
-        # (wrong trash_mailbox, an unadvertised capability, ...) retry
-        # that mutation on the next run instead of being reclassified
-        # from scratch every time.
-        for rule_id in offered_set:
-            rule_cfg = rules_by_id[rule_id]
-            rule_text_hash = _rule_text_hash(rule_cfg)
-            state.record_decision(
+        if cache_input_hash is not None:
+            processor_hash = prompt.compute_processor_hash(offered)
+            state.record_processor_decision(
                 conn,
                 account_id=account_id,
                 fingerprint=item.candidate.fingerprint,
-                rule_id=rule_id,
-                rule_text_hash=rule_text_hash,
-                input_hash=item.input_hash,
-                model_id=model_id,
+                processor_name=name,
+                processor_hash=processor_hash,
+                input_hash=cache_input_hash,
+                model_id=model_for_processor.model,
                 prompt_version=prompt.PROMPT_VERSION,
-                matched=rule_id in seen_rule_ids,
+                answer=raw_answer,
             )
 
     reason = classification.reason
     if reason is not None and len(reason) > _REASON_CAP:
         reason = reason[:_REASON_CAP]
-
-    if accepted:
-        status = None
-    elif item.cache_hit:
-        status = "cached_no_match"
-    else:
-        status = "no_match"
+    if reason is not None:
+        item.last_reason = reason
 
     state.insert_classification(
         conn,
         run_id=run_id,
-        candidate_id=item.candidate_id,
-        input_level="metadata",
-        input_hash=item.input_hash,
-        offered_rules=item.remaining_rule_ids,
-        matches=raw_matches_for_audit,
-        needs_content=classification.needs_content,
+        candidate_id=candidate_id,
+        input_level=input_level,
+        input_hash=input_hash,
+        offered_processors=[p.name for p in processors],
+        processor_answers=classification.answers,
         reason=reason,
         valid=True,
         error=None,
         latency_ms=None,
     )
-
-    per_candidate[item.candidate_id] = CandidateResult(
-        candidate_id=item.candidate_id,
-        matches=tuple(accepted),
-        status=status,
-        reason=reason,
-        offered_rules=item.remaining_rule_ids,
-        input_hash=item.input_hash,
-        valid=True,
-        error=None,
-    )
+    _ = accepted_count  # (kept for potential future audit/telemetry use)

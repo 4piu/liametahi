@@ -37,11 +37,9 @@ BASE_CONFIG: dict[str, Any] = {
     "tasks": {
         "inbox-cleanup": {
             "account": "personal",
-            "model": "local",
+            "source_mailboxes": ["INBOX"],
             "rules": [
                 {
-                    "id": "old-weekly-digest",
-                    "priority": 100,
                     "when": [
                         {"older-than": "30d"},
                         {"list-id-contains": "digest"},

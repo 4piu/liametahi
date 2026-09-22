@@ -51,7 +51,6 @@ def _run_one_matched_item(
 
     rule = RuleConfig.model_validate(
         {
-            "id": "digest",
             "when": {"older-than": "1d"},
             "actions": ["backup", "trash"],
         }
@@ -88,7 +87,7 @@ def _run_one_matched_item(
         key=key,
         fingerprint=fp,
         message_id=MESSAGE_ID,
-        winning_rule="digest",
+        winning_rule="rule #1 of 1",
         actions=actions,
     )
     execute.execute_items(
@@ -131,7 +130,7 @@ def test_load_report_derives_completed_status_from_action_attempts(
         assert len(data.items) == 1
         item = data.items[0]
         assert item.status == "completed"
-        assert item.winning_rule == "digest"
+        assert item.winning_rule == "rule #1 of 1"
         assert item.message_key == f"{account_id}/INBOX/1000/1"
         assert [a.action for a in item.actions] == ["backup", "trash"]
         assert item.actions[0].backup_id is not None
@@ -273,7 +272,7 @@ def test_render_table_includes_run_metadata_and_totals(tmp_path: Path) -> None:
         assert run_id in table
         assert "task=t" in table
         assert "completed" in table
-        assert "digest" in table
+        assert "rule #1 of 1" in table
     finally:
         state.close_database(conn)
 

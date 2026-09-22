@@ -25,10 +25,12 @@ from liametahi.rules import (
     LargerThan,
     ListIdContains,
     LiteralPattern,
-    LlmCondition,
     NewerThan,
+    NoneNode,
     NotNode,
     OlderThan,
+    ProcessorAnswer,
+    ProcessorCondition,
     RecipientCount,
     RecipientMatch,
     RegexPattern,
@@ -38,7 +40,7 @@ from liametahi.rules import (
     evaluate,
     is_protected,
     is_protected_by_flags,
-    llm_atom,
+    processor_names,
 )
 from tests.conftest import make_candidate
 
@@ -70,6 +72,10 @@ def _any(children: Sequence[_TestNode]) -> AnyNode:
     return AnyNode(tuple(children))  # type: ignore[arg-type]
 
 
+def _none(children: Sequence[_TestNode]) -> NoneNode:
+    return NoneNode(tuple(children))  # type: ignore[arg-type]
+
+
 def _not(child: _TestNode) -> NotNode:
     return NotNode(child)  # type: ignore[arg-type]
 
@@ -92,6 +98,13 @@ def _evaluate_with_fixed(node: _TestNode, *, now: datetime) -> Tri:
             return Tri.TRUE
         if all(r is Tri.FALSE for r in results):
             return Tri.FALSE
+        return Tri.UNKNOWN
+    if isinstance(node, NoneNode):
+        results = [_evaluate_with_fixed(c, now=now) for c in node.children]
+        if any(r is Tri.TRUE for r in results):
+            return Tri.FALSE
+        if all(r is Tri.FALSE for r in results):
+            return Tri.TRUE
         return Tri.UNKNOWN
     if isinstance(node, NotNode):
         inner = _evaluate_with_fixed(node.child, now=now)
@@ -161,6 +174,33 @@ def test_kleene_any_three_children(values: tuple[Tri, Tri, Tri]) -> None:
         assert result == Tri.UNKNOWN
 
 
+@pytest.mark.parametrize("values", list(itertools.product(TRI_VALUES, repeat=2)))
+def test_kleene_none_two_children(values: tuple[Tri, Tri]) -> None:
+    """jev-provider-plan §4: `none:`'s truth table is the exact De Morgan
+    mirror of `any:`'s -- TRUE iff every child is FALSE, FALSE iff any
+    child is TRUE, else UNKNOWN."""
+    children = [_FixedAtom(v) for v in values]
+    result = _evaluate_with_fixed(_none(children), now=NOW)
+    any_result = _evaluate_with_fixed(_any(children), now=NOW)
+    expected = {Tri.TRUE: Tri.FALSE, Tri.FALSE: Tri.TRUE, Tri.UNKNOWN: Tri.UNKNOWN}
+    assert result == expected[any_result]
+    if Tri.TRUE in values:
+        assert result == Tri.FALSE
+    elif all(v is Tri.FALSE for v in values):
+        assert result == Tri.TRUE
+    else:
+        assert result == Tri.UNKNOWN
+
+
+@pytest.mark.parametrize("values", list(itertools.product(TRI_VALUES, repeat=3)))
+def test_kleene_none_three_children(values: tuple[Tri, Tri, Tri]) -> None:
+    children = [_FixedAtom(v) for v in values]
+    result = _evaluate_with_fixed(_none(children), now=NOW)
+    any_result = _evaluate_with_fixed(_any(children), now=NOW)
+    expected = {Tri.TRUE: Tri.FALSE, Tri.FALSE: Tri.TRUE, Tri.UNKNOWN: Tri.UNKNOWN}
+    assert result == expected[any_result]
+
+
 @pytest.mark.parametrize("value", TRI_VALUES)
 def test_kleene_not(value: Tri) -> None:
     result = _evaluate_with_fixed(_not(_FixedAtom(value)), now=NOW)
@@ -181,15 +221,17 @@ def test_kleene_nested_composition() -> None:
 
 def test_evaluate_never_raises_on_well_typed_tree() -> None:
     candidate = make_candidate()
+    processor_atom = ProcessorCondition(name="p", field="value", op="==", value=True)
     trees: list[rules.ConditionTree] = [
         OlderThan(duration=timedelta(days=1)),
-        AllNode((OlderThan(duration=timedelta(days=1)), LlmCondition("x"))),
+        AllNode((OlderThan(duration=timedelta(days=1)), processor_atom)),
         AnyNode(
             (
                 SenderMatch(LiteralPattern("*@x.com")),
                 NotNode(SubjectContains(LiteralPattern("y"))),
             )
         ),
+        NoneNode((processor_atom, OlderThan(duration=timedelta(days=1)))),
         NotNode(HasHeader("x-foo")),
     ]
     for tree in trees:
@@ -441,23 +483,105 @@ def test_auth_result_case_insensitive_on_mechanism_and_result_tokens() -> None:
     assert evaluate(_auth_result_atom("spf", "fail"), candidate, now=NOW) == Tri.TRUE
 
 
-def test_llm_atom_is_always_unknown() -> None:
+# --- `processor:` atom (jev-provider-plan §3, §6) --------------------------
+
+
+def test_processor_atom_is_unknown_when_unresolved() -> None:
     candidate = make_candidate()
-    assert evaluate(LlmCondition("some description"), candidate, now=NOW) == Tri.UNKNOWN
+    atom = ProcessorCondition(
+        name="spam-category", field="value", op="==", value="spam"
+    )
+    assert evaluate(atom, candidate, now=NOW) == Tri.UNKNOWN
 
 
-# --- llm_atom() extraction -------------------------------------------------
+def test_processor_atom_resolves_against_value_field() -> None:
+    candidate = make_candidate()
+    atom = ProcessorCondition(
+        name="spam-category", field="value", op="==", value="spam"
+    )
+    matching = {"spam-category": ProcessorAnswer(value="spam", confidence=None)}
+    non_matching = {"spam-category": ProcessorAnswer(value="personal", confidence=None)}
+    assert evaluate(atom, candidate, now=NOW, processor_values=matching) == Tri.TRUE
+    assert (
+        evaluate(atom, candidate, now=NOW, processor_values=non_matching) == Tri.FALSE
+    )
 
 
-def test_llm_atom_extracts_the_single_atom() -> None:
-    llm = LlmCondition("desc")
-    tree = AllNode((OlderThan(duration=timedelta(days=1)), llm))
-    assert llm_atom(tree) is llm
+def test_processor_atom_resolves_against_confidence_field() -> None:
+    candidate = make_candidate()
+    atom = ProcessorCondition(name="urgency", field="confidence", op=">=", value=0.85)
+    high = {"urgency": ProcessorAnswer(value="urgent", confidence=0.9)}
+    low = {"urgency": ProcessorAnswer(value="urgent", confidence=0.5)}
+    assert evaluate(atom, candidate, now=NOW, processor_values=high) == Tri.TRUE
+    assert evaluate(atom, candidate, now=NOW, processor_values=low) == Tri.FALSE
 
 
-def test_llm_atom_none_when_absent() -> None:
+def test_processor_atom_unknown_when_field_never_populated() -> None:
+    """A chat-backed processor whose compiled schema never asked for
+    `confidence` reports `None` for it -- reading that field is UNKNOWN,
+    never a type error (jev-provider-plan §3)."""
+    candidate = make_candidate()
+    atom = ProcessorCondition(name="vibe-check", field="confidence", op=">=", value=0.5)
+    answers = {"vibe-check": ProcessorAnswer(value=True, confidence=None)}
+    assert evaluate(atom, candidate, now=NOW, processor_values=answers) == Tri.UNKNOWN
+
+
+def test_processor_atom_absent_from_processor_values_is_unknown() -> None:
+    candidate = make_candidate()
+    atom = ProcessorCondition(
+        name="spam-category", field="value", op="==", value="spam"
+    )
+    other = {"other-processor": ProcessorAnswer(value=True, confidence=None)}
+    assert evaluate(atom, candidate, now=NOW, processor_values=other) == Tri.UNKNOWN
+
+
+def test_processor_atom_default_processor_values_is_unknown() -> None:
+    """Every existing call site that doesn't pass `processor_values`
+    keeps working unchanged: a `ProcessorCondition` atom just evaluates
+    UNKNOWN."""
+    candidate = make_candidate()
+    atom = ProcessorCondition(
+        name="spam-category", field="value", op="==", value="spam"
+    )
+    assert evaluate(atom, candidate, now=NOW) == Tri.UNKNOWN
+
+
+def test_processor_atom_type_mismatch_is_false_not_a_raise() -> None:
+    candidate = make_candidate()
+    atom = ProcessorCondition(name="urgency", field="value", op=">=", value=2.0)
+    # A `noul`/`choice` answer's `value` is a bool/str; comparing it with
+    # `>=` against a float comparand is a TypeError from `operator.ge`,
+    # defended against per `evaluate()`'s "never raises" contract.
+    answers = {"urgency": ProcessorAnswer(value=True, confidence=None)}
+    assert evaluate(atom, candidate, now=NOW, processor_values=answers) == Tri.FALSE
+
+
+# --- `processor_names()` (replaces the old single-atom `llm_atom()`) -------
+
+
+def test_processor_names_collects_every_distinct_name() -> None:
+    tree = AllNode(
+        (
+            ProcessorCondition(name="a", field="value", op="==", value=True),
+            AnyNode(
+                (
+                    ProcessorCondition(name="b", field="value", op="==", value=True),
+                    NotNode(
+                        ProcessorCondition(name="a", field="value", op="==", value=True)
+                    ),
+                )
+            ),
+            NoneNode(
+                (ProcessorCondition(name="c", field="value", op="==", value=True),)
+            ),
+        )
+    )
+    assert processor_names(tree) == frozenset({"a", "b", "c"})
+
+
+def test_processor_names_empty_when_no_processor_atom() -> None:
     tree = AllNode((OlderThan(duration=timedelta(days=1)),))
-    assert llm_atom(tree) is None
+    assert processor_names(tree) == frozenset()
 
 
 # --- is_protected() (spec §4.2 point 1; acceptance test 2, rules half) ----

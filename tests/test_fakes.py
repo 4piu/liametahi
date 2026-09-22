@@ -5,15 +5,16 @@ from pathlib import Path
 
 import pytest
 
+from liametahi.rules import ProcessorAnswer
 from tests.fakes.fake_classifier import (
     CandidatePayload,
     FakeClassifier,
-    OfferedRule,
+    OfferedProcessor,
     outcome_malformed,
     outcome_missing,
-    outcome_with_matches,
+    outcome_with_answers,
     outcome_with_unknown_candidate,
-    outcome_with_unknown_rule,
+    outcome_with_unknown_processor,
 )
 from tests.fakes.fake_mailbox import (
     FakeMailbox,
@@ -224,41 +225,45 @@ def test_append_preserves_flags_and_internaldate() -> None:
 # --- FakeClassifier ----------------------------------------------------
 
 
-def _payload(payload_id: str, offered: tuple[str, ...] = ("r1",)) -> CandidatePayload:
-    return CandidatePayload(payload_id=payload_id, fields={}, offered=offered)
+def _payload(payload_id: str) -> CandidatePayload:
+    return CandidatePayload(payload_id=payload_id, fields={})
+
+
+_SPAM_PROCESSOR = OfferedProcessor(name="r1", type="choice", options={"spam": "d"})
+_TRUE_ANSWER = ProcessorAnswer(value=True, confidence=None)
 
 
 def test_fake_classifier_returns_scripted_outcome_in_order() -> None:
-    first = outcome_with_matches(matches_by_payload={"c1": ["r1"]})
-    second = outcome_with_matches(matches_by_payload={"c2": []})
+    first = outcome_with_answers(answers_by_payload={"c1": {"r1": _TRUE_ANSWER}})
+    second = outcome_with_answers(answers_by_payload={"c2": {}})
     classifier = FakeClassifier([first, second])
 
-    result1 = classifier.classify([_payload("c1")], [OfferedRule("r1", "desc")])
+    result1 = classifier.classify([_payload("c1")], [_SPAM_PROCESSOR])
     assert result1 is first
-    result2 = classifier.classify([_payload("c2")], [OfferedRule("r1", "desc")])
+    result2 = classifier.classify([_payload("c2")], [_SPAM_PROCESSOR])
     assert result2 is second
     assert classifier.call_count == 2
 
 
 def test_fake_classifier_records_calls() -> None:
-    classifier = FakeClassifier([outcome_with_matches(matches_by_payload={})])
+    classifier = FakeClassifier([outcome_with_answers(answers_by_payload={})])
     payloads = [_payload("c1")]
-    rules = [OfferedRule("r1", "desc")]
-    classifier.classify(payloads, rules)
+    processors = [_SPAM_PROCESSOR]
+    classifier.classify(payloads, processors)
     assert classifier.calls[0][0] == tuple(payloads)
-    assert classifier.calls[0][1] == tuple(rules)
+    assert classifier.calls[0][1] == tuple(processors)
 
 
 def test_fake_classifier_can_raise_scripted_exception() -> None:
     classifier = FakeClassifier([TimeoutError("simulated transport failure")])
     with pytest.raises(TimeoutError):
-        classifier.classify([_payload("c1")], [OfferedRule("r1", "desc")])
+        classifier.classify([_payload("c1")], [_SPAM_PROCESSOR])
 
 
 def test_fake_classifier_raises_when_exhausted() -> None:
     classifier = FakeClassifier([])
     with pytest.raises(AssertionError):
-        classifier.classify([_payload("c1")], [OfferedRule("r1", "desc")])
+        classifier.classify([_payload("c1")], [_SPAM_PROCESSOR])
 
 
 def test_outcome_malformed_reports_all_ids_invalid() -> None:
@@ -268,16 +273,14 @@ def test_outcome_malformed_reports_all_ids_invalid() -> None:
 
 
 def test_outcome_missing_reports_absent_ids() -> None:
-    outcome = outcome_missing(present={"c1": ["r1"]}, missing_ids=["c2"])
+    outcome = outcome_missing(present={"c1": {"r1": _TRUE_ANSWER}}, missing_ids=["c2"])
     assert len(outcome.results) == 1
     assert outcome.missing == ("c2",)
 
 
-def test_outcome_with_unknown_rule_is_structurally_valid_but_semantically_wrong() -> (
-    None
-):
-    outcome = outcome_with_unknown_rule("c1", "never-offered")
-    assert outcome.results[0].matches[0] == "never-offered"
+def test_outcome_with_unknown_processor_is_structurally_valid() -> None:
+    outcome = outcome_with_unknown_processor("c1", "never-offered")
+    assert outcome.results[0].answers["never-offered"].value is True
 
 
 def test_outcome_with_unknown_candidate() -> None:

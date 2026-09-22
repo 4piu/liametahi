@@ -1,21 +1,30 @@
-"""Three-valued condition tree evaluator (spec §7.1, §7.2). Pure, no I/O.
+"""Three-valued condition tree evaluator (spec §7.1, §7.2;
+jev-provider-plan §3, §4, §6). Pure, no I/O.
 
 `config.py` parses the value grammars (contracts §3 — durations, sizes,
 globs) at load time and constructs the atomic-condition dataclasses
 defined here; this module never parses a raw string. It is the primary
-property-testing target: `all`/`any`/`not` must satisfy Kleene
+property-testing target: `all`/`any`/`none`/`not` must satisfy Kleene
 three-valued logic for every combination of TRUE/FALSE/UNKNOWN children,
 and `evaluate` must never raise on a well-typed tree.
+
+The old single-`llm`-atom mechanism (`LlmCondition`/`llm_atom()`) is
+retired by the `processors:` redesign (jev-provider-plan, whole
+document): a rule may now reference any number of named `processor:`
+atoms, each `UNKNOWN` until `evaluate()` is given a resolved
+`ProcessorAnswer` for it via `processor_values`. See `processor_names()`
+for how a caller discovers which processors a still-`UNKNOWN` rule needs.
 """
 
 import fnmatch
 import operator
 import re
-from collections.abc import Callable, Collection, Sequence
+import types
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from liametahi.domain import Candidate
 
@@ -130,9 +139,10 @@ class LargerThan:
 
 
 #: `recipient-count`'s comparison operators (spec §7.1; contracts §3).
+#: Also reused, unchanged, by `ProcessorCondition` (jev-provider-plan §3).
 ComparisonOp = Literal["==", "!=", ">=", "<=", ">", "<"]
 
-_COMPARATORS: dict[ComparisonOp, Callable[[int, int], bool]] = {
+_COMPARATORS: dict[ComparisonOp, Callable[[Any, Any], bool]] = {
     "==": operator.eq,
     "!=": operator.ne,
     ">=": operator.ge,
@@ -164,9 +174,28 @@ class AuthResult:
     regex: re.Pattern[str]
 
 
+#: `processor: "name.field op value"` (jev-provider-plan §3). `field` is a
+#: closed set (`"value"` or `"confidence"`), validated by `config.py`'s
+#: parser -- nothing else is a legal field name. `value` is the parsed
+#: comparand: a bool, a float, or a plain string (a declared choice/level
+#: option name).
 @dataclass(frozen=True, slots=True)
-class LlmCondition:
-    description: str
+class ProcessorCondition:
+    name: str
+    field: Literal["value", "confidence"]
+    op: ComparisonOp
+    value: bool | float | str
+
+
+#: One processor's resolved answer for one candidate this round
+#: (jev-provider-plan §3, §6). `confidence` is `None` for a chat-backed
+#: processor whose declared schema does not include it (jev always
+#: populates it) -- reading a `None` field via `processor:` is `UNKNOWN`,
+#: never a type error.
+@dataclass(frozen=True, slots=True)
+class ProcessorAnswer:
+    value: bool | float | str
+    confidence: float | None
 
 
 Atom = (
@@ -183,7 +212,7 @@ Atom = (
     | RecipientCount
     | HasAttachment
     | AuthResult
-    | LlmCondition
+    | ProcessorCondition
 )
 
 
@@ -201,14 +230,28 @@ class AnyNode:
 
 
 @dataclass(frozen=True, slots=True)
+class NoneNode:
+    """True if every child is FALSE, false if any child is TRUE, else
+    UNKNOWN -- the De Morgan mirror of `AnyNode` (jev-provider-plan §4)."""
+
+    children: tuple[ConditionTree, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class NotNode:
     child: ConditionTree
 
 
-ConditionTree = AllNode | AnyNode | NotNode | Atom
+ConditionTree = AllNode | AnyNode | NoneNode | NotNode | Atom
 
 
-def _eval_atom(atom: Atom, candidate: Candidate, *, now: datetime) -> Tri:
+def _eval_atom(
+    atom: Atom,
+    candidate: Candidate,
+    *,
+    now: datetime,
+    processor_values: Mapping[str, ProcessorAnswer],
+) -> Tri:
     if isinstance(atom, OlderThan):
         age = now - candidate.internaldate
         return Tri.TRUE if age > atom.duration else Tri.FALSE
@@ -253,9 +296,36 @@ def _eval_atom(atom: Atom, candidate: Candidate, *, now: datetime) -> Tri:
         if candidate.auth_results is None:
             return Tri.FALSE
         return Tri.TRUE if atom.regex.search(candidate.auth_results) else Tri.FALSE
-    if isinstance(atom, LlmCondition):
-        return Tri.UNKNOWN
+    if isinstance(atom, ProcessorCondition):
+        return _eval_processor_condition(atom, processor_values)
     _assert_never(atom)
+
+
+def _eval_processor_condition(
+    atom: ProcessorCondition, processor_values: Mapping[str, ProcessorAnswer]
+) -> Tri:
+    """jev-provider-plan §3, §6: `UNKNOWN` until the named processor has
+    answered this candidate this round; `UNKNOWN` again if the field it
+    asks about (`confidence` on a chat processor that never declared it)
+    was never populated. `evaluate()`'s docstring promises it never
+    raises on a well-typed tree, but a mismatched comparand type (which
+    config-load validation should already prevent) is defended against
+    with a plain `Tri.FALSE` rather than trusting that guarantee blindly.
+    """
+    answer = processor_values.get(atom.name)
+    if answer is None:
+        return Tri.UNKNOWN
+    field_value: bool | float | str | None = (
+        answer.value if atom.field == "value" else answer.confidence
+    )
+    if field_value is None:
+        return Tri.UNKNOWN
+    comparator = _COMPARATORS[atom.op]
+    try:
+        matched = comparator(field_value, atom.value)
+    except TypeError:
+        return Tri.FALSE
+    return Tri.TRUE if matched else Tri.FALSE
 
 
 def _eval_has_flag(atom: HasFlag, candidate: Candidate) -> Tri:
@@ -278,66 +348,91 @@ def _assert_never(value: object) -> Tri:  # pragma: no cover - type-checker aid
     raise AssertionError(f"unreachable atom type: {type(value)!r}")
 
 
-def evaluate(tree: ConditionTree, candidate: Candidate, *, now: datetime) -> Tri:
+_EMPTY_PROCESSOR_VALUES: Mapping[str, ProcessorAnswer] = types.MappingProxyType({})
+
+
+def evaluate(
+    tree: ConditionTree,
+    candidate: Candidate,
+    *,
+    now: datetime,
+    processor_values: Mapping[str, ProcessorAnswer] = _EMPTY_PROCESSOR_VALUES,
+) -> Tri:
     """Evaluate a condition tree with Kleene three-valued logic.
 
     - `all` is FALSE if any child is FALSE, TRUE if every child is TRUE,
       else UNKNOWN.
     - `any` is TRUE if any child is TRUE, FALSE if every child is FALSE,
       else UNKNOWN.
+    - `none` is TRUE if every child is FALSE, FALSE if any child is TRUE,
+      else UNKNOWN -- the De Morgan mirror of `any` (jev-provider-plan §4).
     - `not` swaps TRUE/FALSE and leaves UNKNOWN unchanged.
-    - An `llm` atom is always UNKNOWN; every other atom is deterministic.
+    - A `processor:` atom is UNKNOWN until `processor_values` carries a
+      resolved answer for its processor name (jev-provider-plan §6);
+      every other atom is deterministic. Omitting `processor_values`
+      entirely (the default) is exactly equivalent to no processor having
+      answered yet -- every `ProcessorCondition` atom evaluates UNKNOWN.
 
     Never raises on a well-typed tree.
     """
     if isinstance(tree, AllNode):
-        results = [evaluate(child, candidate, now=now) for child in tree.children]
+        results = [
+            evaluate(child, candidate, now=now, processor_values=processor_values)
+            for child in tree.children
+        ]
         if any(r is Tri.FALSE for r in results):
             return Tri.FALSE
         if all(r is Tri.TRUE for r in results):
             return Tri.TRUE
         return Tri.UNKNOWN
     if isinstance(tree, AnyNode):
-        results = [evaluate(child, candidate, now=now) for child in tree.children]
+        results = [
+            evaluate(child, candidate, now=now, processor_values=processor_values)
+            for child in tree.children
+        ]
         if any(r is Tri.TRUE for r in results):
             return Tri.TRUE
         if all(r is Tri.FALSE for r in results):
             return Tri.FALSE
         return Tri.UNKNOWN
+    if isinstance(tree, NoneNode):
+        results = [
+            evaluate(child, candidate, now=now, processor_values=processor_values)
+            for child in tree.children
+        ]
+        if any(r is Tri.TRUE for r in results):
+            return Tri.FALSE
+        if all(r is Tri.FALSE for r in results):
+            return Tri.TRUE
+        return Tri.UNKNOWN
     if isinstance(tree, NotNode):
-        inner = evaluate(tree.child, candidate, now=now)
+        inner = evaluate(
+            tree.child, candidate, now=now, processor_values=processor_values
+        )
         if inner is Tri.TRUE:
             return Tri.FALSE
         if inner is Tri.FALSE:
             return Tri.TRUE
         return Tri.UNKNOWN
-    return _eval_atom(tree, candidate, now=now)
+    return _eval_atom(tree, candidate, now=now, processor_values=processor_values)
 
 
-def llm_atom(tree: ConditionTree) -> LlmCondition | None:
-    """Return the rule's single `llm` atom, or None.
-
-    Config validation guarantees a rule has at most one `llm` atom and
-    that it never appears under `not` (spec §7.3), so a single
-    depth-first search is sufficient and unambiguous.
-    """
-    if isinstance(tree, AllNode):
+def processor_names(tree: ConditionTree) -> frozenset[str]:
+    """Every distinct processor name referenced anywhere in `tree`
+    (jev-provider-plan §6), replacing the old single-`llm`-atom
+    `llm_atom()` walk now that a rule may reference several named
+    processors, shared freely with other rules. `evaluate.py` uses this
+    to know which processors a still-`UNKNOWN` rule needs answered."""
+    if isinstance(tree, AllNode | AnyNode | NoneNode):
+        names: set[str] = set()
         for child in tree.children:
-            found = llm_atom(child)
-            if found is not None:
-                return found
-        return None
-    if isinstance(tree, AnyNode):
-        for child in tree.children:
-            found = llm_atom(child)
-            if found is not None:
-                return found
-        return None
+            names |= processor_names(child)
+        return frozenset(names)
     if isinstance(tree, NotNode):
-        return llm_atom(tree.child)
-    if isinstance(tree, LlmCondition):
-        return tree
-    return None
+        return processor_names(tree.child)
+    if isinstance(tree, ProcessorCondition):
+        return frozenset({tree.name})
+    return frozenset()
 
 
 def _sender_matches_protect_entry(address: str, entry: str) -> bool:

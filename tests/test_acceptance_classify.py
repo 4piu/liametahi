@@ -5,38 +5,54 @@ separate because it is specifically about the LLM decision cache (spec
 section 13) across multiple simulated runs, which needs its own small
 harness of repeated `evaluate_candidates()` calls sharing one candidate
 row.
+
+jev-provider-plan §0, §10: the cache is now keyed on processor identity
+(`processor_hash`, analogous to the old `rule_text_hash`) rather than a
+rule id -- editing a processor's own definition (its `question`, in this
+test) invalidates its cached decisions exactly the way editing a rule's
+`llm` text used to.
 """
 
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from liametahi import evaluate, state
-from liametahi.config import ModelConfig, TaskConfig
+from liametahi import evaluate, prompt, state
+from liametahi.config import Config
+from liametahi.rules import ProcessorAnswer
 from tests.conftest import make_candidate
-from tests.fakes.fake_classifier import FakeClassifier, outcome_with_matches
+from tests.fakes.fake_classifier import FakeClassifier, outcome_with_answers
 
 NOW = datetime(2026, 7, 1, tzinfo=UTC)
 
 
-def _model_config() -> ModelConfig:
-    return ModelConfig.model_validate(
-        {"provider": "openai_compatible", "base_url": "http://local", "model": "m"}
-    )
-
-
-def _task(description: str) -> TaskConfig:
-    return TaskConfig.model_validate(
+def _config(question: str) -> Config:
+    return Config.model_validate(
         {
-            "account": "a",
-            "model": "m",
-            "rules": [
-                {
-                    "id": "stale-updates",
-                    "when": {"llm": description},
-                    "actions": ["move_to:Archive"],
+            "version": 1,
+            "accounts": {"a": {"host": "h", "username": "u", "password": "p"}},
+            "models": {
+                "m": {
+                    "provider": "openai_compatible",
+                    "base_url": "http://local",
+                    "model": "m",
                 }
-            ],
+            },
+            "processors": {
+                "stale-updates": {"model": "m", "type": "noul", "question": question},
+            },
+            "tasks": {
+                "t": {
+                    "account": "a",
+                    "source_mailboxes": ["INBOX"],
+                    "rules": [
+                        {
+                            "when": {"processor": "stale-updates.value == true"},
+                            "actions": ["move_to:Archive"],
+                        }
+                    ],
+                }
+            },
         }
     )
 
@@ -65,51 +81,66 @@ def _run(conn: sqlite3.Connection, account_id: int) -> str:
     return run_id
 
 
+def _processor_hash(config: Config) -> str:
+    cfg = config.processors["stale-updates"]
+    offered = evaluate._offered_processor("stale-updates", cfg)
+    return prompt.compute_processor_hash(offered)
+
+
 def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
     tmp_path: Path,
 ) -> None:
     conn, account_id = _setup(tmp_path)
-    task_v1 = _task("Recurring low-value notification.")
+    config_v1 = _config("Recurring low-value notification.")
+    task_v1 = config_v1.tasks["t"]
     cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "z" * 60)
     cid = state.upsert_candidate(conn, cand)
 
-    # --- Run 1: the model confidently declines the rule (offered but
-    # absent from `matches`) -> the negative decision must be cached
-    # (spec section 13). ---------------------------------------------
+    # --- Run 1: the model confidently declines (answers false) -> the
+    # negative decision must be cached (spec section 13). ---------------
     run_1 = _run(conn, account_id)
-    fc_1 = FakeClassifier([outcome_with_matches(matches_by_payload={"c1": []})])
+    fc_1 = FakeClassifier(
+        [
+            outcome_with_answers(
+                answers_by_payload={
+                    "c1": {"stale-updates": ProcessorAnswer(False, None)}
+                }
+            )
+        ]
+    )
     result_1 = evaluate.evaluate_candidates(
         conn,
         account_id=account_id,
         run_id=run_1,
         task=task_v1,
-        model_config=_model_config(),
-        model_id="mi",
-        classifier=fc_1,
+        config=config_v1,
+        classifier_factory=lambda model_cfg: fc_1,
         candidates=[(cid, cand)],
         now=NOW,
         reevaluate=False,
     ).results[0]
     assert fc_1.call_count == 1
     assert result_1.status == "no_match"
-    assert result_1.input_hash is not None
-    rule_text_hash_v1 = evaluate._rule_text_hash(task_v1.rules[0])
+    processor_hash_v1 = _processor_hash(config_v1)
+    metadata_input_hash = prompt.build_candidate_payload(
+        cand, payload_id="c0"
+    ).input_hash
     assert (
-        state.get_cached_decision(
+        state.get_cached_processor_decision(
             conn,
             account_id=account_id,
             fingerprint=cand.fingerprint,
-            rule_id="stale-updates",
-            rule_text_hash=rule_text_hash_v1,
-            input_hash=result_1.input_hash,
-            model_id="mi",
-            prompt_version=1,
+            processor_name="stale-updates",
+            processor_hash=processor_hash_v1,
+            input_hash=metadata_input_hash,
+            model_id="m",
+            prompt_version=prompt.PROMPT_VERSION,
         )
         is not None
     )
 
-    # --- Run 2: same task, same rule text, no --reevaluate -> the
-    # cached "no" must eliminate the rule WITHOUT a model call. ---------
+    # --- Run 2: same task, same processor definition, no --reevaluate ->
+    # the cached "no" must eliminate the rule WITHOUT a model call. ------
     run_2 = _run(conn, account_id)
     fc_2 = FakeClassifier([])  # any classify() call would raise -- none expected
     result_2 = evaluate.evaluate_candidates(
@@ -117,9 +148,8 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
         account_id=account_id,
         run_id=run_2,
         task=task_v1,
-        model_config=_model_config(),
-        model_id="mi",
-        classifier=fc_2,
+        config=config_v1,
+        classifier_factory=lambda model_cfg: fc_2,
         candidates=[(cid, cand)],
         now=NOW,
         reevaluate=False,
@@ -129,18 +159,25 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
     assert result_2.matches == ()
 
     # --- `--reevaluate` semantics: even with a valid cache entry for the
-    # exact same rule text and input, `--reevaluate` ignores the cache
-    # and forces a fresh model call. ------------------------------------
+    # exact same processor definition and input, `--reevaluate` ignores
+    # the cache and forces a fresh model call. ---------------------------
     run_3 = _run(conn, account_id)
-    fc_3 = FakeClassifier([outcome_with_matches(matches_by_payload={"c1": []})])
+    fc_3 = FakeClassifier(
+        [
+            outcome_with_answers(
+                answers_by_payload={
+                    "c1": {"stale-updates": ProcessorAnswer(False, None)}
+                }
+            )
+        ]
+    )
     result_3 = evaluate.evaluate_candidates(
         conn,
         account_id=account_id,
         run_id=run_3,
         task=task_v1,
-        model_config=_model_config(),
-        model_id="mi",
-        classifier=fc_3,
+        config=config_v1,
+        classifier_factory=lambda model_cfg: fc_3,
         candidates=[(cid, cand)],
         now=NOW,
         reevaluate=True,
@@ -148,25 +185,31 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
     assert fc_3.call_count == 1
     assert result_3.status == "no_match"  # a fresh decision, not a cache hit
 
-    # --- Editing the rule's `llm` text changes `rule_text_hash`, which
-    # invalidates the old cache entry: the next run resends the
+    # --- Editing the processor's own definition changes `processor_hash`,
+    # which invalidates the old cache entry: the next run resends the
     # candidate even WITHOUT --reevaluate. -------------------------------
-    task_v2 = _task("Recurring low-value notification -- edited wording.")
-    rule_text_hash_v2 = evaluate._rule_text_hash(task_v2.rules[0])
-    assert rule_text_hash_v2 != rule_text_hash_v1
+    config_v2 = _config("Recurring low-value notification -- edited wording.")
+    task_v2 = config_v2.tasks["t"]
+    processor_hash_v2 = _processor_hash(config_v2)
+    assert processor_hash_v2 != processor_hash_v1
 
     run_4 = _run(conn, account_id)
     fc_4 = FakeClassifier(
-        [outcome_with_matches(matches_by_payload={"c1": ["stale-updates"]})]
+        [
+            outcome_with_answers(
+                answers_by_payload={
+                    "c1": {"stale-updates": ProcessorAnswer(True, None)}
+                }
+            )
+        ]
     )
     result_4 = evaluate.evaluate_candidates(
         conn,
         account_id=account_id,
         run_id=run_4,
         task=task_v2,
-        model_config=_model_config(),
-        model_id="mi",
-        classifier=fc_4,
+        config=config_v2,
+        classifier_factory=lambda model_cfg: fc_4,
         candidates=[(cid, cand)],
         now=NOW,
         reevaluate=False,
@@ -176,28 +219,28 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
 
     # --- A match is cached too, not just a non-match (spec section 13):
     # run 4's accepted match created a positive cache row for the edited
-    # rule text/input hash. This is what lets a message whose remote
+    # processor/input hash. This is what lets a message whose remote
     # mutation fails (wrong trash_mailbox, an unadvertised capability,
     # ...) retry that mutation on the next run instead of being
     # reclassified from scratch every time. -------------------------------
-    assert result_4.input_hash is not None
-    cached_match = state.get_cached_decision(
+    cached_match = state.get_cached_processor_decision(
         conn,
         account_id=account_id,
         fingerprint=cand.fingerprint,
-        rule_id="stale-updates",
-        rule_text_hash=rule_text_hash_v2,
-        input_hash=result_4.input_hash,
-        model_id="mi",
-        prompt_version=1,
+        processor_name="stale-updates",
+        processor_hash=processor_hash_v2,
+        input_hash=metadata_input_hash,
+        model_id="m",
+        prompt_version=prompt.PROMPT_VERSION,
     )
     assert cached_match is not None
-    assert cached_match["matched"] is True
+    assert cached_match.value is True
 
     # --- Run 5: because run 4's match WAS cached, a subsequent run
-    # against the same (still-live, e.g. its trash action failed) rule
-    # text and input reuses the cached "yes" without asking the model
-    # again, and still produces the same accepted match. ------------------
+    # against the same (still-live, e.g. its trash action failed)
+    # processor definition and input reuses the cached "yes" without
+    # asking the model again, and still produces the same accepted
+    # match. ---------------------------------------------------------------
     run_5 = _run(conn, account_id)
     fc_5 = FakeClassifier([])  # any classify() call would raise -- none expected
     result_5 = evaluate.evaluate_candidates(
@@ -205,13 +248,12 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
         account_id=account_id,
         run_id=run_5,
         task=task_v2,
-        model_config=_model_config(),
-        model_id="mi",
-        classifier=fc_5,
+        config=config_v2,
+        classifier_factory=lambda model_cfg: fc_5,
         candidates=[(cid, cand)],
         now=NOW,
         reevaluate=False,
     ).results[0]
     assert fc_5.call_count == 0
     assert result_5.status is None
-    assert [m.rule_id for m in result_5.matches] == ["stale-updates"]
+    assert [m.rule_index for m in result_5.matches] == [0]

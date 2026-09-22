@@ -19,8 +19,10 @@ for messages already known are refreshed in the same pass. Every fetch uses
 never holds a socket. Protected messages are filtered out first and can never
 reach a classifier at all. Each rule's condition tree is evaluated with
 three-valued logic: fully true matches immediately, false is eliminated, and
-only `unknown` — meaning an `llm` condition remains — goes to the model, in
-batches, after the decision cache has removed everything already answered.
+only `unknown` — meaning a `processor:` atom remains unresolved — sends that
+named processor to its model, deduplicated across every rule that references
+it, in batches, after the decision cache has removed everything already
+answered.
 
 Those batches are independent of one another, so `max_concurrent_requests` may
 put several in flight at once — on a first run over a large mailbox this is the
@@ -50,24 +52,22 @@ recorded as successfully moved.
 
 ## Why each safety rule exists
 
-- **The LLM never mutates anything.** It classifies; a separate, deterministic
-  phase decides what to do and does it.
-- **`trash` refuses to run for a message unless `backup` already succeeded
-  for that exact message, earlier in the same rule's action list, in this
-  same run** — a backup from a previous run doesn't count. If a rule
-  doesn't want a local copy at all — a mail server's own trash folder is
-  often recovery enough on its own — set `allow_trash_without_backup: true`
-  on it explicitly; `config check` rejects any rule that could never
-  satisfy the requirement (`backup` missing, or listed after `trash`), so a
-  misconfigured rule fails loudly up front instead of quietly doing nothing
-  on every real run. The check is per message: one message's backup
-  failing skips only that message's trash and leaves it untouched; every
-  other message in the run proceeds normally.
+- **The LLM never mutates anything.** It answers a processor's question; a
+  separate, deterministic phase decides what to do and does it.
+- **`backup` before `trash` is available, not required.** Most IMAP
+  providers already retain trashed mail server-side for some window, so a
+  mandatory local `.eml` copy was frequently redundant friction. Anyone who
+  wants a tool-restorable local copy still lists `backup` earlier in that
+  rule's own action list; `restore` only ever reads from a local backup,
+  never from IMAP-side trash.
 - **Protection is opt-in and explicit.** A task with no `protect:` block
   protects nothing — there is no hidden default shielding unread or flagged
   mail. Write down what you want protected.
 - **A rule that can `trash` mail must carry at least one deterministic
-  condition.** An LLM verdict alone can never be destructive.
+  condition.** A processor's answer alone — however confident, whatever
+  model produced it — can never be destructive by itself; `config check`
+  rejects a `trash` rule whose `when:` is built entirely from `processor:`
+  atoms.
 - **`--dry-run` runs the full pipeline** (scan, classify, decide) and prints
   exactly what *would* happen, without touching the mailbox.
 - **Nothing runs twice by accident.** A run claims each message atomically;
@@ -123,14 +123,17 @@ is what makes time-based rules fire and keeps flags honest.
 
 ## The decision cache
 
-A rule's model decision — match or non-match — is cached per message and
-reused on later runs, so an hourly cron job never re-classifies the same
-already-decided mail. This is also what makes a failed action retry cheaply:
-if a message matched a `trash` rule but the actual mailbox move failed (a
-misconfigured `trash_mailbox`, a capability the server doesn't advertise),
-the message stays put and is picked up again next run — the cached match is
-reused straight into policy/execution, not re-sent to the model. `--reevaluate`
-bypasses the cache entirely and forces a fresh pass.
+A processor's answer for a message is cached, keyed on the processor's own
+definition, and reused on later runs, so an hourly cron job never re-asks
+the same already-answered question about the same mail. This is also what
+makes a failed action retry cheaply: if a message matched a `trash` rule but
+the actual mailbox move failed (a misconfigured `trash_mailbox`, a
+capability the server doesn't advertise), the message stays put and is
+picked up again next run — the cached answer is reused straight into
+policy/execution, not re-asked. `--reevaluate` bypasses the cache entirely
+and forces a fresh pass. There is no separate "unsure" state to defer on:
+a processor call either resolves (and is cached) or genuinely fails
+(transport/parse error, never cached, retried next run).
 
 The cache is keyed to survive a message moving, which is exactly what makes
 it survive a *restore* too: if you move a trashed message back to a source

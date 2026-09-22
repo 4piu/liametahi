@@ -46,13 +46,11 @@ def _setup_run(
     )
 
 
-def _rule(rule_id: str, actions: list[str], *, priority: int = 0) -> object:
+def _rule(actions: list[str]) -> object:
     from liametahi.config import RuleConfig
 
     return RuleConfig.model_validate(
         {
-            "id": rule_id,
-            "priority": priority,
             "when": {"older-than": "1d"},
             "actions": actions,
         }
@@ -95,7 +93,7 @@ def _mailbox_and_item(
         key=key,
         fingerprint=fp,
         message_id=MESSAGE_ID,
-        winning_rule=rule.id,  # type: ignore[attr-defined]
+        winning_rule="rule #1 of 1",
         actions=actions,
     )
     return mb, item
@@ -122,7 +120,7 @@ def test_acceptance_01_backup_then_trash_and_dry_run_does_neither(
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
         account_id = state.upsert_account(conn, name="a", host="h", username="u")
-        rule = _rule("old-weekly-digest", ["backup", "trash"])
+        rule = _rule(["backup", "trash"])
         backup_dir = tmp_path / "backups"
 
         # --dry-run performs neither backup nor trash.
@@ -183,7 +181,7 @@ def test_acceptance_05_backup_and_manifest_exist_before_server_move(
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
         account_id = state.upsert_account(conn, name="a", host="h", username="u")
-        rule = _rule("digest", ["backup", "trash"])
+        rule = _rule(["backup", "trash"])
         candidate_id = _insert_candidate(conn, account_id=account_id)
         run_id = state.new_run_id()
         _setup_run(conn, account_id=account_id, run_id=run_id, task="t", dry_run=False)
@@ -245,7 +243,7 @@ def test_acceptance_06_simulated_backup_write_failure_leaves_message_untouched(
     conn = state.open_database(tmp_path / "state.sqlite3")
     try:
         account_id = state.upsert_account(conn, name="a", host="h", username="u")
-        rule = _rule("digest", ["backup", "trash"])
+        rule = _rule(["backup", "trash"])
         candidate_id = _insert_candidate(conn, account_id=account_id)
         run_id = state.new_run_id()
         _setup_run(conn, account_id=account_id, run_id=run_id, task="t", dry_run=False)
@@ -483,7 +481,7 @@ def test_acceptance_10_two_concurrent_runs_only_one_claims_and_mutates(
     try:
         account_id = state.upsert_account(conn, name="a", host="h", username="u")
         candidate_id = _insert_candidate(conn, account_id=account_id)
-        rule = _rule("archive", ["move_to:Archive"])
+        rule = _rule(["move_to:Archive"])
         mb, item = _mailbox_and_item(
             account_id=account_id,
             candidate_id=candidate_id,
@@ -554,43 +552,38 @@ def test_acceptance_10_two_concurrent_runs_only_one_claims_and_mutates(
 # --- Acceptance test 13 -----------------------------------------------
 
 
-def test_acceptance_13_two_rules_match_only_higher_priority_runs_other_shadowed() -> (
-    None
-):
+def test_acceptance_13_two_rules_match_first_listed_wins_other_shadowed() -> None:
+    """jev-provider-plan §9: a matching rule's rank is simply its
+    position in `task.rules` -- the first-listed rule wins, no separate
+    `priority` number."""
     from liametahi.config import RuleConfig
 
-    high_priority = RuleConfig.model_validate(
+    first_listed = RuleConfig.model_validate(
         {
-            "id": "old-weekly-digest",
-            "priority": 100,
             "when": {"older-than": "30d"},
             "actions": ["backup", "trash"],
         }
     )
-    low_priority = RuleConfig.model_validate(
+    second_listed = RuleConfig.model_validate(
         {
-            "id": "stale-updates",
-            "priority": 10,
             "when": {"older-than": "14d"},
             "actions": ["move_to:Archive"],
         }
     )
+    rules_by_index = [first_listed, second_listed]
     matches = [
-        policy.MatchedRule("stale-updates", priority=10, config_order=1),
-        policy.MatchedRule("old-weekly-digest", priority=100, config_order=0),
+        policy.MatchedRule(rule_index=1, label="rule #2 of 2"),
+        policy.MatchedRule(rule_index=0, label="rule #1 of 2"),
     ]
     decision = policy.decide(
         protected=False,
         matches=matches,
-        rules_by_id={
-            "old-weekly-digest": high_priority,
-            "stale-updates": low_priority,
-        },
+        rules_by_index=rules_by_index,
         trash_mailbox="Trash",
     )
     assert decision.status == "matched"
-    assert decision.winning_rule == "old-weekly-digest"
-    assert decision.shadowed == ("stale-updates",)
+    assert decision.winning_rule == "rule #1 of 2"
+    assert decision.shadowed == ("rule #2 of 2",)
     # Only the winner's full action list resolves; the loser's actions
     # (a mere move) never appear and never run.
     assert [a.action for a in decision.actions] == ["backup", "trash"]

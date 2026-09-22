@@ -27,22 +27,57 @@ from liametahi.classifier import (
     CandidatePayload,
     Classification,
     ClassifyOutcome,
-    OfferedRule,
+    OfferedProcessor,
 )
-from liametahi.config import ModelConfig, TaskConfig
+from liametahi.config import Config
 from liametahi.domain import Candidate
+from liametahi.rules import ProcessorAnswer
 from tests.conftest import make_candidate
 
 NOW = datetime(2026, 7, 1, tzinfo=UTC)
 
 # Every candidate is old enough for the deterministic half of the rule,
-# leaving the `llm` atom as the only unresolved part -- which is what
-# sends it to the classifier.
-RULE = {
-    "id": "newsletters",
-    "when": {"llm": "is this a promotional newsletter?"},
-    "actions": ["move_to:Archive"],
-}
+# leaving the `processor:` atom as the only unresolved part -- which is
+# what sends it to the classifier.
+_PROCESSOR_NAME = "newsletter-check"
+
+
+def _config(**model_overrides: object) -> Config:
+    model: dict[str, object] = {
+        "provider": "openai_compatible",
+        "base_url": "http://local",
+        "model": "m",
+        # One mail per request, so candidate count == batch count and the
+        # concurrency assertions below are about whole requests.
+        "mails_per_request": 1,
+    }
+    model.update(model_overrides)
+    return Config.model_validate(
+        {
+            "version": 1,
+            "accounts": {"a": {"host": "h", "username": "u", "password": "p"}},
+            "models": {"m": model},
+            "processors": {
+                _PROCESSOR_NAME: {
+                    "model": "m",
+                    "type": "noul",
+                    "question": "is this a promotional newsletter?",
+                }
+            },
+            "tasks": {
+                "t": {
+                    "account": "a",
+                    "source_mailboxes": ["INBOX"],
+                    "rules": [
+                        {
+                            "when": {"processor": f"{_PROCESSOR_NAME}.value == true"},
+                            "actions": ["move_to:Archive"],
+                        }
+                    ],
+                }
+            },
+        }
+    )
 
 
 class RecordingClassifier:
@@ -68,7 +103,9 @@ class RecordingClassifier:
         self.threads: set[int] = set()
 
     def classify(
-        self, candidates: Sequence[CandidatePayload], rules: Sequence[OfferedRule]
+        self,
+        candidates: Sequence[CandidatePayload],
+        processors: Sequence[OfferedProcessor],
     ) -> ClassifyOutcome:
         with self._lock:
             self._in_flight += 1
@@ -87,11 +124,15 @@ class RecordingClassifier:
                 event = self._before_return.get(subject)
                 if event is not None:
                     assert event.wait(timeout=10), f"gate for {subject!r} never set"
+                matched = subject in self._matching
                 results.append(
                     Classification(
                         payload_id=payload.payload_id,
-                        matches=("newsletters",) if subject in self._matching else (),
-                        needs_content=False,
+                        answers={
+                            _PROCESSOR_NAME: ProcessorAnswer(
+                                value=matched, confidence=None
+                            )
+                        },
                         reason=None,
                     )
                 )
@@ -113,19 +154,6 @@ def _subject_of(payload: CandidatePayload) -> str:
     subject = payload.fields.get("subject")
     assert isinstance(subject, str)
     return subject
-
-
-def _model_config(**overrides: object) -> ModelConfig:
-    base: dict[str, object] = {
-        "provider": "openai_compatible",
-        "base_url": "http://local",
-        "model": "m",
-        # One mail per request, so candidate count == batch count and the
-        # concurrency assertions below are about whole requests.
-        "mails_per_request": 1,
-    }
-    base.update(overrides)
-    return ModelConfig.model_validate(base)
 
 
 def _candidates(
@@ -166,14 +194,14 @@ def _run(
         fetch_headers=[],
         config_hash="h",
     )
+    config = _config(max_concurrent_requests=concurrency)
     return evaluate.evaluate_candidates(
         conn,
         account_id=account_id,
         run_id=run_id,
-        task=TaskConfig.model_validate({"account": "a", "model": "m", "rules": [RULE]}),
-        model_config=_model_config(max_concurrent_requests=concurrency),
-        model_id="mi",
-        classifier=classifier,
+        task=config.tasks["t"],
+        config=config,
+        classifier_factory=lambda model_cfg: classifier,
         candidates=candidates,
         now=NOW,
         reevaluate=False,
@@ -216,7 +244,7 @@ def test_default_is_serial(tmp_path: Path) -> None:
     """The default must remain one request at a time: raising it is a
     deliberate choice about someone's provider rate limit, never
     something that happens to a config that did not ask for it."""
-    assert _model_config().max_concurrent_requests == 1
+    assert _config().models["m"].max_concurrent_requests == 1
 
     conn, account_id = _open(tmp_path)
     try:
@@ -247,13 +275,13 @@ def _dump(conn: sqlite3.Connection) -> dict[str, list[tuple[object, ...]]]:
     order versus completion order changes, so sorting here would hide
     the thing this dump exists to compare."""
     classifications = conn.execute(
-        "SELECT candidate_id, input_level, input_hash, offered_rules, matches, "
-        "needs_content, valid, error FROM classifications ORDER BY rowid"
+        "SELECT candidate_id, input_level, input_hash, offered_processors, "
+        "processor_answers, valid, error FROM classifications ORDER BY rowid"
     ).fetchall()
     cache = conn.execute(
-        "SELECT fingerprint, rule_id, rule_text_hash, input_hash, model_id, "
-        "prompt_version, matched FROM llm_decision_cache "
-        "ORDER BY fingerprint, rule_id"
+        "SELECT fingerprint, processor_name, processor_hash, input_hash, "
+        "model_id, prompt_version, value_json, confidence FROM llm_decision_cache "
+        "ORDER BY fingerprint, processor_name"
     ).fetchall()
     return {
         "classifications": [tuple(row) for row in classifications],
@@ -291,16 +319,16 @@ def test_out_of_order_completion_still_records_in_batch_order(
             def classify(
                 self,
                 candidates: Sequence[CandidatePayload],
-                rules: Sequence[OfferedRule],
+                processors: Sequence[OfferedProcessor],
             ) -> ClassifyOutcome:
                 subjects = [_subject_of(p) for p in candidates]
                 if "subject 4" in subjects:
-                    result = super().classify(candidates, rules)
+                    result = super().classify(candidates, processors)
                     last_done.set()
                     return result
                 if "subject 1" in subjects:
                     assert last_done.wait(timeout=10), "last batch never completed"
-                return super().classify(candidates, rules)
+                return super().classify(candidates, processors)
 
         concurrent = _run(
             concurrent_conn,
@@ -365,11 +393,11 @@ def test_a_failing_batch_does_not_take_down_its_neighbours(tmp_path: Path) -> No
             def classify(
                 self,
                 candidates: Sequence[CandidatePayload],
-                rules: Sequence[OfferedRule],
+                processors: Sequence[OfferedProcessor],
             ) -> ClassifyOutcome:
                 if any(_subject_of(p) == "subject 3" for p in candidates):
                     raise RuntimeError("provider said no")
-                return super().classify(candidates, rules)
+                return super().classify(candidates, processors)
 
         outcome = _run(
             conn,
@@ -405,9 +433,9 @@ def test_split_and_retry_survives_any_concurrency(
             def classify(
                 self,
                 candidates: Sequence[CandidatePayload],
-                rules: Sequence[OfferedRule],
+                processors: Sequence[OfferedProcessor],
             ) -> ClassifyOutcome:
-                super().classify(candidates, rules)
+                super().classify(candidates, processors)
                 return ClassifyOutcome(
                     results=(),
                     invalid=tuple(p.payload_id for p in candidates),

@@ -26,6 +26,7 @@ import os
 import re
 import stat
 import sys
+from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Literal, Self, cast
@@ -42,7 +43,7 @@ from pydantic import (
 )
 
 from liametahi import rules
-from liametahi.rules import ConditionTree
+from liametahi.rules import ConditionTree, ProcessorCondition
 
 # --- Errors ------------------------------------------------------------
 
@@ -64,7 +65,19 @@ _SIZE_RE = re.compile(r"^(\d+)([kKmMgG]?)[bB]?$")
 # alternation (contracts §3): regex alternation picks the first alternative
 # that matches at a position, not the longest, so ">" before ">=" would
 # swallow the ">" and leave a stray "=" that fails the trailing \d+ anchor.
-_COMPARISON_RE = re.compile(r"^(==|!=|>=|<=|>|<)(\d+)$")
+# Widened (jev-provider-plan §10) to also accept a decimal amount, so
+# `>=0.85` parses the same way `>=2` already does -- `recipient-count`'s
+# existing integer forms are unaffected, since `\d+` on its own still
+# matches with no decimal point captured.
+_COMPARISON_RE = re.compile(r"^(==|!=|>=|<=|>|<)(\d+(?:\.\d+)?)$")
+# jev-provider-plan §3: `processor: "name.field op value"`, one fixed
+# shape, no optional parts. `field` is checked against the closed
+# {"value", "confidence"} set after matching, not in the regex itself, so
+# an invalid field name gets a clear message instead of a generic
+# "condition doesn't match" one.
+_PROCESSOR_CONDITION_RE = re.compile(
+    r"^([A-Za-z_][\w-]*)\.([A-Za-z_][\w-]*)\s*(==|!=|>=|<=|>|<)\s*(.+)$"
+)
 # contracts §3: mechanism is a closed set, result word is deliberately open
 # (pass/fail/softfail/neutral/none/temperror/permerror and provider-specific
 # extensions all appear in real Authentication-Results headers).
@@ -109,17 +122,73 @@ def _parse_size(value: str) -> int:
     return amount * multiplier
 
 
-def _parse_comparison(key: str, value: str) -> tuple[rules.ComparisonOp, int]:
+def _parse_comparison(key: str, value: str) -> tuple[rules.ComparisonOp, int | float]:
     match = _COMPARISON_RE.match(value)
     if not match:
         raise ConfigError(
             f"condition {key!r} has an invalid comparison {value!r}: expected "
             "one operator from ==, !=, >=, <=, >, < immediately followed by a "
-            "non-negative integer, e.g. '>10' or '<=3'"
+            "non-negative integer or decimal, e.g. '>10', '<=3', or '>=0.85'"
         )
     # _COMPARISON_RE's first group is one of exactly these six alternatives.
     op = cast(rules.ComparisonOp, match.group(1))
-    return op, int(match.group(2))
+    number_text = match.group(2)
+    if "." in number_text:
+        return op, float(number_text)
+    return op, int(number_text)
+
+
+def _parse_processor_condition(key: str, value: object) -> ProcessorCondition:
+    """`processor: "name.field op value"` (jev-provider-plan §3): one
+    fixed shape, no optional parts. `field` is exactly `value` or
+    `confidence`; the comparand is `true`/`false` (lowercase, exact) ->
+    bool, else a float if it parses as one, else a plain string (a
+    declared choice/level option name). A bool or string comparand only
+    ever supports `==`/`!=` -- `>`/`>=`/`<`/`<=` against a non-numeric
+    comparand is rejected here, at config load, not lazily at evaluation
+    time. Whether the referenced processor exists, and whether a string
+    comparand actually names one of its declared options/levels, needs
+    the whole config and is validated by `Config._cross_reference`
+    instead.
+    """
+    text = _require_str(key, value)
+    match = _PROCESSOR_CONDITION_RE.match(text)
+    if not match:
+        raise ConfigError(
+            f"condition {key!r} has an invalid value {text!r}: expected "
+            "'name.field op value', e.g. 'spam-category.value == spam' or "
+            "'urgency.confidence >= 0.85'"
+        )
+    name, field, op_text, comparand_text = match.groups()
+    if field not in ("value", "confidence"):
+        raise ConfigError(
+            f"condition {key!r}: field {field!r} in {text!r} must be "
+            "'value' or 'confidence' -- no other field exists"
+        )
+    op = cast(rules.ComparisonOp, op_text)
+    comparand_text = comparand_text.strip()
+    comparand: bool | float | str
+    if comparand_text == "true":
+        comparand = True
+    elif comparand_text == "false":
+        comparand = False
+    else:
+        try:
+            comparand = float(comparand_text)
+        except ValueError:
+            comparand = comparand_text
+    if not isinstance(comparand, float) and op not in ("==", "!="):
+        raise ConfigError(
+            f"condition {key!r}: operator {op_text!r} in {text!r} is only "
+            "valid against a numeric comparand; a boolean or string "
+            "comparand only supports == or !="
+        )
+    return ProcessorCondition(
+        name=name,
+        field=cast(Literal["value", "confidence"], field),
+        op=op,
+        value=comparand,
+    )
 
 
 def _parse_auth_result(key: str, value: object) -> rules.AuthResult:
@@ -186,7 +255,7 @@ DEFAULT_LOCK_DIR = _DEFAULT_STATE_DIR / "locks"
 
 # --- Condition-tree parsing (spec §7.1, §7.2, §7.3) ---------------------
 
-_COMPOSITION_KEYS = frozenset({"all", "any", "not"})
+_COMPOSITION_KEYS = frozenset({"all", "any", "none", "not"})
 _MAX_NESTING_DEPTH = 3
 
 
@@ -258,9 +327,8 @@ def _parse_match_pattern(key: str, value: object) -> rules.MatchPattern:
 
 
 def _parse_atom(key: str, value: object) -> rules.Atom:
-    if key == "llm":
-        text = _require_str(key, value)
-        return rules.LlmCondition(description=text)
+    if key == "processor":
+        return _parse_processor_condition(key, value)
     if key == "older-than":
         return rules.OlderThan(duration=_parse_duration(_require_str(key, value)))
     if key == "newer-than":
@@ -283,30 +351,32 @@ def _parse_atom(key: str, value: object) -> rules.Atom:
         return rules.LargerThan(size_bytes=_parse_size(_require_str(key, value)))
     if key == "recipient-count":
         op, count = _parse_comparison(key, _require_str(key, value))
+        if not isinstance(count, int):
+            raise ConfigError(
+                f"condition {key!r} requires an integer comparand, got "
+                f"{value!r} (recipient-count is a count, not a decimal)"
+            )
         return rules.RecipientCount(op=op, value=count)
     if key == "has-attachment":
         return _parse_has_attachment(key, value)
     if key == "auth-result":
         return _parse_auth_result(key, value)
     raise ConfigError(
-        f"unknown condition {key!r}; expected one of all/any/not or an atom "
-        "(older-than, newer-than, sender-match, recipient-match, "
+        f"unknown condition {key!r}; expected one of all/any/none/not or an "
+        "atom (older-than, newer-than, sender-match, recipient-match, "
         "subject-contains, list-id-contains, has-header, has-flag, in-mailbox, "
-        "larger-than, recipient-count, has-attachment, auth-result, llm)"
+        "larger-than, recipient-count, has-attachment, auth-result, processor)"
     )
 
 
 def parse_condition_tree(raw: object, *, depth: int = 0) -> ConditionTree:
     """Parse one raw YAML condition node into a `rules.ConditionTree`.
 
-    Enforces: each node is a single-key mapping, `all`/`any` values are
-    non-empty lists, `not` takes a single nested node, and nesting of
-    `all`/`any`/`not` does not exceed depth 3 (spec §7.2). Grammar
-    parsing for duration/size atoms happens here (contracts §3).
-
-    `llm`-count and `llm`-under-`not` constraints (spec §7.3) are *not*
-    checked here — they need whole-tree context and are validated once
-    the full tree exists, by `_validate_llm_placement`.
+    Enforces: each node is a single-key mapping, `all`/`any`/`none`
+    values are non-empty lists, `not` takes a single nested node, and
+    nesting of `all`/`any`/`none`/`not` does not exceed depth 3 (spec
+    §7.2; jev-provider-plan §4). Grammar parsing for duration/size/
+    processor atoms happens here (contracts §3; jev-provider-plan §3).
     """
     if not isinstance(raw, dict) or len(raw) != 1:
         raise ConfigError(
@@ -326,7 +396,11 @@ def parse_condition_tree(raw: object, *, depth: int = 0) -> ConditionTree:
         if not isinstance(value, list) or not value:
             raise ConfigError(f"{key!r} requires a non-empty list of conditions")
         children = tuple(parse_condition_tree(item, depth=depth + 1) for item in value)
-        return rules.AllNode(children) if key == "all" else rules.AnyNode(children)
+        if key == "all":
+            return rules.AllNode(children)
+        if key == "any":
+            return rules.AnyNode(children)
+        return rules.NoneNode(children)
     return _parse_atom(key, value)
 
 
@@ -370,39 +444,17 @@ def parse_when(raw: object) -> ConditionTree:
     return parse_condition_tree(raw, depth=0)
 
 
-def _validate_llm_placement(tree: ConditionTree, *, rule_id: str) -> None:
-    """Enforce spec §7.3: at most one `llm` atom per rule, never under `not`."""
-    count = 0
-
-    def walk(node: ConditionTree, in_not: bool) -> None:
-        nonlocal count
-        if isinstance(node, rules.AllNode | rules.AnyNode):
-            for child in node.children:
-                walk(child, in_not)
-        elif isinstance(node, rules.NotNode):
-            walk(node.child, True)
-        elif isinstance(node, rules.LlmCondition):
-            count += 1
-            if in_not:
-                raise ConfigError(
-                    f"rule {rule_id!r}: 'llm' may not appear under 'not' "
-                    "(spec §7.3) — express negation in the description text"
-                )
-
-    walk(tree, False)
-    if count > 1:
-        raise ConfigError(
-            f"rule {rule_id!r}: at most one 'llm' atom is allowed per rule (spec §7.3)"
-        )
-
-
 def has_deterministic_atom(tree: ConditionTree) -> bool:
-    """True if the tree contains at least one non-`llm` atom (spec §5.2)."""
-    if isinstance(tree, rules.AllNode | rules.AnyNode):
+    """True if the tree contains at least one non-`processor` atom (spec
+    §5.2). A `processor:` atom never counts as deterministic regardless
+    of processor type, backend, or which field is being compared
+    (jev-provider-plan §3's safety invariant) -- a `trash` rule still
+    needs at least one atom besides it."""
+    if isinstance(tree, rules.AllNode | rules.AnyNode | rules.NoneNode):
         return any(has_deterministic_atom(child) for child in tree.children)
     if isinstance(tree, rules.NotNode):
         return has_deterministic_atom(tree.child)
-    return not isinstance(tree, rules.LlmCondition)
+    return not isinstance(tree, ProcessorCondition)
 
 
 def collect_header_names(tree: ConditionTree) -> frozenset[str]:
@@ -411,7 +463,7 @@ def collect_header_names(tree: ConditionTree) -> frozenset[str]:
     this is what makes `TaskConfig.fetch_headers` actually fetch
     `Authentication-Results` for a task that uses `auth-result` anywhere
     in its rules, without fetching it unconditionally for every task."""
-    if isinstance(tree, rules.AllNode | rules.AnyNode):
+    if isinstance(tree, rules.AllNode | rules.AnyNode | rules.NoneNode):
         names: set[str] = set()
         for child in tree.children:
             names |= collect_header_names(child)
@@ -425,75 +477,89 @@ def collect_header_names(tree: ConditionTree) -> frozenset[str]:
     return frozenset()
 
 
+def _collect_processor_atoms(tree: ConditionTree) -> tuple[ProcessorCondition, ...]:
+    """Every `ProcessorCondition` atom anywhere in `tree`, for
+    `Config._cross_reference`'s per-atom checks (referenced processor
+    exists, `.value` comparand names a declared option/level). Mirrors
+    `collect_header_names`'s traversal shape; `rules.processor_names()`
+    is the public, name-only equivalent `evaluate.py` uses at runtime."""
+    if isinstance(tree, rules.AllNode | rules.AnyNode | rules.NoneNode):
+        atoms: list[ProcessorCondition] = []
+        for child in tree.children:
+            atoms.extend(_collect_processor_atoms(child))
+        return tuple(atoms)
+    if isinstance(tree, rules.NotNode):
+        return _collect_processor_atoms(tree.child)
+    if isinstance(tree, ProcessorCondition):
+        return (tree,)
+    return ()
+
+
 def _validate_actions(
     actions: list[str],
     when: ConditionTree,
     *,
-    rule_id: str,
-    allow_trash_without_backup: bool,
+    rule_label: str,
 ) -> None:
-    """Enforce spec §7.3/§7.4/§7.5 action-list constraints."""
+    """Enforce spec §7.3/§7.4/§7.5 action-list constraints.
+
+    Backup-before-trash (formerly enforced here) is removed
+    (jev-provider-plan §8): `trash` no longer requires a preceding
+    `backup` in the same action list, and `allow_trash_without_backup`
+    no longer exists as a config field at all -- `RuleConfig`'s
+    `extra="forbid"` now rejects it outright as an unknown key. What is
+    unchanged: at most one remote mutation per action list, and `trash`
+    still requires at least one deterministic condition (spec §5.2) --
+    the more important of the two, since it stops a model's (or
+    processor's) verdict alone from being sufficient to delete
+    something. `task:<id>` is a new, local-only action (jev-provider-plan
+    §7): never an IMAP mutation, so it never counts toward
+    `remote_mutations` and composes freely with everything else.
+    """
     remote_mutations = 0
-    backup_index: int | None = None
-    trash_index: int | None = None
-    for index, action in enumerate(actions):
+    for action in actions:
         if action == "backup":
-            if backup_index is None:
-                backup_index = index
             continue
         if action == "trash":
             remote_mutations += 1
-            if trash_index is None:
-                trash_index = index
             continue
         if action.startswith("move_to:"):
             target = action.removeprefix("move_to:")
             if not target:
-                raise ConfigError(
-                    f"rule {rule_id!r}: 'move_to:' requires a mailbox name"
-                )
+                raise ConfigError(f"{rule_label}: 'move_to:' requires a mailbox name")
             remote_mutations += 1
             continue
         if action.startswith("label:"):
             keyword = action.removeprefix("label:")
             if not keyword:
-                raise ConfigError(f"rule {rule_id!r}: 'label:' requires a keyword")
+                raise ConfigError(f"{rule_label}: 'label:' requires a keyword")
             if _LABEL_FORBIDDEN_RE.search(keyword):
                 raise ConfigError(
-                    f"rule {rule_id!r}: label keyword {keyword!r} is not a "
+                    f"{rule_label}: label keyword {keyword!r} is not a "
                     'valid IMAP atom (no spaces or ( ) { % * " \\ ]) (spec §7.3)'
                 )
             remote_mutations += 1
             continue
+        if action.startswith("task:"):
+            target = action.removeprefix("task:")
+            if not target:
+                raise ConfigError(f"{rule_label}: 'task:' requires a task id")
+            continue
         raise ConfigError(
-            f"rule {rule_id!r}: unknown action {action!r}; expected one of "
-            "'backup', 'trash', 'move_to:<mailbox>', 'label:<keyword>' "
-            "(spec §7.4)"
+            f"{rule_label}: unknown action {action!r}; expected one of "
+            "'backup', 'trash', 'move_to:<mailbox>', 'label:<keyword>', "
+            "'task:<id>' (spec §7.4; jev-provider-plan §7)"
         )
     if remote_mutations > 1:
         raise ConfigError(
-            f"rule {rule_id!r}: at most one remote mutation "
+            f"{rule_label}: at most one remote mutation "
             "(trash / move_to / label) is allowed per rule's action list "
             "(spec §7.3)"
         )
     if "trash" in actions and not has_deterministic_atom(when):
         raise ConfigError(
-            f"rule {rule_id!r}: a rule whose actions include 'trash' must "
+            f"{rule_label}: a rule whose actions include 'trash' must "
             "contain at least one deterministic condition (spec §5.2)"
-        )
-    if (
-        trash_index is not None
-        and not allow_trash_without_backup
-        and (backup_index is None or backup_index > trash_index)
-    ):
-        raise ConfigError(
-            f"rule {rule_id!r}: 'trash' requires a preceding 'backup' in the "
-            "same action list (spec §7.4) — at runtime this rule's 'trash' "
-            "action would abort every time with no backup to satisfy it, "
-            "silently doing nothing on every match. If the account's own "
-            "trash folder is recovery enough and no local copy is wanted, "
-            "set allow_trash_without_backup: true on this rule instead of "
-            "omitting backup."
         )
 
 
@@ -550,11 +616,13 @@ class AccountConfig(BaseModel):
 
 
 class BodyExcerptConfig(BaseModel):
-    """No separate on/off switch here (spec §5.1): a rule's own
-    `allow_body_excerpt` is already the opt-in, and a second gate
-    at the model level would only mean two places to enable the same
+    """No separate on/off switch here (spec §5.1; jev-provider-plan §2):
+    a processor's own `include_body` is already the opt-in, and a second
+    gate at the model level would only mean two places to enable the same
     thing before it does anything, with no clear story for what one
-    enabled and the other disabled means."""
+    enabled and the other disabled means. This holds the shape/budget
+    settings (`format`, `max_chars`) that apply once a processor has
+    already opted in."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -567,7 +635,7 @@ class BodyExcerptConfig(BaseModel):
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["openai_compatible", "anthropic"]
+    provider: Literal["openai_compatible", "anthropic", "jev"]
     base_url: str | None = None
     model: str = Field(min_length=1)
     api_key: str | None = None
@@ -577,6 +645,8 @@ class ModelConfig(BaseModel):
     # unlike the `max_*` keys this keeps a default. No upper bound is
     # enforced -- large batches measurably degrade small local models, but
     # that is guidance for the README, not something to reject outright.
+    # jev-provider-plan §11: a `jev` model must set this to exactly 1 --
+    # jev is "one HTTP call per candidate", not a batched chat request.
     mails_per_request: int = Field(default=10, ge=1)
     # How many of those requests may be in flight at once. Defaults to 1
     # -- fully serial, the behaviour every existing config already has --
@@ -598,6 +668,106 @@ class ModelConfig(BaseModel):
             )
         if self.provider == "anthropic" and not self.api_key:
             raise ConfigError("models: 'api_key' is required for provider 'anthropic'")
+        if self.provider == "jev":
+            # jev-provider-plan §1, §11: a real HTTP endpoint and a
+            # bearer credential, exactly like a hosted chat provider.
+            if not self.base_url:
+                raise ConfigError("models: 'base_url' is required for provider 'jev'")
+            if not self.api_key:
+                raise ConfigError("models: 'api_key' is required for provider 'jev'")
+            if self.mails_per_request != 1:
+                raise ConfigError(
+                    "models: 'mails_per_request' must be 1 for provider 'jev' "
+                    "(jev-provider-plan §11): jev answers one candidate per "
+                    "HTTP call, never a batch. Use 'max_concurrent_requests' "
+                    "to raise real throughput instead."
+                )
+        return self
+
+
+class ProcessorConfig(BaseModel):
+    """One named question in Jev's structured vocabulary
+    (jev-provider-plan §2, §9): `type` selects which of `criteria`
+    (`noul`), `options` (`choice`), or `levels` (`score`) is meaningful;
+    the other two must be left unset. `model:` alone determines how the
+    question is compiled/sent (`prompt.py` for a chat provider, straight
+    through for `jev`) -- there is no separate `backend:`/`kind:` field,
+    since `models.<name>.provider` already says this.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = Field(min_length=1)
+    type: Literal["noul", "choice", "score"]
+    question: str | None = None
+    criteria: dict[str, str] | None = None
+    options: dict[str, str] | None = None
+    levels: list[str] | None = None
+    include_body: bool = False
+
+    @model_validator(mode="after")
+    def _validate_shape(self) -> Self:
+        if self.type == "noul":
+            if self.question is not None:
+                if self.criteria is not None:
+                    raise ConfigError(
+                        "processors: 'question' is shorthand for a 'noul' "
+                        "processor's 'criteria' -- set one or the other, "
+                        "not both"
+                    )
+                if self.options is not None or self.levels is not None:
+                    raise ConfigError(
+                        "processors: a 'noul' processor must not set "
+                        "'options' or 'levels'"
+                    )
+                # jev-provider-plan §2: the plain-string shorthand implies
+                # `criteria: {true: question}` -- deliberately not a
+                # synthesized 'false' entry; the shorthand and the
+                # explicit two-key form are two different valid shapes,
+                # not one normalised into the other.
+                self.criteria = {"true": self.question}
+                return self
+            if self.options is not None or self.levels is not None:
+                raise ConfigError(
+                    "processors: a 'noul' processor must not set 'options' or 'levels'"
+                )
+            if self.criteria is None:
+                raise ConfigError(
+                    "processors: a 'noul' processor requires 'criteria' "
+                    "({'true': ..., 'false': ...}) or a plain 'question'"
+                )
+            if set(self.criteria) != {"true", "false"}:
+                raise ConfigError(
+                    "processors: a 'noul' processor's explicit 'criteria' "
+                    "must have exactly the keys 'true' and 'false'"
+                )
+        elif self.type == "choice":
+            if self.criteria is not None or self.levels is not None:
+                raise ConfigError(
+                    "processors: a 'choice' processor must not set "
+                    "'criteria' or 'levels'"
+                )
+            if not self.options:
+                raise ConfigError(
+                    "processors: a 'choice' processor requires a "
+                    "non-empty 'options' map"
+                )
+            if len(self.options) > 255:
+                raise ConfigError(
+                    "processors: 'options' may have at most 255 entries "
+                    "(jev's own limit)"
+                )
+        else:  # score
+            if self.criteria is not None or self.options is not None:
+                raise ConfigError(
+                    "processors: a 'score' processor must not set "
+                    "'criteria' or 'options'"
+                )
+            if self.levels is None or not 2 <= len(self.levels) <= 10:
+                raise ConfigError(
+                    "processors: a 'score' processor requires 'levels' "
+                    "with between 2 and 10 entries"
+                )
         return self
 
 
@@ -615,53 +785,53 @@ class ProtectConfig(BaseModel):
 
 
 class RuleConfig(BaseModel):
+    """A rule has no `id` and no `priority` (jev-provider-plan §9): nothing
+    else in the config ever references a rule by name (see the plan's
+    referenced-from table), and a matching rule's rank is simply its
+    position in `rules:` -- first-listed wins (spec §7.4, reinterpreted:
+    "config order" is now the *only* ordering key, not a tiebreaker under
+    `priority`)."""
+
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    id: str = Field(min_length=1)
     when: ConditionTree
     actions: list[str] = Field(min_length=1)
-    priority: int = 0
-    allow_body_excerpt: bool = False
-    allow_trash_without_backup: bool = False
 
     @field_validator("when", mode="before")
     @classmethod
     def _parse_when(cls, value: object) -> ConditionTree:
         return parse_when(value)
 
-    @model_validator(mode="after")
-    def _validate_rule(self) -> Self:
-        _validate_llm_placement(self.when, rule_id=self.id)
-        _validate_actions(
-            self.actions,
-            self.when,
-            rule_id=self.id,
-            allow_trash_without_backup=self.allow_trash_without_backup,
-        )
-        return self
-
 
 class TaskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     account: str = Field(min_length=1)
-    model: str = Field(min_length=1)
-    source_mailboxes: list[str] = Field(default_factory=lambda: ["INBOX"])
+    # Optional (jev-provider-plan §7): a task can scan its own mailbox,
+    # exist purely as a `task:<id>` routing target, or both. Defaults to
+    # an *empty* list, not `["INBOX"]` -- a routing-only task (no
+    # `source_mailboxes` at all) must not silently also scan INBOX, which
+    # is the whole point of §7's worked example being able to omit the
+    # field on a task that exists only to receive routed candidates.
+    source_mailboxes: list[str] = Field(default_factory=list)
     protect: ProtectConfig = Field(default_factory=ProtectConfig)
     max_new_mails: int | None = Field(default=None, gt=0)
     max_actions: int | None = Field(default=None, gt=0)
     rules: list[RuleConfig] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _validate_unique_rule_ids(self) -> Self:
-        seen: set[str] = set()
-        for rule in self.rules:
-            if rule.id in seen:
-                raise ConfigError(
-                    f"duplicate rule id {rule.id!r} in task (rule ids must be "
-                    "unique within a task)"
-                )
-            seen.add(rule.id)
+    def _validate_rules(self) -> Self:
+        """Per-rule action-list validation (spec §7.3/§7.4/§7.5), done
+        here rather than on `RuleConfig` itself so the error message can
+        name a rule by its position (jev-provider-plan §9) -- a rule has
+        no name of its own to report."""
+        total = len(self.rules)
+        for index, rule in enumerate(self.rules):
+            _validate_actions(
+                rule.actions,
+                rule.when,
+                rule_label=f"task rule #{index + 1} of {total}",
+            )
         return self
 
     @property
@@ -677,6 +847,78 @@ class TaskConfig(BaseModel):
         return tuple(sorted(set(BASE_FETCH_HEADERS) | extra))
 
 
+def _validate_processor_atom(
+    atom: ProcessorCondition, *, processors: Mapping[str, ProcessorConfig]
+) -> None:
+    """jev-provider-plan §9's per-atom cross-reference rule, once the
+    atom's processor name is already known to exist: an equality/
+    inequality comparison against `.value` on a `choice`/`score`
+    processor must name one of its declared options/levels
+    (case-sensitive exact match). `.confidence` and non-equality
+    operators against `.value` (numeric `score` comparisons) need no
+    such check -- there is no closed vocabulary to validate against."""
+    processor = processors[atom.name]
+    if atom.field != "value" or atom.op not in ("==", "!="):
+        return
+    if not isinstance(atom.value, str):
+        return
+    if processor.type == "choice":
+        assert processor.options is not None
+        if atom.value not in processor.options:
+            raise ConfigError(
+                f"processor {atom.name!r}: 'processor: \"{atom.name}.value "
+                f"{atom.op} {atom.value}\"' names an option that is not "
+                f"declared; options are {sorted(processor.options)}"
+            )
+    elif processor.type == "score":
+        assert processor.levels is not None
+        if atom.value not in processor.levels:
+            raise ConfigError(
+                f"processor {atom.name!r}: 'processor: \"{atom.name}.value "
+                f"{atom.op} {atom.value}\"' names a level that is not "
+                f"declared; levels are {processor.levels}"
+            )
+    elif processor.type == "noul" and atom.value not in ("true", "false"):
+        # A `noul` processor's `.value` is a plain bool at runtime (jev
+        # answers noul/true-false directly); a string comparand here can
+        # never match anything a `noul` answer actually produces.
+        raise ConfigError(
+            f"processor {atom.name!r} is 'noul' (a boolean answer); "
+            f"'processor: \"{atom.name}.value {atom.op} {atom.value}\"' "
+            "should compare against the boolean true/false instead of a "
+            "quoted string"
+        )
+
+
+def _check_routing_acyclic(edges: Mapping[str, frozenset[str]]) -> None:
+    """DAG check for `task:<id>` routing edges (jev-provider-plan §7):
+    plain DFS, the same style as `_MAX_NESTING_DEPTH`'s guard -- a
+    routing cycle would ping-pong candidates between tasks forever across
+    cron ticks and belongs at `config check` time, not discovered at 3am.
+    Unknown targets are skipped here; they are already reported by the
+    caller's separate existence check."""
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: dict[str, int] = dict.fromkeys(edges, WHITE)
+
+    def visit(node: str, path: tuple[str, ...]) -> None:
+        color[node] = GRAY
+        for neighbor in sorted(edges.get(node, frozenset())):
+            if neighbor not in color:
+                continue
+            if color[neighbor] == GRAY:
+                cycle = " -> ".join([*path, neighbor])
+                raise ConfigError(
+                    f"'task:' routing forms a cycle: {cycle} (jev-provider-plan §7)"
+                )
+            if color[neighbor] == WHITE:
+                visit(neighbor, (*path, neighbor))
+        color[node] = BLACK
+
+    for node in sorted(edges):
+        if color[node] == WHITE:
+            visit(node, (node,))
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -684,29 +926,74 @@ class Config(BaseModel):
     settings: Settings = Field(default_factory=Settings)
     accounts: dict[str, AccountConfig] = Field(min_length=1)
     models: dict[str, ModelConfig] = Field(min_length=1)
+    processors: dict[str, ProcessorConfig] = Field(default_factory=dict)
     tasks: dict[str, TaskConfig] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _cross_reference(self) -> Self:
         trash_capable_accounts: set[str] = set()
+        referenced_processors: set[str] = set()
+        routing_edges: dict[str, set[str]] = {name: set() for name in self.tasks}
+        routed_targets: set[str] = set()
+
         for task_name, task in self.tasks.items():
             if task.account not in self.accounts:
                 raise ConfigError(
                     f"task {task_name!r} references unknown account {task.account!r}"
                 )
-            if task.model not in self.models:
-                raise ConfigError(
-                    f"task {task_name!r} references unknown model {task.model!r}"
-                )
             for rule in task.rules:
                 if "trash" in rule.actions:
                     trash_capable_accounts.add(task.account)
+                for atom in _collect_processor_atoms(rule.when):
+                    referenced_processors.add(atom.name)
+                for action in rule.actions:
+                    if action.startswith("task:"):
+                        target = action.removeprefix("task:")
+                        routing_edges[task_name].add(target)
+                        routed_targets.add(target)
+
         for account_name in trash_capable_accounts:
             if self.accounts[account_name].trash_mailbox is None:
                 raise ConfigError(
                     f"account {account_name!r} is used by a task with a "
                     "'trash' action but has no 'trash_mailbox' configured "
                     "(spec §6)"
+                )
+
+        for name in sorted(referenced_processors):
+            if name not in self.processors:
+                raise ConfigError(
+                    f"a rule references unknown processor {name!r}; "
+                    "declare it under 'processors:'"
+                )
+        for name, processor in self.processors.items():
+            if processor.model not in self.models:
+                raise ConfigError(
+                    f"processors.{name!r} references unknown model {processor.model!r}"
+                )
+
+        for task in self.tasks.values():
+            for rule in task.rules:
+                for atom in _collect_processor_atoms(rule.when):
+                    if atom.name in self.processors:
+                        _validate_processor_atom(atom, processors=self.processors)
+
+        for target in sorted(routed_targets):
+            if target not in self.tasks:
+                raise ConfigError(
+                    f"a 'task:{target}' action references unknown task {target!r}"
+                )
+        _check_routing_acyclic(
+            {name: frozenset(targets) for name, targets in routing_edges.items()}
+        )
+
+        for task_name, task in self.tasks.items():
+            if not task.source_mailboxes and task_name not in routed_targets:
+                raise ConfigError(
+                    f"task {task_name!r} has no candidate source: it has no "
+                    "'source_mailboxes' and is never the target of a "
+                    "'task:<id>' action anywhere in the config "
+                    "(jev-provider-plan §7) -- it can never run"
                 )
         return self
 
