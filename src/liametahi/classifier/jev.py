@@ -11,8 +11,8 @@ with no folding or thresholding of any kind (see `_parse_answer` below
 for the one exception: `score` rounds to its nearest declared level).
 
 **Request shape** (confirmed against a live call to
-`api.typesafe.ai/v1/systemone`, replacing an earlier, wrong assumption --
-see `dev-notes/jev-wire-format-fix.md`): `POST` body is
+`api.typesafe.ai/v1/systemone`, replacing an earlier, wrong assumption):
+`POST` body is
 `{"model", "state", "questions": {<processor-name>: <Question>}}`.
 `state` carries the candidate's fields (the assumed `input` key was
 wrong); `questions` is a *map*, not one embedded question, so one HTTP
@@ -42,11 +42,11 @@ against any `noul` processor at load time for exactly this reason.
 
 The top-level envelope for a *multi*-question response is
 `{"answers": {<processor-name>: <per-type shape above>}}`, mirroring the
-request's `questions` map by name. Neither jev's docs nor
-`dev-notes/jev-wire-format-fix.md` pin this shape explicitly (both only
-show the per-type answer shape for a single question); confirmed instead
-by a live call bundling multiple processors for one candidate against
-`api.typesafe.ai/v1/systemone` and inspecting the real response.
+request's `questions` map by name. jev's own docs don't pin this shape
+explicitly (they only show the per-type answer shape for a single
+question); confirmed instead by a live call bundling multiple processors
+for one candidate against `api.typesafe.ai/v1/systemone` and inspecting
+the real response.
 
 `mails_per_request` must be `1` for `provider: jev` (enforced at config
 load, `config.ModelConfig._validate_provider_requirements`): jev answers
@@ -93,8 +93,9 @@ from liametahi.rules import ProcessorAnswer
 
 logger = get_logger(__name__)
 
-#: Status codes worth retrying (jev-provider-plan's deliberate deviation,
-#: see module docstring): temporary capacity problems, not bad requests.
+#: Status codes worth retrying (a deliberate deviation from
+#: `openai_compatible.py`'s transport-only retry policy, see module
+#: docstring): temporary capacity problems, not bad requests.
 _RETRYABLE_STATUS_CODES = frozenset({429, 529})
 
 
@@ -271,7 +272,7 @@ def _parse_answer(
         if not isinstance(value, int | float) or isinstance(value, bool):
             return None
         # No confidence for 'noul', on any backend -- see module
-        # docstring and dev-notes/jev-wire-format-fix.md section 4.
+        # docstring: jev has no separate confidence concept for it.
         return ProcessorAnswer(value=float(value), confidence=None)
     if processor.type == "choice":
         value = raw.get("choice")

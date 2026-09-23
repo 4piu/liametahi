@@ -17,7 +17,7 @@ untrusted and the architecture assumes every adapter response is hostile
 until validated -- an adapter must never let a model response widen what
 an action may do.
 
-The jev-provider-plan redesign retires the old single-`llm`-atom,
+This retires the old single-`llm`-atom,
 yes/no/unsure vocabulary (`OfferedRule`/`Classification.matches`/
 `needs_content`) in favour of a per-processor answer map: each candidate
 may be asked about several independently-named processors in one batch,
@@ -83,10 +83,10 @@ class Classification:
     `ProcessorAnswer` -- only for the processors this response actually
     resolved for this candidate this round; a processor name absent from
     the map means "not answered this round" and the caller must treat it
-    the same as invalid/needing retry, never as silently unknown-forever
-    (jev-provider-plan's `classifier/__init__.py` note). `value` may name
-    an option/level outside what was offered, or the wrong type for the
-    processor's declared `type` -- none of that has been validated yet.
+    the same as invalid/needing retry, never as silently unknown-forever.
+    `value` may name an option/level outside what was offered, or the
+    wrong type for the processor's declared `type` -- none of that has
+    been validated yet.
     """
 
     payload_id: str
