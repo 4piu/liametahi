@@ -19,7 +19,8 @@ truth.
 | `dev-notes/implementation-contracts.md` | Toolchain, SQLite DDL, module signatures, work-unit boundaries, test-gate commands | **Shape** of the implementation — read this first for any "how is this wired together" question |
 | `dev-notes/jev-provider-plan.md` | The `processors`/Jev redesign brief (chat + Jev classification unified, `task:<id>` routing) | Authoritative for that redesign's shape until folded fully into `specification.md` (in progress — §2/§3/§11/§13–§15 of the spec still describe the pre-redesign `llm:`/rule-id model) |
 | `dev-notes/jev-provider-design-history.md` | Alternatives considered and rejected during that redesign, with reasons | Background only — nothing here is current design |
-| `dev-notes/*.md` (others) | Historical/working notes; `mailbox-cleanup-cli.md` is explicitly superseded by `specification.md` | Background only |
+| `dev-notes/*.md` (others) | Historical/working notes | Background only |
+| `dev-notes/archive/*.md` | Fully superseded docs kept for history only (e.g. `mailbox-cleanup-cli.md`, superseded by `specification.md`) | Not current — do not read for behavior/shape questions |
 | `src/liametahi/` | The package (see module map below) | — |
 | `tests/` | Unit tests (default), integration tests (`-m integration`, needs Docker/Dovecot), live tests (`-m live`, opt-in, real mailbox, never in CI) | — |
 | `tools/` | `capture_corpus.py` (pull a real mailbox into a local synthetic corpus, read-only) and `dev_imap.py` (disposable local Dovecot for integration/live testing) | — |
