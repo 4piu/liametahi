@@ -142,13 +142,14 @@ def _parse_processor_condition(key: str, value: object) -> ProcessorCondition:
     fixed shape, no optional parts. `field` is exactly `value` or
     `confidence`; the comparand is `true`/`false` (lowercase, exact) ->
     bool, else a float if it parses as one, else a plain string (a
-    declared choice/level option name). A bool or string comparand only
-    ever supports `==`/`!=` -- `>`/`>=`/`<`/`<=` against a non-numeric
-    comparand is rejected here, at config load, not lazily at evaluation
-    time. Whether the referenced processor exists, and whether a string
-    comparand actually names one of its declared options/levels, needs
-    the whole config and is validated by `Config._cross_reference`
-    instead.
+    declared choice/level option name, or -- rejected downstream, since a
+    'noul' processor's `.value` is a probability -- a bare word against a
+    'noul' processor). A bool or string comparand only ever supports
+    `==`/`!=` -- `>`/`>=`/`<`/`<=` against a non-numeric comparand is
+    rejected here, at config load, not lazily at evaluation time. Whether
+    the referenced processor exists, and whether a string/bool comparand
+    is actually legal for its declared type, needs the whole config and
+    is validated by `Config._cross_reference` instead.
     """
     text = _require_str(key, value)
     match = _PROCESSOR_CONDITION_RE.match(text)
@@ -683,87 +684,54 @@ class ModelConfig(BaseModel):
 
 
 class ProcessorConfig(BaseModel):
-    """One named question in Jev's structured vocabulary:
-    `type` selects which of `criteria`
-    (`noul`), `options` (`choice`), or `levels` (`score`) is meaningful;
-    the other two must be left unset. `model:` alone determines how the
-    question is compiled/sent (`prompt.py` for a chat provider, straight
-    through for `jev`) -- there is no separate `backend:`/`kind:` field,
-    since `models.<name>.provider` already says this.
+    """One named question in jev's structured vocabulary, matching jev's
+    own request schema field-for-field: `instructions` (required for
+    every type) is the natural-language question; `criteria`'s expected
+    shape depends on `type` -- a `{"true": ..., "false": ...}` mapping
+    (optional) for `noul`, an `{option: description}` mapping (required,
+    up to 255 entries) for `choice`, or an ordered list of level names
+    (required, 2-10 entries) for `score`. `model:` alone determines how
+    the question is compiled/sent (`prompt.py` for a chat provider,
+    straight through for `jev`) -- there is no separate `backend:`/
+    `kind:` field, since `models.<name>.provider` already says this.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     model: str = Field(min_length=1)
     type: Literal["noul", "choice", "score"]
-    question: str | None = None
-    criteria: dict[str, str] | None = None
-    options: dict[str, str] | None = None
-    levels: list[str] | None = None
+    instructions: str = Field(min_length=1)
+    criteria: dict[str, str] | list[str] | None = None
     include_body: bool = False
 
     @model_validator(mode="after")
     def _validate_shape(self) -> Self:
         if self.type == "noul":
-            if self.question is not None:
-                if self.criteria is not None:
-                    raise ConfigError(
-                        "processors: 'question' is shorthand for a 'noul' "
-                        "processor's 'criteria' -- set one or the other, "
-                        "not both"
-                    )
-                if self.options is not None or self.levels is not None:
-                    raise ConfigError(
-                        "processors: a 'noul' processor must not set "
-                        "'options' or 'levels'"
-                    )
-                # The plain-string shorthand implies
-                # `criteria: {true: question}` -- deliberately not a
-                # synthesized 'false' entry; the shorthand and the
-                # explicit two-key form are two different valid shapes,
-                # not one normalised into the other.
-                self.criteria = {"true": self.question}
-                return self
-            if self.options is not None or self.levels is not None:
+            if self.criteria is not None and (
+                not isinstance(self.criteria, dict)
+                or set(self.criteria) != {"true", "false"}
+            ):
                 raise ConfigError(
-                    "processors: a 'noul' processor must not set 'options' or 'levels'"
-                )
-            if self.criteria is None:
-                raise ConfigError(
-                    "processors: a 'noul' processor requires 'criteria' "
-                    "({'true': ..., 'false': ...}) or a plain 'question'"
-                )
-            if set(self.criteria) != {"true", "false"}:
-                raise ConfigError(
-                    "processors: a 'noul' processor's explicit 'criteria' "
-                    "must have exactly the keys 'true' and 'false'"
+                    "processors: a 'noul' processor's 'criteria', when "
+                    "given, must be a mapping with exactly the keys "
+                    "'true' and 'false'"
                 )
         elif self.type == "choice":
-            if self.criteria is not None or self.levels is not None:
-                raise ConfigError(
-                    "processors: a 'choice' processor must not set "
-                    "'criteria' or 'levels'"
-                )
-            if not self.options:
+            if not isinstance(self.criteria, dict) or not self.criteria:
                 raise ConfigError(
                     "processors: a 'choice' processor requires a "
-                    "non-empty 'options' map"
+                    "non-empty 'criteria' mapping of {option: description}"
                 )
-            if len(self.options) > 255:
+            if len(self.criteria) > 255:
                 raise ConfigError(
-                    "processors: 'options' may have at most 255 entries "
+                    "processors: 'criteria' may have at most 255 entries "
                     "(jev's own limit)"
                 )
         else:  # score
-            if self.criteria is not None or self.options is not None:
+            if not isinstance(self.criteria, list) or not 2 <= len(self.criteria) <= 10:
                 raise ConfigError(
-                    "processors: a 'score' processor must not set "
-                    "'criteria' or 'options'"
-                )
-            if self.levels is None or not 2 <= len(self.levels) <= 10:
-                raise ConfigError(
-                    "processors: a 'score' processor requires 'levels' "
-                    "with between 2 and 10 entries"
+                    "processors: a 'score' processor requires an ordered "
+                    "'criteria' list with between 2 and 10 entries"
                 )
         return self
 
@@ -852,23 +820,40 @@ def _validate_processor_atom(
     atom's processor name is already known to exist.
 
     A `field: confidence` comparison is only ever meaningful against a
-    `provider: jev` processor: jev always populates `confidence`, but a
-    chat-backed processor's compiled
-    schema (`prompt.py: _answer_value_schema`) never includes it -- there
+    `provider: jev` `choice`/`score` processor: jev always populates
+    `confidence` for those two types, but never for `noul` (a `noul`
+    answer is a single probability with no separate confidence, on any
+    backend), and a chat-backed processor's compiled schema
+    (`prompt.py: _answer_value_schema`) never includes one either -- there
     is no config field that opts a chat processor into reporting one.
-    Left unchecked, `processor: "name.confidence ..."` against a chat
-    processor would load cleanly and then sit at `Tri.UNKNOWN` forever,
-    silently disabling whatever rule it's part of -- exactly the "load-
-    time error, not a silent runtime no-op" this validation exists to
-    enforce.
+    Left unchecked, `processor: "name.confidence ..."` against a processor
+    that can never populate it would load cleanly and then sit at
+    `Tri.UNKNOWN` forever, silently disabling whatever rule it's part of
+    -- exactly the "load-time error, not a silent runtime no-op" this
+    validation exists to enforce.
 
     An equality/inequality comparison against `.value` on a `choice`/
     `score` processor must name one of its declared options/levels
     (case-sensitive exact match). Non-equality operators against `.value`
     (numeric `score` comparisons) need no such check -- there is no
-    closed vocabulary to validate against."""
+    closed vocabulary to validate against. A `noul` processor's `.value`
+    is a probability now, not a boolean or a name from a closed
+    vocabulary: a numeric comparand needs no vocabulary check either
+    (same treatment as `score`'s non-exact-match case, just for every
+    operator), but a string or boolean comparand can never equal a float
+    and is rejected here, at config load, rather than silently sitting at
+    `Tri.FALSE` forever."""
     processor = processors[atom.name]
     if atom.field == "confidence":
+        if processor.type == "noul":
+            raise ConfigError(
+                f"processor {atom.name!r}: 'processor: \"{atom.name}.confidence "
+                f"{atom.op} {atom.value}\"' compares 'confidence', but "
+                f"{atom.name!r} is 'noul' -- a 'noul' processor's "
+                "'.confidence' is always null on every backend (its "
+                "'.value' is already the resolved probability); this "
+                "condition could never resolve"
+            )
         backend = models[processor.model].provider
         if backend != "jev":
             raise ConfigError(
@@ -881,34 +866,35 @@ def _validate_processor_atom(
         return
     if atom.field != "value" or atom.op not in ("==", "!="):
         return
+    if processor.type == "noul":
+        if isinstance(atom.value, bool | str):
+            kind = "boolean" if isinstance(atom.value, bool) else "string"
+            raise ConfigError(
+                f"processor {atom.name!r}: 'processor: \"{atom.name}.value "
+                f"{atom.op} {atom.value}\"' compares 'value' against a "
+                f"{kind}, but a 'noul' processor's '.value' is now a "
+                "probability in [0, 1], not a boolean -- compare against "
+                f"a number instead, e.g. '{atom.name}.value >= 0.9'"
+            )
+        return
     if not isinstance(atom.value, str):
         return
     if processor.type == "choice":
-        assert processor.options is not None
-        if atom.value not in processor.options:
+        assert isinstance(processor.criteria, dict)
+        if atom.value not in processor.criteria:
             raise ConfigError(
                 f"processor {atom.name!r}: 'processor: \"{atom.name}.value "
                 f"{atom.op} {atom.value}\"' names an option that is not "
-                f"declared; options are {sorted(processor.options)}"
+                f"declared; options are {sorted(processor.criteria)}"
             )
-    elif processor.type == "score":
-        assert processor.levels is not None
-        if atom.value not in processor.levels:
+    else:  # score
+        assert isinstance(processor.criteria, list)
+        if atom.value not in processor.criteria:
             raise ConfigError(
                 f"processor {atom.name!r}: 'processor: \"{atom.name}.value "
                 f"{atom.op} {atom.value}\"' names a level that is not "
-                f"declared; levels are {processor.levels}"
+                f"declared; levels are {processor.criteria}"
             )
-    elif processor.type == "noul" and atom.value not in ("true", "false"):
-        # A `noul` processor's `.value` is a plain bool at runtime (jev
-        # answers noul/true-false directly); a string comparand here can
-        # never match anything a `noul` answer actually produces.
-        raise ConfigError(
-            f"processor {atom.name!r} is 'noul' (a boolean answer); "
-            f"'processor: \"{atom.name}.value {atom.op} {atom.value}\"' "
-            "should compare against the boolean true/false instead of a "
-            "quoted string"
-        )
 
 
 def _check_routing_acyclic(edges: Mapping[str, frozenset[str]]) -> None:

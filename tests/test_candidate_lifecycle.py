@@ -30,11 +30,11 @@ def _config_with_state(tmp_path: Path) -> Path:
         "task_lock_dir": str(tmp_path / "locks"),
     }
     data["processors"] = {
-        "junk-check": {"model": "local", "type": "noul", "question": "junk?"},
+        "junk-check": {"model": "local", "type": "noul", "instructions": "junk?"},
     }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
         {"older-than": "1h"},
-        {"processor": "junk-check.value == true"},
+        {"processor": "junk-check.value >= 0.5"},
     ]
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["backup", "trash"]
     return write_config(tmp_path / "cfg.yaml", data)
@@ -79,7 +79,7 @@ def test_completed_trash_excludes_candidate_from_future_runs(tmp_path: Path) -> 
     clf_1 = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(1.0, None)}}
             )
         ]
     )
@@ -143,7 +143,7 @@ def test_restored_message_is_skipped_not_re_trashed(tmp_path: Path) -> None:
     clf_1 = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(1.0, None)}}
             )
         ]
     )
@@ -212,7 +212,7 @@ def test_restored_message_is_retired_so_it_is_skipped_only_once(
     clf_1 = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(1.0, None)}}
             )
         ]
     )
@@ -279,7 +279,7 @@ def test_stale_candidate_for_an_already_gone_message_retires(tmp_path: Path) -> 
     clf_1 = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(1.0, None)}}
             )
         ]
     )
@@ -347,7 +347,7 @@ def test_restored_message_reevaluate_does_not_override_fix_d(tmp_path: Path) -> 
     clf_1 = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(1.0, None)}}
             )
         ]
     )
@@ -368,7 +368,7 @@ def test_restored_message_reevaluate_does_not_override_fix_d(tmp_path: Path) -> 
     clf_2 = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(1.0, None)}}
             )
         ]
     )

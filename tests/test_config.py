@@ -88,12 +88,17 @@ def test_full_jev_provider_plan_example_config_loads(tmp_path: Path) -> None:
         "spam-category": {
             "model": "local",
             "type": "choice",
-            "options": {"spam": "unsolicited bulk mail", "personal": "legitimate mail"},
+            "instructions": "What kind of mail is this?",
+            "criteria": {
+                "spam": "unsolicited bulk mail",
+                "personal": "legitimate mail",
+            },
         },
         "spam-review": {
             "model": "local",
             "type": "noul",
             "include_body": True,
+            "instructions": "Is this spam?",
             "criteria": {"true": "this is spam", "false": "this is legitimate"},
         },
     }
@@ -120,7 +125,7 @@ def test_full_jev_provider_plan_example_config_loads(tmp_path: Path) -> None:
                 # least one non-processor atom") -- see the final report.
                 # `in-mailbox` supplies the required deterministic atom.
                 "when": [
-                    {"processor": "spam-review.value == true"},
+                    {"processor": "spam-review.value >= 0.9"},
                     {"in-mailbox": "INBOX"},
                 ],
                 "actions": ["backup", "trash"],
@@ -203,7 +208,8 @@ def test_processor_unknown_model_rejected(tmp_path: Path) -> None:
         "spam-category": {
             "model": "does-not-exist",
             "type": "choice",
-            "options": {"spam": "d"},
+            "instructions": "q",
+            "criteria": {"spam": "d"},
         }
     }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
@@ -284,8 +290,18 @@ def test_multiple_processor_atoms_in_one_rule_allowed(tmp_path: Path) -> None:
     -- the old `llm:` atom's "at most one" restriction is gone."""
     data = make_config_dict()
     data["processors"] = {
-        "a": {"model": "local", "type": "choice", "options": {"x": "d"}},
-        "b": {"model": "local", "type": "choice", "options": {"y": "d"}},
+        "a": {
+            "model": "local",
+            "type": "choice",
+            "instructions": "q",
+            "criteria": {"x": "d"},
+        },
+        "b": {
+            "model": "local",
+            "type": "choice",
+            "instructions": "q",
+            "criteria": {"y": "d"},
+        },
     }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
         {"processor": "a.value == x"},
@@ -302,7 +318,12 @@ def test_processor_atom_under_not_is_allowed(tmp_path: Path) -> None:
     un-negatable free-form description."""
     data = make_config_dict()
     data["processors"] = {
-        "a": {"model": "local", "type": "choice", "options": {"x": "d"}},
+        "a": {
+            "model": "local",
+            "type": "choice",
+            "instructions": "q",
+            "criteria": {"x": "d"},
+        },
     }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = {
         "not": {"processor": "a.value == x"}
@@ -318,7 +339,12 @@ def test_trash_on_processor_only_rule_rejected(tmp_path: Path) -> None:
     deterministic regardless of processor type or backend."""
     data = make_config_dict()
     data["processors"] = {
-        "a": {"model": "local", "type": "choice", "options": {"x": "d"}},
+        "a": {
+            "model": "local",
+            "type": "choice",
+            "instructions": "q",
+            "criteria": {"x": "d"},
+        },
     }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = {"processor": "a.value == x"}
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["trash"]
@@ -330,7 +356,12 @@ def test_trash_on_processor_only_rule_rejected(tmp_path: Path) -> None:
 def test_trash_with_deterministic_condition_allowed(tmp_path: Path) -> None:
     data = make_config_dict()
     data["processors"] = {
-        "a": {"model": "local", "type": "choice", "options": {"x": "d"}},
+        "a": {
+            "model": "local",
+            "type": "choice",
+            "instructions": "q",
+            "criteria": {"x": "d"},
+        },
     }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
         {"older-than": "30d"},
@@ -980,21 +1011,23 @@ def _processors_config(
     return write_config(tmp_path / "cfg.yaml", data)
 
 
-def test_noul_processor_with_question_shorthand(tmp_path: Path) -> None:
+def test_noul_processor_instructions_only_is_valid(tmp_path: Path) -> None:
+    """`criteria` is a genuinely optional refinement for `noul`, not an
+    alternate encoding of `instructions` -- giving only `instructions`
+    loads cleanly with no synthesized `criteria`, exactly like jev's own
+    documented `is_human_escalation` example."""
     processors = {
         "vibe-check": {
             "model": "local",
             "type": "noul",
-            "question": "Is this a routine newsletter?",
+            "instructions": "Is this a routine newsletter?",
         }
     }
     path = _processors_config(
-        tmp_path, processors, [{"processor": "vibe-check.value == true"}]
+        tmp_path, processors, [{"processor": "vibe-check.value >= 0.5"}]
     )
     cfg = load_config(path)
-    assert cfg.processors["vibe-check"].criteria == {
-        "true": "Is this a routine newsletter?"
-    }
+    assert cfg.processors["vibe-check"].criteria is None
 
 
 def test_noul_processor_explicit_criteria_requires_both_keys(tmp_path: Path) -> None:
@@ -1002,48 +1035,73 @@ def test_noul_processor_explicit_criteria_requires_both_keys(tmp_path: Path) -> 
         "vibe-check": {
             "model": "local",
             "type": "noul",
+            "instructions": "x?",
             "criteria": {"true": "x"},
         }
     }
     path = _processors_config(
-        tmp_path, processors, [{"processor": "vibe-check.value == true"}]
+        tmp_path, processors, [{"processor": "vibe-check.value >= 0.5"}]
     )
     with pytest.raises(ConfigError, match="exactly the keys"):
         load_config(path)
 
 
-def test_noul_processor_question_and_criteria_both_set_rejected(tmp_path: Path) -> None:
+def test_noul_processor_instructions_and_criteria_both_set_is_valid(
+    tmp_path: Path,
+) -> None:
+    """`criteria` is given *together with* `instructions` when present,
+    not as an alternate encoding of it -- both may be set at once."""
     processors = {
         "vibe-check": {
             "model": "local",
             "type": "noul",
-            "question": "x?",
+            "instructions": "x?",
             "criteria": {"true": "a", "false": "b"},
         }
     }
     path = _processors_config(
-        tmp_path, processors, [{"processor": "vibe-check.value == true"}]
+        tmp_path, processors, [{"processor": "vibe-check.value >= 0.5"}]
     )
-    with pytest.raises(ConfigError):
-        load_config(path)
+    cfg = load_config(path)
+    assert cfg.processors["vibe-check"].criteria == {"true": "a", "false": "b"}
 
 
-def test_choice_processor_requires_nonempty_options(tmp_path: Path) -> None:
-    processors = {"spam-category": {"model": "local", "type": "choice"}}
-    path = _processors_config(
-        tmp_path, processors, [{"processor": "spam-category.value == spam"}]
-    )
-    with pytest.raises(ConfigError, match="options"):
-        load_config(path)
-
-
-def test_choice_processor_rejects_criteria_or_levels(tmp_path: Path) -> None:
+def test_processor_instructions_required_for_every_type(tmp_path: Path) -> None:
     processors = {
         "spam-category": {
             "model": "local",
             "type": "choice",
-            "options": {"spam": "d"},
-            "levels": ["low", "high"],
+            "criteria": {"spam": "d"},
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "spam-category.value == spam"}]
+    )
+    with pytest.raises(ConfigError, match="instructions"):
+        load_config(path)
+
+
+def test_choice_processor_requires_nonempty_criteria(tmp_path: Path) -> None:
+    processors = {
+        "spam-category": {"model": "local", "type": "choice", "instructions": "q"}
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "spam-category.value == spam"}]
+    )
+    with pytest.raises(ConfigError, match="criteria"):
+        load_config(path)
+
+
+def test_choice_processor_rejects_list_shaped_criteria(tmp_path: Path) -> None:
+    """`criteria`'s expected shape depends on `type` -- a `choice`
+    processor requires the `{option: description}` mapping shape, not
+    `score`'s ordered list shape."""
+    processors = {
+        "spam-category": {
+            "model": "local",
+            "type": "choice",
+            "instructions": "q",
+            "criteria": ["low", "high"],
         }
     }
     path = _processors_config(
@@ -1053,29 +1111,35 @@ def test_choice_processor_rejects_criteria_or_levels(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_score_processor_requires_levels_between_2_and_10(tmp_path: Path) -> None:
-    processors = {
-        "urgency": {"model": "local", "type": "score", "levels": ["only-one"]}
-    }
-    path = _processors_config(
-        tmp_path, processors, [{"processor": "urgency.value == only-one"}]
-    )
-    with pytest.raises(ConfigError, match="levels"):
-        load_config(path)
-
-
-def test_score_processor_more_than_10_levels_rejected(tmp_path: Path) -> None:
+def test_score_processor_requires_criteria_between_2_and_10(tmp_path: Path) -> None:
     processors = {
         "urgency": {
             "model": "local",
             "type": "score",
-            "levels": [str(i) for i in range(11)],
+            "instructions": "q",
+            "criteria": ["only-one"],
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "urgency.value == only-one"}]
+    )
+    with pytest.raises(ConfigError, match="criteria"):
+        load_config(path)
+
+
+def test_score_processor_more_than_10_criteria_rejected(tmp_path: Path) -> None:
+    processors = {
+        "urgency": {
+            "model": "local",
+            "type": "score",
+            "instructions": "q",
+            "criteria": [str(i) for i in range(11)],
         }
     }
     path = _processors_config(
         tmp_path, processors, [{"processor": "urgency.value == 0"}]
     )
-    with pytest.raises(ConfigError, match="levels"):
+    with pytest.raises(ConfigError, match="criteria"):
         load_config(path)
 
 
@@ -1084,7 +1148,8 @@ def test_choice_processor_option_count_over_255_rejected(tmp_path: Path) -> None
         "spam-category": {
             "model": "local",
             "type": "choice",
-            "options": {f"o{i}": "d" for i in range(256)},
+            "instructions": "q",
+            "criteria": {f"o{i}": "d" for i in range(256)},
         }
     }
     path = _processors_config(
@@ -1102,7 +1167,8 @@ def test_choice_processor_atom_value_must_be_a_declared_option(tmp_path: Path) -
         "spam-category": {
             "model": "local",
             "type": "choice",
-            "options": {"spam": "d", "personal": "d"},
+            "instructions": "q",
+            "criteria": {"spam": "d", "personal": "d"},
         }
     }
     path = _processors_config(
@@ -1114,7 +1180,12 @@ def test_choice_processor_atom_value_must_be_a_declared_option(tmp_path: Path) -
 
 def test_score_processor_atom_value_must_be_a_declared_level(tmp_path: Path) -> None:
     processors = {
-        "urgency": {"model": "local", "type": "score", "levels": ["low", "high"]}
+        "urgency": {
+            "model": "local",
+            "type": "score",
+            "instructions": "q",
+            "criteria": ["low", "high"],
+        }
     }
     path = _processors_config(
         tmp_path, processors, [{"processor": "urgency.value == medium"}]
@@ -1125,7 +1196,12 @@ def test_score_processor_atom_value_must_be_a_declared_level(tmp_path: Path) -> 
 
 def test_choice_processor_atom_value_case_sensitive_match(tmp_path: Path) -> None:
     processors = {
-        "spam-category": {"model": "local", "type": "choice", "options": {"spam": "d"}}
+        "spam-category": {
+            "model": "local",
+            "type": "choice",
+            "instructions": "q",
+            "criteria": {"spam": "d"},
+        }
     }
     path = _processors_config(
         tmp_path, processors, [{"processor": "spam-category.value == Spam"}]
@@ -1134,15 +1210,44 @@ def test_choice_processor_atom_value_case_sensitive_match(tmp_path: Path) -> Non
         load_config(path)
 
 
-def test_noul_processor_atom_value_must_be_boolean_string(tmp_path: Path) -> None:
+def test_noul_processor_atom_value_string_comparand_rejected(tmp_path: Path) -> None:
     processors = {
-        "vibe-check": {"model": "local", "type": "noul", "question": "x?"},
+        "vibe-check": {"model": "local", "type": "noul", "instructions": "x?"},
     }
     path = _processors_config(
         tmp_path, processors, [{"processor": "vibe-check.value == maybe"}]
     )
-    with pytest.raises(ConfigError):
+    with pytest.raises(ConfigError, match="probability"):
         load_config(path)
+
+
+def test_noul_processor_atom_value_boolean_comparand_rejected(tmp_path: Path) -> None:
+    """The old `.value == true` style must not silently misbehave --
+    `.value` is a probability now, so a bare boolean comparand fails
+    config validation with a message explaining why."""
+    processors = {
+        "vibe-check": {"model": "local", "type": "noul", "instructions": "x?"},
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "vibe-check.value == true"}]
+    )
+    with pytest.raises(ConfigError, match="probability"):
+        load_config(path)
+
+
+def test_noul_processor_atom_value_numeric_comparand_needs_no_vocabulary_check(
+    tmp_path: Path,
+) -> None:
+    """A numeric comparand against a `noul` processor's `.value` (any
+    operator) is accepted with no vocabulary check -- there is no closed
+    vocabulary for a probability."""
+    processors = {
+        "vibe-check": {"model": "local", "type": "noul", "instructions": "x?"},
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "vibe-check.value >= 0.9"}]
+    )
+    load_config(path)  # should not raise
 
 
 def test_confidence_field_against_jev_processor_not_checked_against_vocabulary(
@@ -1151,7 +1256,7 @@ def test_confidence_field_against_jev_processor_not_checked_against_vocabulary(
     """Only `.value` equality/inequality is checked against a declared
     vocabulary; `.confidence` on a `provider: jev` processor is a plain
     float with nothing to validate against (and jev always populates
-    it)."""
+    it for `choice`/`score`)."""
     data = make_config_dict()
     data["models"]["jev-primary"] = {
         "provider": "jev",
@@ -1164,7 +1269,8 @@ def test_confidence_field_against_jev_processor_not_checked_against_vocabulary(
         "urgency": {
             "model": "jev-primary",
             "type": "score",
-            "levels": ["low", "high"],
+            "instructions": "q",
+            "criteria": ["low", "high"],
         }
     }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
@@ -1177,15 +1283,69 @@ def test_confidence_field_against_jev_processor_not_checked_against_vocabulary(
 
 def test_confidence_field_against_chat_processor_rejected(tmp_path: Path) -> None:
     """'field: confidence' only ever resolves for a
-    `provider: jev` processor -- a chat-backed processor's compiled
-    schema never includes it (`prompt.py`'s `_answer_value_schema` emits
-    only `value`), so this must be a load-time `ConfigError`, not a rule
-    that silently sits at `Tri.UNKNOWN` forever."""
+    `provider: jev` `choice`/`score` processor -- a chat-backed
+    processor's compiled schema never includes it (`prompt.py`'s
+    `_answer_value_schema` emits only `value`), so this must be a
+    load-time `ConfigError`, not a rule that silently sits at
+    `Tri.UNKNOWN` forever."""
     processors = {
-        "urgency": {"model": "local", "type": "score", "levels": ["low", "high"]}
+        "urgency": {
+            "model": "local",
+            "type": "score",
+            "instructions": "q",
+            "criteria": ["low", "high"],
+        }
     }
     path = _processors_config(
         tmp_path, processors, [{"processor": "urgency.confidence >= 0.5"}]
+    )
+    with pytest.raises(ConfigError, match="confidence"):
+        load_config(path)
+
+
+def test_confidence_field_against_noul_processor_rejected_on_any_backend(
+    tmp_path: Path,
+) -> None:
+    """A `.confidence` atom against a `noul` processor is rejected at
+    config-load time regardless of provider -- `noul` never populates a
+    separate confidence, on jev or on a chat-compiled schema."""
+    data = make_config_dict()
+    data["models"]["jev-primary"] = {
+        "provider": "jev",
+        "base_url": "https://jev.example.com/v1/systemone",
+        "model": "jev-latest",
+        "api_key": "secret",
+        "mails_per_request": 1,
+    }
+    data["processors"] = {
+        "vibe-check": {
+            "model": "jev-primary",
+            "type": "noul",
+            "instructions": "q",
+        }
+    }
+    data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
+        {"processor": "vibe-check.confidence >= 0.5"}
+    ]
+    data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["move_to:Archive"]
+    path = write_config(tmp_path / "cfg.yaml", data)
+    with pytest.raises(ConfigError, match="confidence"):
+        load_config(path)
+
+
+def test_confidence_field_against_chat_backed_noul_processor_rejected(
+    tmp_path: Path,
+) -> None:
+    """The same rejection applies to a `noul` processor answered by a
+    chat-compiled provider (`openai_compatible`/`anthropic`) -- not just
+    `jev` -- since the "jev-only" carve-out in
+    `_validate_processor_atom` is for `choice`/`score` only, never for
+    `noul` on any backend."""
+    processors = {
+        "vibe-check": {"model": "local", "type": "noul", "instructions": "q"},
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "vibe-check.confidence >= 0.5"}]
     )
     with pytest.raises(ConfigError, match="confidence"):
         load_config(path)
@@ -1324,7 +1484,8 @@ def test_jev_provider_valid_config_loads(tmp_path: Path) -> None:
         "spam-category": {
             "model": "jev-primary",
             "type": "choice",
-            "options": {"spam": "d", "personal": "d"},
+            "instructions": "q",
+            "criteria": {"spam": "d", "personal": "d"},
         }
     }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [

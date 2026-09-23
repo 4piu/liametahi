@@ -100,11 +100,11 @@ def _config(tmp_path: Path) -> Path:
         "task_lock_dir": str(tmp_path / "locks"),
     }
     data["processors"] = {
-        "junk-check": {"model": "local", "type": "noul", "question": "junk?"},
+        "junk-check": {"model": "local", "type": "noul", "instructions": "junk?"},
     }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
         {"older-than": "1h"},
-        {"processor": "junk-check.value == true"},
+        {"processor": "junk-check.value >= 0.5"},
     ]
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["backup", "trash"]
     return write_config(tmp_path / "cfg.yaml", data)
@@ -140,7 +140,7 @@ def test_a_run_reports_its_long_phases(tmp_path: Path) -> None:
         [
             outcome_with_answers(
                 answers_by_payload={
-                    f"c{i}": {"junk-check": ProcessorAnswer(True, None)}
+                    f"c{i}": {"junk-check": ProcessorAnswer(1.0, None)}
                     for i in range(1, 4)
                 }
             )
@@ -179,7 +179,7 @@ def test_a_run_without_a_reporter_still_works(tmp_path: Path) -> None:
     clf = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(1.0, None)}}
             )
         ]
     )
@@ -259,7 +259,7 @@ def test_classification_counts_mails_not_batches(tmp_path: Path) -> None:
     mails = 25  # > one batch of 10, so batches and mails cannot coincide
 
     def _batch(ids: range) -> dict[str, dict[str, ProcessorAnswer]]:
-        return {f"c{i}": {"junk-check": ProcessorAnswer(False, None)} for i in ids}
+        return {f"c{i}": {"junk-check": ProcessorAnswer(0.0, None)} for i in ids}
 
     clf = FakeClassifier(
         [

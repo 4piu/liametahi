@@ -262,16 +262,18 @@ def _choice_processor(name: str = "spam-category") -> OfferedProcessor:
     return OfferedProcessor(
         name=name,
         type="choice",
-        options={"spam": "unsolicited", "personal": "legit"},
+        instructions="what kind of mail is this?",
+        criteria={"spam": "unsolicited", "personal": "legit"},
     )
 
 
-def test_processor_hash_changes_when_options_edited() -> None:
+def test_processor_hash_changes_when_criteria_edited() -> None:
     h1 = prompt.compute_processor_hash(_choice_processor())
     edited = OfferedProcessor(
         name="spam-category",
         type="choice",
-        options={"spam": "unsolicited", "personal": "legit", "digest": "newsletter"},
+        instructions="what kind of mail is this?",
+        criteria={"spam": "unsolicited", "personal": "legit", "digest": "newsletter"},
     )
     h2 = prompt.compute_processor_hash(edited)
     assert h1 != h2
@@ -283,15 +285,18 @@ def test_processor_hash_stable_for_identical_definition() -> None:
     ) == prompt.compute_processor_hash(_choice_processor())
 
 
-def test_processor_hash_changes_when_question_edited() -> None:
+def test_processor_hash_changes_when_instructions_edited() -> None:
     a = OfferedProcessor(
-        name="urgency", type="score", question="How urgent?", levels=("low", "high")
+        name="urgency",
+        type="score",
+        instructions="How urgent?",
+        criteria=("low", "high"),
     )
     b = OfferedProcessor(
         name="urgency",
         type="score",
-        question="How urgent is this really?",
-        levels=("low", "high"),
+        instructions="How urgent is this really?",
+        criteria=("low", "high"),
     )
     assert prompt.compute_processor_hash(a) != prompt.compute_processor_hash(b)
 
@@ -311,8 +316,15 @@ def test_processor_hash_ignores_name() -> None:
 
 def test_build_request_payload_includes_every_offered_processor() -> None:
     processors = [
-        OfferedProcessor(name="spam-category", type="choice", options={"spam": "d"}),
-        OfferedProcessor(name="urgency", type="score", levels=("low", "high")),
+        OfferedProcessor(
+            name="spam-category",
+            type="choice",
+            instructions="q",
+            criteria={"spam": "d"},
+        ),
+        OfferedProcessor(
+            name="urgency", type="score", instructions="q", criteria=("low", "high")
+        ),
     ]
     payloads = [CandidatePayload(payload_id="c1", fields={})]
     request = prompt.build_request_payload(payloads, processors)
@@ -320,7 +332,7 @@ def test_build_request_payload_includes_every_offered_processor() -> None:
     assert isinstance(offered, dict)
     assert set(offered.keys()) == {"spam-category", "urgency"}
     assert offered["spam-category"]["type"] == "choice"
-    assert offered["urgency"]["levels"] == ["low", "high"]
+    assert offered["urgency"]["criteria"] == ["low", "high"]
 
 
 def test_build_request_payload_includes_candidate_id_field() -> None:
@@ -332,50 +344,54 @@ def test_build_request_payload_includes_candidate_id_field() -> None:
     assert candidates[0]["subject"] == "hi"
 
 
-def test_build_request_payload_includes_question_for_choice_and_score() -> None:
-    """The worked examples set `question:` on a
-    `choice` and a `score` processor alongside `options`/`levels` -- it
-    is framing text, not shorthand only meaningful for `noul`, so a chat
+def test_build_request_payload_includes_instructions_for_choice_and_score() -> None:
+    """`instructions` is required for every processor type now -- a chat
     request must actually carry it through to the model."""
     processors = [
         OfferedProcessor(
             name="spam-category",
             type="choice",
-            question="What kind of mail is this?",
-            options={"spam": "d"},
+            instructions="What kind of mail is this?",
+            criteria={"spam": "d"},
         ),
         OfferedProcessor(
             name="urgency",
             type="score",
-            question="How urgent is this message?",
-            levels=("low", "high"),
+            instructions="How urgent is this message?",
+            criteria=("low", "high"),
         ),
     ]
     payloads = [CandidatePayload(payload_id="c1", fields={})]
     request = prompt.build_request_payload(payloads, processors)
     offered = request["processors"]
     assert isinstance(offered, dict)
-    assert offered["spam-category"]["question"] == "What kind of mail is this?"
-    assert offered["urgency"]["question"] == "How urgent is this message?"
+    assert offered["spam-category"]["instructions"] == "What kind of mail is this?"
+    assert offered["urgency"]["instructions"] == "How urgent is this message?"
 
 
-def test_build_request_payload_omits_question_when_unset() -> None:
+def test_build_request_payload_omits_criteria_when_unset() -> None:
     processors = [
-        OfferedProcessor(name="urgency", type="score", levels=("low", "high"))
+        OfferedProcessor(name="vibe-check", type="noul", instructions="junk?")
     ]
     payloads = [CandidatePayload(payload_id="c1", fields={})]
     request = prompt.build_request_payload(payloads, processors)
     offered = request["processors"]
     assert isinstance(offered, dict)
-    assert "question" not in offered["urgency"]
+    assert "criteria" not in offered["vibe-check"]
 
 
 # --- Response schema --------------------------------------------------------
 
 
 def test_response_schema_contains_exactly_declared_fields_noul() -> None:
+    """A `noul` processor wants a calibrated probability now, not a
+    boolean -- its compiled schema is a bounded number, matching jev's
+    own `noul` answer shape rather than inventing a boolean derivation."""
     processor = OfferedProcessor(
-        name="vibe-check", type="noul", criteria={"true": "x", "false": "y"}
+        name="vibe-check",
+        type="noul",
+        instructions="q",
+        criteria={"true": "x", "false": "y"},
     )
     schema = prompt.build_response_schema([processor])
     answer_props = _nested(
@@ -388,7 +404,7 @@ def test_response_schema_contains_exactly_declared_fields_noul() -> None:
         "properties",
     )
     value_schema = answer_props["vibe-check"]["properties"]["value"]
-    assert value_schema == {"type": "boolean"}
+    assert value_schema == {"type": "number", "minimum": 0, "maximum": 1}
     # No auto-injected confidence field anywhere in the compiled schema.
     assert "confidence" not in answer_props["vibe-check"]["properties"]
 
@@ -397,7 +413,8 @@ def test_response_schema_choice_enumerates_option_keys() -> None:
     processor = OfferedProcessor(
         name="spam-category",
         type="choice",
-        options={"spam": "d1", "personal": "d2"},
+        instructions="q",
+        criteria={"spam": "d1", "personal": "d2"},
     )
     schema = prompt.build_response_schema([processor])
     answer_props = _nested(
@@ -416,7 +433,10 @@ def test_response_schema_choice_enumerates_option_keys() -> None:
 
 def test_response_schema_score_enumerates_levels() -> None:
     processor = OfferedProcessor(
-        name="urgency", type="score", levels=("low", "medium", "high")
+        name="urgency",
+        type="score",
+        instructions="q",
+        criteria=("low", "medium", "high"),
     )
     schema = prompt.build_response_schema([processor])
     answer_props = _nested(

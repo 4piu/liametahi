@@ -36,11 +36,11 @@ def _config_with_state(tmp_path: Path) -> Path:
             "model": "local",
             "type": "noul",
             "include_body": True,
-            "question": "should this be archived?",
+            "instructions": "should this be archived?",
         },
     }
     data["tasks"]["inbox-cleanup"]["rules"][0] = {
-        "when": [{"processor": "maybe-archive.value == true"}],
+        "when": [{"processor": "maybe-archive.value >= 0.5"}],
         "actions": ["move_to:Archive"],
     }
     return write_config(tmp_path / "cfg.yaml", data)
@@ -82,9 +82,7 @@ def test_include_body_processor_gets_the_excerpt_fetched_up_front(
     clf = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={
-                    "c1": {"maybe-archive": ProcessorAnswer(True, None)}
-                }
+                answers_by_payload={"c1": {"maybe-archive": ProcessorAnswer(1.0, None)}}
             )
         ]
     )
@@ -125,9 +123,7 @@ def test_include_body_verdict_is_cached_so_a_rerun_asks_nothing(
     clf_1 = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={
-                    "c1": {"maybe-archive": ProcessorAnswer(True, None)}
-                }
+                answers_by_payload={"c1": {"maybe-archive": ProcessorAnswer(1.0, None)}}
             )
         ]
     )

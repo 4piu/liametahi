@@ -61,7 +61,7 @@ def _config(**model_overrides: object) -> Config:
                 _PROCESSOR_NAME: {
                     "model": "m",
                     "type": "noul",
-                    "question": "is this a promotional newsletter?",
+                    "instructions": "is this a promotional newsletter?",
                 }
             },
             "tasks": {
@@ -70,7 +70,7 @@ def _config(**model_overrides: object) -> Config:
                     "source_mailboxes": ["INBOX"],
                     "rules": [
                         {
-                            "when": {"processor": f"{_PROCESSOR_NAME}.value == true"},
+                            "when": {"processor": f"{_PROCESSOR_NAME}.value >= 0.5"},
                             "actions": ["move_to:Archive"],
                         }
                     ],
@@ -130,7 +130,7 @@ class RecordingClassifier:
                         payload_id=payload.payload_id,
                         answers={
                             _PROCESSOR_NAME: ProcessorAnswer(
-                                value=matched, confidence=None
+                                value=1.0 if matched else 0.0, confidence=None
                             )
                         },
                         reason=None,

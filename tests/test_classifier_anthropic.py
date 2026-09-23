@@ -19,7 +19,9 @@ from liametahi.config import ModelConfig
 
 CANDIDATE = CandidatePayload(payload_id="c1", fields={"subject": "hi"})
 PROCESSORS = [
-    OfferedProcessor(name="spam-category", type="choice", options={"spam": "d1"})
+    OfferedProcessor(
+        name="spam-category", type="choice", instructions="q", criteria={"spam": "d1"}
+    )
 ]
 
 

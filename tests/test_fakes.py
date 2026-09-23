@@ -228,8 +228,10 @@ def _payload(payload_id: str) -> CandidatePayload:
     return CandidatePayload(payload_id=payload_id, fields={})
 
 
-_SPAM_PROCESSOR = OfferedProcessor(name="r1", type="choice", options={"spam": "d"})
-_TRUE_ANSWER = ProcessorAnswer(value=True, confidence=None)
+_SPAM_PROCESSOR = OfferedProcessor(
+    name="r1", type="choice", instructions="q", criteria={"spam": "d"}
+)
+_TRUE_ANSWER = ProcessorAnswer(value="spam", confidence=None)
 
 
 def test_fake_classifier_returns_scripted_outcome_in_order() -> None:

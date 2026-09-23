@@ -26,7 +26,7 @@ from tests.fakes.fake_classifier import FakeClassifier, outcome_with_answers
 NOW = datetime(2026, 7, 1, tzinfo=UTC)
 
 
-def _config(question: str) -> Config:
+def _config(instructions: str) -> Config:
     return Config.model_validate(
         {
             "version": 1,
@@ -39,7 +39,11 @@ def _config(question: str) -> Config:
                 }
             },
             "processors": {
-                "stale-updates": {"model": "m", "type": "noul", "question": question},
+                "stale-updates": {
+                    "model": "m",
+                    "type": "noul",
+                    "instructions": instructions,
+                },
             },
             "tasks": {
                 "t": {
@@ -47,7 +51,7 @@ def _config(question: str) -> Config:
                     "source_mailboxes": ["INBOX"],
                     "rules": [
                         {
-                            "when": {"processor": "stale-updates.value == true"},
+                            "when": {"processor": "stale-updates.value >= 0.5"},
                             "actions": ["move_to:Archive"],
                         }
                     ],
@@ -102,9 +106,7 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
     fc_1 = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={
-                    "c1": {"stale-updates": ProcessorAnswer(False, None)}
-                }
+                answers_by_payload={"c1": {"stale-updates": ProcessorAnswer(0.0, None)}}
             )
         ]
     )
@@ -165,9 +167,7 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
     fc_3 = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={
-                    "c1": {"stale-updates": ProcessorAnswer(False, None)}
-                }
+                answers_by_payload={"c1": {"stale-updates": ProcessorAnswer(0.0, None)}}
             )
         ]
     )
@@ -197,9 +197,7 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
     fc_4 = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={
-                    "c1": {"stale-updates": ProcessorAnswer(True, None)}
-                }
+                answers_by_payload={"c1": {"stale-updates": ProcessorAnswer(1.0, None)}}
             )
         ]
     )
@@ -234,7 +232,7 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
         prompt_version=prompt.PROMPT_VERSION,
     )
     assert cached_match is not None
-    assert cached_match.value is True
+    assert cached_match.value == 1.0
 
     # --- Run 5: because run 4's match WAS cached, a subsequent run
     # against the same (still-live, e.g. its trash action failed)

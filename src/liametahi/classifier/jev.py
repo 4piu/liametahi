@@ -2,26 +2,64 @@
 
 Jev is not a chat model: a decision model reached through
 `POST /v1/systemone`, answering one of three fixed, structured question
-shapes (`noul`/`choice`/`score`) with a resolved `value` plus a calibrated
-`confidence`, never generated text. There is no prompt to compile and no
-JSON-schema negotiation ladder (`prompt.build_response_schema` is chat-only,
-per its own docstring) — a processor's `type`/`criteria`/`options`/`levels`
-map onto a `noul`/`choice`/`score` request directly, and the response's
-`value`/`confidence` are passed straight through into a `ProcessorAnswer`
-with no folding or thresholding of any kind.
+shapes (`noul`/`choice`/`score`) with a resolved answer, never generated
+text. There is no prompt to compile and no JSON-schema negotiation ladder
+(`prompt.build_response_schema` is chat-only, per its own docstring) — a
+processor's `type`/`instructions`/`criteria` map onto a jev `Question`
+directly, and the response is parsed straight into a `ProcessorAnswer`
+with no folding or thresholding of any kind (see `_parse_answer` below
+for the one exception: `score` rounds to its nearest declared level).
+
+**Request shape** (confirmed against a live call to
+`api.typesafe.ai/v1/systemone`, replacing an earlier, wrong assumption --
+see `dev-notes/jev-wire-format-fix.md`): `POST` body is
+`{"model", "state", "questions": {<processor-name>: <Question>}}`.
+`state` carries the candidate's fields (the assumed `input` key was
+wrong); `questions` is a *map*, not one embedded question, so one HTTP
+call can carry every processor a candidate still needs -- `classify()`
+therefore makes exactly one HTTP call per candidate, bundling every
+offered processor into that one call's `questions` map, not one call per
+processor per candidate. Each `Question` is `{"type", "instructions"}`
+plus `criteria` when the processor declares one (optional for `noul`,
+required for `choice`/`score` -- see `config.ProcessorConfig`).
+
+**Response shape**: per-type, a `noul` question resolves to
+`{"noul": <0-1 probability>}` (no boolean, no confidence -- "the single
+`noul` value describes it completely," per jev's own docs); `choice`
+resolves to `{"choice": <option>, "probabilities": {...}, "confidence":
+<0-1>}`; `score` resolves to `{"score": <continuous position>, "legend":
+{"<index>": "<description>"}, "probabilities": {...}, "confidence":
+<0-1>}`. This adapter reads `.value`/`.confidence` straight through for
+`noul`/`choice`; for `score` it rounds the continuous `score` to the
+nearest declared level index and reports *our own* declared level name at
+that index for `.value` (jev's own `legend` is not used -- it is built
+from the same `criteria` list we submitted, in the same order, so
+indexing our own list directly is equivalent and avoids trusting a second
+copy of our own vocabulary echoed back). `noul`'s `.confidence` is always
+`None`: jev has no separate confidence concept for a `noul` answer, and
+`config.py` rejects a `processor: "name.confidence ..."` condition
+against any `noul` processor at load time for exactly this reason.
+
+The top-level envelope for a *multi*-question response is
+`{"answers": {<processor-name>: <per-type shape above>}}`, mirroring the
+request's `questions` map by name. Neither jev's docs nor
+`dev-notes/jev-wire-format-fix.md` pin this shape explicitly (both only
+show the per-type answer shape for a single question); confirmed instead
+by a live call bundling multiple processors for one candidate against
+`api.typesafe.ai/v1/systemone` and inspecting the real response.
 
 `mails_per_request` must be `1` for `provider: jev` (enforced at config
 load, `config.ModelConfig._validate_provider_requirements`): jev answers
-one candidate per HTTP call, not a batch. When a candidate needs more than
-one jev-backed processor answered, `classify()` makes one HTTP call per
-processor for that candidate (still "one call per candidate" for any
-single processor) and merges the results into
-one `Classification` per candidate. A processor call that never succeeds
-is simply absent from that candidate's `answers` map (per
+one candidate per HTTP call, not a batch of candidates. A processor
+answer that fails to parse out of an otherwise well-formed multi-question
+response (missing key, wrong JSON type) is simply absent from that
+candidate's `answers` map for this round (per
 `classifier.Classification`'s own contract: "a name absent from the map
-means not answered this round") rather than voiding the whole candidate —
-a candidate with at least one successful answer is still reported in
-`results`; a candidate with zero successful answers goes to `invalid`.
+means not answered this round") rather than voiding the whole candidate
+-- a candidate with at least one successful answer is still reported in
+`results`; a candidate with zero successful answers (including "the
+response body itself was not even a `dict` with an `answers` map") goes
+to `invalid`.
 
 **Retry policy is a deliberate deviation from `openai_compatible.py`'s
 "transport errors only, never a rejected response" policy**:
@@ -36,16 +74,10 @@ loop shape `openai_compatible.py` uses for transport errors. Every other
 immediately with no retry: retrying a `401`/`422` can never succeed and
 only wastes the retry budget that would otherwise be available for a
 genuine `429`/`529`.
-
-The wire shape below (`POST` body: `model`/`type`/optional `question`/
-`criteria`-or-`options`-or-`levels`/`input`; response body:
-`{"value": ..., "confidence": ...}`) is this project's own design choice,
-since jev-provider-plan does not pin one — documented as an explicit
-assumption in the final report.
 """
 
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import httpx
 
@@ -68,7 +100,9 @@ _RETRYABLE_STATUS_CODES = frozenset({429, 529})
 
 class TransportError(Exception):
     """A jev HTTP call failed after exhausting `max_retries` (for a
-    retryable status) or failed immediately on a non-retryable one."""
+    retryable status) or failed immediately on a non-retryable one, or
+    its response body was not even structurally a multi-question
+    envelope."""
 
 
 class JevClassifier:
@@ -99,26 +133,20 @@ class JevClassifier:
         results: list[Classification] = []
         invalid: list[str] = []
         total_latency_ms = 0
-        call_count = 0
 
         for candidate in candidates:
-            answers: dict[str, ProcessorAnswer] = {}
-            for processor in processors:
-                call_count += 1
-                start = time.monotonic()
-                try:
-                    answer = self._call_one(candidate, processor)
-                except TransportError as exc:
-                    logger.debug(
-                        "jev classify: candidate=%s processor=%s failed: %s",
-                        candidate.payload_id,
-                        processor.name,
-                        exc,
-                    )
-                    continue
-                finally:
-                    total_latency_ms += int((time.monotonic() - start) * 1000)
-                answers[processor.name] = answer
+            start = time.monotonic()
+            try:
+                answers = self._call_one(candidate, processors)
+            except TransportError as exc:
+                logger.debug(
+                    "jev classify: candidate=%s failed: %s",
+                    candidate.payload_id,
+                    exc,
+                )
+                answers = {}
+            finally:
+                total_latency_ms += int((time.monotonic() - start) * 1000)
             if answers:
                 results.append(
                     Classification(
@@ -139,45 +167,32 @@ class JevClassifier:
         )
 
     def _call_one(
-        self, candidate: CandidatePayload, processor: OfferedProcessor
-    ) -> ProcessorAnswer:
+        self, candidate: CandidatePayload, processors: Sequence[OfferedProcessor]
+    ) -> dict[str, ProcessorAnswer]:
         body: dict[str, object] = {
             "model": self._config.model,
-            "type": processor.type,
-            "input": dict(candidate.fields),
+            "state": dict(candidate.fields),
+            "questions": {
+                processor.name: _question_json(processor) for processor in processors
+            },
         }
-        if processor.question is not None:
-            body["question"] = processor.question
-        if processor.type == "noul":
-            body["criteria"] = dict(processor.criteria or {})
-        elif processor.type == "choice":
-            body["options"] = dict(processor.options or {})
-        else:
-            body["levels"] = list(processor.levels or ())
-
         response = self._post_with_retry(body)
         data = response.json()
-        if not isinstance(data, dict) or "value" not in data:
+        if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
             raise TransportError(
-                f"malformed jev response for processor {processor.name!r}: "
+                f"malformed jev response (expected an 'answers' map): "
                 f"{response.text[:200]!r}"
             )
-        value = data["value"]
-        if not isinstance(value, bool | float | int | str):
-            raise TransportError(
-                f"jev response 'value' has an unsupported type for "
-                f"processor {processor.name!r}: {value!r}"
-            )
-        if isinstance(value, int) and not isinstance(value, bool):
-            value = float(value)
-        confidence_raw = data.get("confidence")
-        if confidence_raw is not None and not isinstance(confidence_raw, int | float):
-            raise TransportError(
-                f"jev response 'confidence' is not numeric for processor "
-                f"{processor.name!r}: {confidence_raw!r}"
-            )
-        confidence = float(confidence_raw) if confidence_raw is not None else None
-        return ProcessorAnswer(value=value, confidence=confidence)
+        raw_answers = data["answers"]
+        answers: dict[str, ProcessorAnswer] = {}
+        for processor in processors:
+            raw = raw_answers.get(processor.name)
+            if not isinstance(raw, dict):
+                continue
+            answer = _parse_answer(processor, raw)
+            if answer is not None:
+                answers[processor.name] = answer
+        return answers
 
     def _post_with_retry(self, body: dict[str, object]) -> httpx.Response:
         """POST once, retrying only `429`/`529` up to `max_retries` times
@@ -216,3 +231,62 @@ class JevClassifier:
             )
         assert last_exc is not None
         raise TransportError(str(last_exc)) from last_exc
+
+
+def _question_json(processor: OfferedProcessor) -> dict[str, object]:
+    """Compile one offered processor into jev's `Question` shape -- a
+    near-direct passthrough, since `OfferedProcessor`'s own fields already
+    match jev's field names and per-type shapes exactly."""
+    question: dict[str, object] = {
+        "type": processor.type,
+        "instructions": processor.instructions,
+    }
+    if processor.criteria is not None:
+        if isinstance(processor.criteria, Mapping):
+            question["criteria"] = dict(processor.criteria)
+        else:
+            question["criteria"] = list(processor.criteria)
+    return question
+
+
+def _parse_confidence(raw: Mapping[str, object]) -> float | None:
+    confidence_raw = raw.get("confidence")
+    if confidence_raw is None:
+        return None
+    if not isinstance(confidence_raw, int | float) or isinstance(confidence_raw, bool):
+        return None
+    return float(confidence_raw)
+
+
+def _parse_answer(
+    processor: OfferedProcessor, raw: Mapping[str, object]
+) -> ProcessorAnswer | None:
+    """Parse one processor's per-type answer sub-object. `None` means
+    "this processor's answer did not structurally match its declared
+    type" -- the caller drops it, leaving the processor unanswered this
+    round for this candidate rather than voiding every other processor
+    bundled into the same call."""
+    if processor.type == "noul":
+        value = raw.get("noul")
+        if not isinstance(value, int | float) or isinstance(value, bool):
+            return None
+        # No confidence for 'noul', on any backend -- see module
+        # docstring and dev-notes/jev-wire-format-fix.md section 4.
+        return ProcessorAnswer(value=float(value), confidence=None)
+    if processor.type == "choice":
+        value = raw.get("choice")
+        if not isinstance(value, str):
+            return None
+        return ProcessorAnswer(value=value, confidence=_parse_confidence(raw))
+    # score
+    score = raw.get("score")
+    if not isinstance(score, int | float) or isinstance(score, bool):
+        return None
+    assert isinstance(processor.criteria, Sequence) and not isinstance(
+        processor.criteria, str
+    )
+    levels = list(processor.criteria)
+    if not levels:
+        return None
+    index = max(0, min(len(levels) - 1, round(score)))
+    return ProcessorAnswer(value=levels[index], confidence=_parse_confidence(raw))

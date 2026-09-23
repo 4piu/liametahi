@@ -9,19 +9,20 @@ request JSON. It also owns the reverse: parsing a raw model response
 string into structurally-typed `Classification` objects. What it
 deliberately does NOT do is semantic vocabulary validation (candidate
 belongs to the batch, processor was offered, answer value is one of the
-processor's declared options/levels) — that check happens once, in the
+processor's declared criteria) — that check happens once, in the
 caller (`liametahi.evaluate`), not per-adapter,
 so a hostile model response cannot slip past a specific provider's
 adapter.
 
 This module compiles a *processor*
-definition (`type`/`criteria`/`options`/`levels`) into a system prompt and
+definition (`type`/`instructions`/`criteria`) into a system prompt and
 a per-batch JSON response schema, rather than the old per-rule free-form
 `llm` description. The compiled schema contains **exactly the fields the
 processor itself declares** — no auto-injected `needs_content`, no
 invented `confidence` — so a chat-backed processor's answer never carries
 more structure than its own config asked for (only `provider: jev`
-unconditionally reports `confidence`; see `classifier/jev.py`).
+unconditionally reports `confidence`, and only for `choice`/`score`; see
+`classifier/jev.py`).
 `classifier/openai_compatible.py` and `classifier/anthropic.py` both
 delegate to the functions here and carry no processor-type-specific logic
 of their own.
@@ -135,7 +136,9 @@ SYSTEM_PROMPT = (
     "contains.\n\n"
     'For each candidate, answer every question listed under "processors" '
     "below. Each processor has a fixed answer shape: a `noul` processor "
-    "wants a boolean `value`; a `choice` processor wants a `value` that is "
+    "wants a calibrated probability `value` between 0 and 1 -- how likely "
+    "its instructions/criteria describe this candidate -- never a plain "
+    "yes/no judgment; a `choice` processor wants a `value` that is "
     "exactly one of its listed option keys; a `score` processor wants a "
     "`value` that is exactly one of its listed levels. Never invent an "
     "option or level that was not listed, and never answer a processor "
@@ -143,7 +146,7 @@ SYSTEM_PROMPT = (
     "the input.\n\n"
     "Respond with a single JSON object of the shape "
     '{"results": [{"candidate": "<id>", "answers": {"<processor-name>": '
-    '{"value": <bool-or-string>}, ...}, "reason": "<=200 chars"}]}. Every '
+    '{"value": <number-or-string>}, ...}, "reason": "<=200 chars"}]}. Every '
     'offered processor must appear under "answers" for every candidate '
     "you report."
 )
@@ -154,14 +157,20 @@ SYSTEM_PROMPT = (
 def _answer_value_schema(processor: OfferedProcessor) -> dict[str, object]:
     """The JSON-schema fragment for one processor's `value` field —
     exactly what its own declared shape implies, nothing more
-    ("no auto-injected... no invented confidence field")."""
+    ("no auto-injected... no invented confidence field"). A `noul`
+    processor wants a calibrated probability, not a yes/no judgment, so
+    its schema is a bounded number, matching jev's own `noul` answer
+    shape exactly (see `classifier/jev.py`) rather than inventing a
+    boolean derivation that only a chat-compiled schema would have had."""
     if processor.type == "noul":
-        return {"type": "boolean"}
+        return {"type": "number", "minimum": 0, "maximum": 1}
     if processor.type == "choice":
-        assert processor.options is not None
-        return {"type": "string", "enum": sorted(processor.options)}
-    assert processor.levels is not None
-    return {"type": "string", "enum": list(processor.levels)}
+        assert isinstance(processor.criteria, Mapping)
+        return {"type": "string", "enum": sorted(processor.criteria)}
+    assert isinstance(processor.criteria, Sequence) and not isinstance(
+        processor.criteria, str
+    )
+    return {"type": "string", "enum": list(processor.criteria)}
 
 
 def build_response_schema(processors: Sequence[OfferedProcessor]) -> dict[str, object]:
@@ -230,20 +239,26 @@ def compute_input_hash(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _criteria_json(criteria: Mapping[str, str] | Sequence[str] | None) -> object:
+    if criteria is None:
+        return None
+    if isinstance(criteria, Mapping):
+        return dict(criteria)
+    return list(criteria)
+
+
 def compute_processor_hash(processor: OfferedProcessor) -> str:
     """sha256 of a processor's own declared definition — the
     `processor_hash` half of the decision cache key (analogous to the old
-    per-rule `rule_text_hash`). Changing a processor's `type`, `question`,
-    `criteria`/`options`/`levels`, or `include_body` changes this hash,
-    which is what makes an edited processor's cached decisions invalidate
+    per-rule `rule_text_hash`). Changing a processor's `type`,
+    `instructions`, `criteria`, or `include_body` changes this hash, which
+    is what makes an edited processor's cached decisions invalidate
     automatically."""
     canonical = json.dumps(
         {
             "type": processor.type,
-            "question": processor.question,
-            "criteria": dict(processor.criteria) if processor.criteria else None,
-            "options": dict(processor.options) if processor.options else None,
-            "levels": list(processor.levels) if processor.levels else None,
+            "instructions": processor.instructions,
+            "criteria": _criteria_json(processor.criteria),
             "include_body": processor.include_body,
         },
         sort_keys=True,
@@ -327,15 +342,13 @@ def build_excerpt_payload(
 
 
 def _processor_definition_json(processor: OfferedProcessor) -> dict[str, object]:
-    entry: dict[str, object] = {"type": processor.type}
-    if processor.question is not None:
-        entry["question"] = processor.question
-    if processor.criteria is not None:
-        entry["criteria"] = dict(processor.criteria)
-    if processor.options is not None:
-        entry["options"] = dict(processor.options)
-    if processor.levels is not None:
-        entry["levels"] = list(processor.levels)
+    entry: dict[str, object] = {
+        "type": processor.type,
+        "instructions": processor.instructions,
+    }
+    criteria = _criteria_json(processor.criteria)
+    if criteria is not None:
+        entry["criteria"] = criteria
     return entry
 
 

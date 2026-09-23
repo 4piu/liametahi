@@ -12,7 +12,7 @@ happens in the caller (see `liametahi.evaluate`), never in an adapter.**
 An adapter's `classify()` only has to do transport, structured-output
 negotiation, and JSON parsing; it is free to hand back a `Classification`
 that names a processor or candidate id it was never offered, or an
-answer value outside a processor's declared options/levels; the model is
+answer value outside a processor's declared criteria; the model is
 untrusted and the architecture assumes every adapter response is hostile
 until validated -- an adapter must never let a model response widen what
 an action may do.
@@ -21,9 +21,12 @@ The jev-provider-plan redesign retires the old single-`llm`-atom,
 yes/no/unsure vocabulary (`OfferedRule`/`Classification.matches`/
 `needs_content`) in favour of a per-processor answer map: each candidate
 may be asked about several independently-named processors in one batch,
-and each processor answers with a resolved `value` (bool/choice-string/
-score-level-string) plus an optional `confidence` (jev always populates
-it; a chat processor only if its own declared schema asked for it).
+and each processor answers with a resolved `value` (a probability in
+`[0, 1]` for `noul`, a choice string for `choice`, a level string for
+`score`) plus an optional `confidence` (jev always populates it for
+`choice`/`score`, never for `noul`; a chat processor only if its own
+declared schema asked for it -- which it never does for `noul`, since a
+`noul` processor's `.confidence` is always `None` regardless of backend).
 """
 
 from collections.abc import Mapping, Sequence
@@ -45,23 +48,21 @@ __all__ = [
 @dataclass(frozen=True, slots=True)
 class OfferedProcessor:
     """One processor offered to the model for a batch: its name and
-    enough of its declared shape (`type`, the optional natural-language
-    `question`, plus `criteria`/`options`/`levels`) for an adapter to
-    compile a request/schema from (`jev.py` maps these straight onto its
-    `noul`/`choice`/`score` request shape; `prompt.py` compiles the same
-    fields into a chat prompt + JSON schema for the other two
-    providers). `question` is optional framing text alongside the
-    vocabulary fields, not shorthand for them (the
-    `spam-category`/`urgency` examples set both `question` and
-    `options`/`levels` on the same processor) -- it is folded into
-    `criteria.true` only for the `noul` plain-string shorthand."""
+    enough of its declared shape (`type`, its required `instructions`,
+    plus its optional/required `criteria`) for an adapter to compile a
+    request/schema from (`jev.py` maps these straight onto its
+    `noul`/`choice`/`score` request shape -- jev's own schema, not a
+    project invention; `prompt.py` compiles the same fields into a chat
+    prompt + JSON schema for the other two providers). `criteria`'s shape
+    depends on `type`: a `{"true": ..., "false": ...}` mapping (optional)
+    for `noul`, an `{option: description}` mapping (required) for
+    `choice`, or an ordered sequence of level names (required) for
+    `score`."""
 
     name: str
     type: str  # "noul" | "choice" | "score"
-    question: str | None = None
-    criteria: Mapping[str, str] | None = None
-    options: Mapping[str, str] | None = None
-    levels: tuple[str, ...] | None = None
+    instructions: str
+    criteria: Mapping[str, str] | Sequence[str] | None = None
     include_body: bool = False
 
 

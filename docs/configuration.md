@@ -71,11 +71,9 @@ processor runs at all is derived from which rules reference it (see
 | Key | Description | Default |
 | --- | --- | --- |
 | `model` * | Must name an entry in `models` | — |
-| `type` * | `noul` (boolean), `choice` (named options), or `score` (ordered levels) | — |
-| `question` | Framing text sent to the model. For `noul`, a plain `question` with no `criteria` also implies `criteria: {"true": question}` | — |
-| `criteria` | Required for `noul` unless `question` is used; exactly the keys `"true"`/`"false"` | — |
-| `options` | Required for `choice`; option name → description, at most 255 entries | — |
-| `levels` | Required for `score`; ordered list of level names, 2–10 entries | — |
+| `type` * | `noul` (a calibrated probability), `choice` (named options), or `score` (ordered levels) | — |
+| `instructions` * | Natural-language question sent to the model, alongside `criteria` | — |
+| `criteria` | Shape depends on `type`. `noul`: optional, exactly the keys `"true"`/`"false"` (a refinement alongside `instructions`, not an alternate encoding of it). `choice`: required, option name → description, at most 255 entries. `score`: required, ordered list of level names, 2–10 entries | — |
 | `include_body` | Always includes a bounded plain-text body excerpt in this processor's request | `false` |
 
 ## `tasks.<name>`
@@ -120,7 +118,7 @@ mutation in the same action list.
 | `recipient-count` | comparison (`>10`, `<=3`) | against the same recipient union as `recipient-match` |
 | `has-attachment` | `true` | heuristic from `BODYSTRUCTURE`; `false` is rejected, use `not: {has-attachment: true}` |
 | `auth-result` | `mechanism=result` (`spf=fail`) | mechanism is `spf`/`dkim`/`dmarc`; only the topmost header is checked |
-| `processor` | `"name.field op value"` (`"spam-category.value == spam"`) | `.field` is `value` or `confidence` |
+| `processor` | `"name.field op value"` (`"spam-category.value == spam"`, `"stale-junk.value >= 0.9"`) | `.field` is `value` or `confidence` |
 
 `-match` conditions default to **glob** (`sender-match: bank.example` matches
 only that exact address); `-contains` conditions default to **substring**.
@@ -129,10 +127,15 @@ avoid patterns vulnerable to catastrophic backtracking, since these run
 against sender-controlled input.
 
 A `processor:` atom's `.confidence` only resolves for a `jev`-backed
-processor (rejected at config-load time otherwise); "one of several
-options" is `any:` over equality atoms, not an `in (...)` operator. A
-`processor:` atom is never sufficient by itself to license `trash` — a rule
-that trashes needs at least one other, deterministic atom.
+`choice`/`score` processor (rejected at config-load time otherwise; never
+valid at all against a `noul` processor, on any backend — its single
+probability `.value` already describes it completely). A `noul`
+processor's `.value` is a probability in `[0, 1]`, so its comparand must
+be numeric — a string or boolean comparand (the old `.value == true`
+style) is rejected at config load. "One of several options" is `any:`
+over equality atoms, not an `in (...)` operator. A `processor:` atom is
+never sufficient by itself to license `trash` — a rule that trashes needs
+at least one other, deterministic atom.
 
 ## Combining conditions
 

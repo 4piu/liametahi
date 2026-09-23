@@ -15,7 +15,10 @@ from liametahi.config import ConfigError, ModelConfig
 
 CANDIDATE = CandidatePayload(payload_id="c1", fields={"subject": "hi"})
 SPAM_PROCESSOR = OfferedProcessor(
-    name="spam-category", type="choice", options={"spam": "d1", "personal": "d2"}
+    name="spam-category",
+    type="choice",
+    instructions="what kind of mail is this?",
+    criteria={"spam": "d1", "personal": "d2"},
 )
 
 
@@ -35,6 +38,12 @@ def _client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler), base_url="http://local")
 
 
+def _answers_response(
+    answers: dict[str, dict[str, object]], status: int = 200
+) -> httpx.Response:
+    return httpx.Response(status, json={"answers": answers})
+
+
 def test_wrong_provider_rejected() -> None:
     cfg = ModelConfig.model_validate(
         {"provider": "anthropic", "model": "m", "api_key": "x"}
@@ -49,80 +58,161 @@ def test_authorization_header_is_bearer_api_key() -> None:
     assert headers["authorization"] == "Bearer secret"
 
 
-def test_one_http_call_per_candidate_per_processor() -> None:
+def test_one_http_call_per_candidate_bundling_every_processor() -> None:
+    """One HTTP call per candidate, not one per processor: every offered
+    processor is bundled into that one call's `questions` map."""
     calls = 0
+    captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(200, json={"value": "spam", "confidence": 0.92})
-
-    clf = JevClassifier(_config(), client=_client(handler))
-    outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR])
-    assert calls == 1
-    assert len(outcome.results) == 1
-    answer = outcome.results[0].answers["spam-category"]
-    assert answer.value == "spam"
-    assert answer.confidence == 0.92
-
-
-def test_confidence_and_value_pass_through_untouched_for_each_type() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        if body["type"] == "noul":
-            return httpx.Response(200, json={"value": True, "confidence": 0.5})
-        if body["type"] == "score":
-            return httpx.Response(200, json={"value": "high", "confidence": 0.7})
-        return httpx.Response(200, json={"value": "spam", "confidence": 0.9})
-
-    processors = [
-        OfferedProcessor(
-            name="vibe", type="noul", criteria={"true": "x", "false": "y"}
-        ),
-        OfferedProcessor(name="urgency", type="score", levels=("low", "high")),
-        SPAM_PROCESSOR,
-    ]
-    clf = JevClassifier(_config(), client=_client(handler))
-    outcome = clf.classify([CANDIDATE], processors)
-    answers = outcome.results[0].answers
-    assert answers["vibe"].value is True
-    assert answers["vibe"].confidence == 0.5
-    assert answers["urgency"].value == "high"
-    assert answers["urgency"].confidence == 0.7
-    assert answers["spam-category"].value == "spam"
-
-
-def test_question_included_in_request_body_when_set() -> None:
-    """The worked examples set `question:` on a
-    `choice`/`score` processor alongside `options`/`levels` -- it must
-    reach the wire, not be silently dropped."""
-    captured: dict[str, object] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
         captured.update(json.loads(request.content))
-        return httpx.Response(200, json={"value": "spam", "confidence": 0.9})
+        return _answers_response(
+            {
+                "spam-category": {"choice": "spam", "confidence": 0.92},
+                "urgency": {"score": 1.0, "legend": {"0": "low", "1": "high"}},
+            }
+        )
 
-    processor = OfferedProcessor(
-        name="spam-category",
-        type="choice",
-        question="What kind of mail is this?",
-        options={"spam": "d1", "personal": "d2"},
+    urgency = OfferedProcessor(
+        name="urgency",
+        type="score",
+        instructions="how urgent?",
+        criteria=["low", "high"],
     )
     clf = JevClassifier(_config(), client=_client(handler))
-    clf.classify([CANDIDATE], [processor])
-    assert captured["question"] == "What kind of mail is this?"
+    outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR, urgency])
+    assert calls == 1
+    questions = captured["questions"]
+    assert isinstance(questions, dict)
+    assert set(questions) == {"spam-category", "urgency"}
+    assert len(outcome.results) == 1
+    answers = outcome.results[0].answers
+    assert answers["spam-category"].value == "spam"
+    assert answers["spam-category"].confidence == 0.92
+    assert answers["urgency"].value == "high"
 
 
-def test_question_omitted_from_request_body_when_unset() -> None:
+def test_request_uses_state_not_input() -> None:
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.update(json.loads(request.content))
-        return httpx.Response(200, json={"value": "spam", "confidence": 0.9})
+        return _answers_response({"spam-category": {"choice": "spam"}})
 
     clf = JevClassifier(_config(), client=_client(handler))
     clf.classify([CANDIDATE], [SPAM_PROCESSOR])
-    assert "question" not in captured
+    assert captured["state"] == {"subject": "hi"}
+    assert "input" not in captured
+
+
+def test_noul_value_is_raw_probability_no_confidence() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _answers_response({"vibe": {"noul": 0.73, "confidence": 0.99}})
+
+    processor = OfferedProcessor(name="vibe", type="noul", instructions="is this junk?")
+    clf = JevClassifier(_config(), client=_client(handler))
+    outcome = clf.classify([CANDIDATE], [processor])
+    answer = outcome.results[0].answers["vibe"]
+    assert answer.value == 0.73
+    # A stray 'confidence' key in the noul answer sub-object is ignored:
+    # jev has no confidence concept for noul, and this adapter never
+    # reports one for it regardless of what a hostile/malformed response
+    # includes.
+    assert answer.confidence is None
+
+
+@pytest.mark.parametrize("probability", [0.0, 0.5, 1.0])
+def test_noul_boundary_values_pass_through(probability: float) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _answers_response({"vibe": {"noul": probability}})
+
+    processor = OfferedProcessor(name="vibe", type="noul", instructions="junk?")
+    clf = JevClassifier(_config(), client=_client(handler))
+    outcome = clf.classify([CANDIDATE], [processor])
+    assert outcome.results[0].answers["vibe"].value == probability
+
+
+def test_score_rounds_to_nearest_declared_level() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _answers_response({"urgency": {"score": 1.6, "confidence": 0.8}})
+
+    processor = OfferedProcessor(
+        name="urgency",
+        type="score",
+        instructions="how urgent?",
+        criteria=["low", "medium", "high"],
+    )
+    clf = JevClassifier(_config(), client=_client(handler))
+    outcome = clf.classify([CANDIDATE], [processor])
+    answer = outcome.results[0].answers["urgency"]
+    assert answer.value == "high"
+    assert answer.confidence == 0.8
+
+
+def test_score_rounds_at_exact_boundary() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _answers_response({"urgency": {"score": 0.5}})
+
+    processor = OfferedProcessor(
+        name="urgency",
+        type="score",
+        instructions="how urgent?",
+        criteria=["low", "medium", "high"],
+    )
+    clf = JevClassifier(_config(), client=_client(handler))
+    outcome = clf.classify([CANDIDATE], [processor])
+    # Python's round() uses banker's rounding: 0.5 rounds to 0 (even).
+    assert outcome.results[0].answers["urgency"].value == "low"
+
+
+def test_score_out_of_range_position_is_clamped() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _answers_response({"urgency": {"score": 99.0}})
+
+    processor = OfferedProcessor(
+        name="urgency",
+        type="score",
+        instructions="how urgent?",
+        criteria=["low", "medium", "high"],
+    )
+    clf = JevClassifier(_config(), client=_client(handler))
+    outcome = clf.classify([CANDIDATE], [processor])
+    assert outcome.results[0].answers["urgency"].value == "high"
+
+
+def test_criteria_included_in_request_body_when_set() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return _answers_response({"spam-category": {"choice": "spam"}})
+
+    clf = JevClassifier(_config(), client=_client(handler))
+    clf.classify([CANDIDATE], [SPAM_PROCESSOR])
+    questions = captured["questions"]
+    assert isinstance(questions, dict)
+    assert questions["spam-category"] == {
+        "type": "choice",
+        "instructions": "what kind of mail is this?",
+        "criteria": {"spam": "d1", "personal": "d2"},
+    }
+
+
+def test_criteria_omitted_from_request_body_when_unset() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return _answers_response({"vibe": {"noul": 0.5}})
+
+    processor = OfferedProcessor(name="vibe", type="noul", instructions="junk?")
+    clf = JevClassifier(_config(), client=_client(handler))
+    clf.classify([CANDIDATE], [processor])
+    questions = captured["questions"]
+    assert isinstance(questions, dict)
+    assert "criteria" not in questions["vibe"]
 
 
 def test_mails_per_request_must_be_one() -> None:
@@ -145,7 +235,7 @@ def test_429_is_retried_up_to_max_retries_then_succeeds() -> None:
         attempts += 1
         if attempts < 3:
             return httpx.Response(429, text="slow down")
-        return httpx.Response(200, json={"value": "spam", "confidence": 0.5})
+        return _answers_response({"spam-category": {"choice": "spam"}})
 
     clf = JevClassifier(_config(max_retries=3), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR])
@@ -161,7 +251,7 @@ def test_529_is_retried() -> None:
         attempts += 1
         if attempts < 2:
             return httpx.Response(529, text="overloaded")
-        return httpx.Response(200, json={"value": "spam", "confidence": 0.5})
+        return _answers_response({"spam-category": {"choice": "spam"}})
 
     clf = JevClassifier(_config(max_retries=2), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR])
@@ -199,22 +289,47 @@ def test_non_retryable_status_fails_immediately(status: int) -> None:
     assert outcome.invalid == ("c1",)
 
 
-# --- Partial success across several processors -----------------------------
+# --- Partial success across several processors bundled into one call ------
 
 
-def test_one_processor_failing_does_not_void_the_others_for_the_candidate() -> None:
+def test_one_processor_malformed_in_response_does_not_void_the_others() -> None:
+    """Both processors are asked in the same HTTP call; only one comes
+    back in a structurally valid shape for its declared type."""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        if body["type"] == "score":
-            return httpx.Response(401, text="unauthorized")
-        return httpx.Response(200, json={"value": "spam", "confidence": 0.9})
+        return _answers_response(
+            {
+                "spam-category": {"choice": "spam", "confidence": 0.9},
+                "urgency": {"oops": "not a score field"},
+            }
+        )
 
-    processors = [
-        SPAM_PROCESSOR,
-        OfferedProcessor(name="urgency", type="score", levels=("low", "high")),
-    ]
+    urgency = OfferedProcessor(
+        name="urgency",
+        type="score",
+        instructions="how urgent?",
+        criteria=["low", "high"],
+    )
     clf = JevClassifier(_config(), client=_client(handler))
-    outcome = clf.classify([CANDIDATE], processors)
+    outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR, urgency])
+    assert len(outcome.results) == 1
+    answers = outcome.results[0].answers
+    assert "spam-category" in answers
+    assert "urgency" not in answers
+
+
+def test_processor_absent_from_answers_map_does_not_void_the_others() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _answers_response({"spam-category": {"choice": "spam"}})
+
+    urgency = OfferedProcessor(
+        name="urgency",
+        type="score",
+        instructions="how urgent?",
+        criteria=["low", "high"],
+    )
+    clf = JevClassifier(_config(), client=_client(handler))
+    outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR, urgency])
     assert len(outcome.results) == 1
     answers = outcome.results[0].answers
     assert "spam-category" in answers
@@ -233,7 +348,7 @@ def test_all_processors_failing_marks_candidate_invalid() -> None:
 
 def test_malformed_response_body_is_treated_as_failure() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"oops": "no value field"})
+        return httpx.Response(200, json={"oops": "no answers map"})
 
     clf = JevClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR])
@@ -248,7 +363,7 @@ def test_transport_error_is_retried() -> None:
         attempts += 1
         if attempts == 1:
             raise httpx.ConnectError("boom", request=request)
-        return httpx.Response(200, json={"value": "spam", "confidence": 0.5})
+        return _answers_response({"spam-category": {"choice": "spam"}})
 
     clf = JevClassifier(_config(max_retries=1), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR])

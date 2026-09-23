@@ -30,8 +30,8 @@ processors:
   spam-category:
     model: jev-primary
     type: choice
-    question: "Is this email spam or a personal/legitimate message?"
-    options:
+    instructions: "Is this email spam or a personal/legitimate message?"
+    criteria:
       spam: "Unsolicited bulk mail, phishing, or scam content"
       personal: "A legitimate message, whether personal or business"
 
@@ -39,6 +39,7 @@ processors:
     model: local
     type: noul
     include_body: true
+    instructions: "Is this message spam: unsolicited bulk mail, phishing, or a scam?"
     criteria:
       "true": "This message is spam: unsolicited bulk mail, phishing, or a scam."
       "false": "This message is a legitimate message that should be kept."
@@ -79,6 +80,6 @@ tasks:
     account: personal
     rules:
       - when:
-          - processor: "spam-review.value == true"
+          - processor: "spam-review.value >= 0.9"
           - in-mailbox: INBOX
         actions: [backup, trash]

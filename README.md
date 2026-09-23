@@ -18,7 +18,7 @@ processors:
   vibe-check:
     model: local
     type: noul
-    question: A newsletter or digest with nothing time-sensitive left in it.
+    instructions: A newsletter or digest with nothing time-sensitive left in it.
 
 tasks:
   inbox-cleanup:
@@ -27,7 +27,7 @@ tasks:
     rules:
       - when:
           - older-than: 30d
-          - processor: "vibe-check.value == true"
+          - processor: "vibe-check.value >= 0.9"
         actions: [backup, trash]
 ```
 

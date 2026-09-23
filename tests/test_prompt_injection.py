@@ -140,7 +140,7 @@ def _config() -> Config:
                 "quiet-archive": {
                     "model": "m",
                     "type": "noul",
-                    "question": "Quiet automated notice, safe to archive.",
+                    "instructions": "Quiet automated notice, safe to archive.",
                 }
             },
             "tasks": {
@@ -149,7 +149,7 @@ def _config() -> Config:
                     "source_mailboxes": ["INBOX"],
                     "rules": [
                         {
-                            "when": {"processor": "quiet-archive.value == true"},
+                            "when": {"processor": "quiet-archive.value >= 0.5"},
                             "actions": ["move_to:Archive"],
                         }
                     ],
@@ -213,7 +213,7 @@ def test_induced_response_naming_an_unoffered_processor_produces_no_action(
         [
             outcome_with_answers(
                 answers_by_payload={
-                    "c1": {"old-weekly-digest": ProcessorAnswer(True, 1.0)}
+                    "c1": {"old-weekly-digest": ProcessorAnswer(1.0, 1.0)}
                 },
             )
         ]

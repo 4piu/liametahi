@@ -51,13 +51,13 @@ NOW = datetime(2026, 7, 1, tzinfo=UTC)
 # --- Test harness -----------------------------------------------------
 
 
-def _proc(question: str = "is this a match?") -> dict[str, object]:
-    return {"model": "m", "type": "noul", "question": question}
+def _proc(instructions: str = "is this a match?") -> dict[str, object]:
+    return {"model": "m", "type": "noul", "instructions": instructions}
 
 
 def _rule_for(name: str, actions: list[str] | None = None) -> dict[str, object]:
     return {
-        "when": {"processor": f"{name}.value == true"},
+        "when": {"processor": f"{name}.value >= 0.5"},
         "actions": actions or ["move_to:Archive"],
     }
 
@@ -165,7 +165,7 @@ def test_answer_for_unoffered_processor_is_rejected(tmp_path: Path) -> None:
         [
             outcome_with_answers(
                 answers_by_payload={
-                    "c1": {"nonexistent-processor": ProcessorAnswer(True, None)}
+                    "c1": {"nonexistent-processor": ProcessorAnswer(1.0, None)}
                 }
             )
         ]
@@ -201,7 +201,7 @@ def test_response_candidate_id_outside_batch_is_dropped_without_affecting_batch(
     fc = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={"c999": {"rule-a": ProcessorAnswer(True, None)}}
+                answers_by_payload={"c999": {"rule-a": ProcessorAnswer(1.0, None)}}
             )
         ]
     )
@@ -241,7 +241,7 @@ def test_reason_capped_at_200_chars(tmp_path: Path) -> None:
                 results=(
                     Classification(
                         payload_id="c1",
-                        answers={"rule-a": ProcessorAnswer(True, None)},
+                        answers={"rule-a": ProcessorAnswer(1.0, None)},
                         reason=long_reason,
                     ),
                 ),
@@ -325,7 +325,8 @@ def test_answer_value_outside_declared_vocabulary_is_rejected(tmp_path: Path) ->
         "spam-category": {
             "model": "m",
             "type": "choice",
-            "options": {"spam": "d", "personal": "d"},
+            "instructions": "q",
+            "criteria": {"spam": "d", "personal": "d"},
         }
     }
     config = _config(
@@ -363,6 +364,69 @@ def test_answer_value_outside_declared_vocabulary_is_rejected(tmp_path: Path) ->
     assert result.status == "no_match"
 
 
+def test_noul_answer_out_of_range_probability_is_rejected(tmp_path: Path) -> None:
+    """A `noul` answer's `.value` is a probability -- `1.5` is not a
+    value jev or a well-formed chat schema would ever produce, so a
+    hostile/malformed backend reporting it must not be trusted."""
+    conn, account_id = _setup(tmp_path)
+    run_id = _new_run(conn, account_id)
+    config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
+    task = config.tasks["t"]
+    cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "y" * 60)
+    cid = state.upsert_candidate(conn, cand)
+
+    fc = FakeClassifier(
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(1.5, None)}}
+            )
+        ]
+    )
+    result = _evaluate(
+        conn,
+        account_id=account_id,
+        run_id=run_id,
+        task=task,
+        config=config,
+        classifier=fc,
+        candidates=[(cid, cand)],
+    ).results[0]
+    assert result.matches == ()
+    assert result.status == "no_match"
+
+
+def test_noul_answer_boolean_value_is_rejected(tmp_path: Path) -> None:
+    """A raw Python `bool` is a subclass of `int` (`True == 1`), so a
+    naive `0.0 <= value <= 1.0` range check alone would let a stray
+    boolean answer silently pass as a probability of `1.0`/`0.0` --
+    `_validate_answer` must exclude `bool` explicitly."""
+    conn, account_id = _setup(tmp_path)
+    run_id = _new_run(conn, account_id)
+    config = _config([_rule_for("rule-a")], processors={"rule-a": _proc()})
+    task = config.tasks["t"]
+    cand = make_candidate(account_id=account_id, uid=1, fingerprint="fp" + "z" * 60)
+    cid = state.upsert_candidate(conn, cand)
+
+    fc = FakeClassifier(
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(True, None)}}
+            )
+        ]
+    )
+    result = _evaluate(
+        conn,
+        account_id=account_id,
+        run_id=run_id,
+        task=task,
+        config=config,
+        classifier=fc,
+        candidates=[(cid, cand)],
+    ).results[0]
+    assert result.matches == ()
+    assert result.status == "no_match"
+
+
 def test_answer_confidence_outside_zero_one_is_rejected(tmp_path: Path) -> None:
     """An out-of-range `confidence` (e.g. a misbehaving or hostile
     backend returning `999.0`) must not be trusted -- it could otherwise
@@ -374,7 +438,8 @@ def test_answer_confidence_outside_zero_one_is_rejected(tmp_path: Path) -> None:
         "spam-category": {
             "model": "m",
             "type": "choice",
-            "options": {"spam": "d", "personal": "d"},
+            "instructions": "q",
+            "criteria": {"spam": "d", "personal": "d"},
         }
     }
     config = _config(
@@ -432,7 +497,7 @@ def test_accepted_match_is_cached(tmp_path: Path) -> None:
     fc = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(True, None)}}
+                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(1.0, None)}}
             )
         ]
     )
@@ -457,7 +522,7 @@ def test_accepted_match_is_cached(tmp_path: Path) -> None:
         prompt_version=prompt.PROMPT_VERSION,
     )
     assert cached is not None
-    assert cached.value is True
+    assert cached.value == 1.0
 
 
 def test_matched_and_unselected_rules_are_both_cached_correctly(
@@ -478,8 +543,8 @@ def test_matched_and_unselected_rules_are_both_cached_correctly(
             outcome_with_answers(
                 answers_by_payload={
                     "c1": {
-                        "matched-proc": ProcessorAnswer(True, None),
-                        "unselected-proc": ProcessorAnswer(False, None),
+                        "matched-proc": ProcessorAnswer(1.0, None),
+                        "unselected-proc": ProcessorAnswer(0.0, None),
                     }
                 }
             )
@@ -515,9 +580,9 @@ def test_matched_and_unselected_rules_are_both_cached_correctly(
         prompt_version=prompt.PROMPT_VERSION,
     )
     assert matched_cached is not None
-    assert matched_cached.value is True
+    assert matched_cached.value == 1.0
     assert unselected_cached is not None
-    assert unselected_cached.value is False
+    assert unselected_cached.value == 0.0
 
 
 def test_cached_match_is_reused_without_a_model_call(tmp_path: Path) -> None:
@@ -536,7 +601,7 @@ def test_cached_match_is_reused_without_a_model_call(tmp_path: Path) -> None:
     fc_1 = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(True, None)}}
+                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(1.0, None)}}
             )
         ]
     )
@@ -648,7 +713,7 @@ def test_structured_output_level_surfaces_on_evaluate_outcome(tmp_path: Path) ->
     fc = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(False, None)}},
+                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(0.0, None)}},
                 structured_output_level="json_object",
             )
         ]
@@ -689,12 +754,12 @@ def test_batch_size_chunks_a_larger_group_into_multiple_calls(tmp_path: Path) ->
         [
             outcome_with_answers(
                 answers_by_payload={
-                    "c1": {"rule-a": ProcessorAnswer(False, None)},
-                    "c2": {"rule-a": ProcessorAnswer(False, None)},
+                    "c1": {"rule-a": ProcessorAnswer(0.0, None)},
+                    "c2": {"rule-a": ProcessorAnswer(0.0, None)},
                 }
             ),
             outcome_with_answers(
-                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(False, None)}}
+                answers_by_payload={"c1": {"rule-a": ProcessorAnswer(0.0, None)}}
             ),
         ]
     )
@@ -736,9 +801,9 @@ def test_acceptance_03_single_invalid_item_is_a_no_op_others_apply(
         candidates.append((cid, cand))
 
     answers_by_payload = {
-        f"c{i + 1}": {"rule-a": ProcessorAnswer(True, None)} for i in range(9)
+        f"c{i + 1}": {"rule-a": ProcessorAnswer(1.0, None)} for i in range(9)
     }
-    answers_by_payload["c10"] = {"rule-a": ProcessorAnswer(False, None)}
+    answers_by_payload["c10"] = {"rule-a": ProcessorAnswer(0.0, None)}
     valid_outcome = outcome_with_answers(answers_by_payload=answers_by_payload)
     # Make the 10th item structurally invalid instead of a clean
     # no-match, by re-wrapping it as a partially-invalid ClassifyOutcome.
@@ -796,14 +861,14 @@ def test_acceptance_03_wholly_invalid_batch_splits_and_both_halves_apply(
     # Call 2 (left half, candidates 0-4 -> c1..c5): all valid.
     left = outcome_with_answers(
         answers_by_payload={
-            f"c{i + 1}": {"rule-a": ProcessorAnswer(True, None)} for i in range(5)
+            f"c{i + 1}": {"rule-a": ProcessorAnswer(1.0, None)} for i in range(5)
         }
     )
     # Call 3 (right half, candidates 5-9 -> c1..c5 again, payload ids are
     # batch-local): 4 valid, 1 still invalid after the retry.
     right_valid = outcome_with_answers(
         answers_by_payload={
-            f"c{i + 1}": {"rule-a": ProcessorAnswer(False, None)} for i in range(4)
+            f"c{i + 1}": {"rule-a": ProcessorAnswer(0.0, None)} for i in range(4)
         }
     )
     right = ClassifyOutcome(

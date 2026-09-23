@@ -33,8 +33,9 @@ Safety-critical property enforced here, not in any adapter: a
 `Classification` returned by a `Classifier` is untrusted until every
 field has been checked against what was actually offered for that exact
 candidate and processor -- including that an answer's `value` is one of
-the processor's declared options/levels (never let an adapter
-response widen what an action may do). See `_validate_answer` below.
+the processor's declared criteria (or, for `noul`, a probability in
+`[0, 1]`) (never let an adapter response widen what an action may do).
+See `_validate_answer` below.
 """
 
 import sqlite3
@@ -132,10 +133,8 @@ def _offered_processor(name: str, cfg: ProcessorConfig) -> OfferedProcessor:
     return OfferedProcessor(
         name=name,
         type=cfg.type,
-        question=cfg.question,
+        instructions=cfg.instructions,
         criteria=cfg.criteria,
-        options=cfg.options,
-        levels=tuple(cfg.levels) if cfg.levels else None,
         include_body=cfg.include_body,
     )
 
@@ -828,18 +827,22 @@ def _validate_answer(cfg: ProcessorConfig, answer: ProcessorAnswer) -> bool:
     if answer.confidence is not None and not 0.0 <= answer.confidence <= 1.0:
         return False
     if cfg.type == "noul":
-        return isinstance(answer.value, bool)
+        return (
+            isinstance(answer.value, int | float)
+            and not isinstance(answer.value, bool)
+            and 0.0 <= answer.value <= 1.0
+        )
     if cfg.type == "choice":
         return (
             isinstance(answer.value, str)
-            and cfg.options is not None
-            and answer.value in cfg.options
+            and isinstance(cfg.criteria, dict)
+            and answer.value in cfg.criteria
         )
     # score
     return (
         isinstance(answer.value, str)
-        and cfg.levels is not None
-        and answer.value in cfg.levels
+        and isinstance(cfg.criteria, list)
+        and answer.value in cfg.criteria
     )
 
 

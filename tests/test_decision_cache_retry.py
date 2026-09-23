@@ -27,11 +27,11 @@ def _config_with_state(tmp_path: Path) -> Path:
         "task_lock_dir": str(tmp_path / "locks"),
     }
     data["processors"] = {
-        "junk-check": {"model": "local", "type": "noul", "question": "junk?"},
+        "junk-check": {"model": "local", "type": "noul", "instructions": "junk?"},
     }
     data["tasks"]["inbox-cleanup"]["rules"][0]["when"] = [
         {"older-than": "1h"},
-        {"processor": "junk-check.value == true"},
+        {"processor": "junk-check.value >= 0.5"},
     ]
     data["tasks"]["inbox-cleanup"]["rules"][0]["actions"] = ["backup", "trash"]
     return write_config(tmp_path / "cfg.yaml", data)
@@ -74,7 +74,7 @@ def test_failed_trash_retries_next_run_without_reclassifying(tmp_path: Path) -> 
     clf_1 = FakeClassifier(
         [
             outcome_with_answers(
-                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(True, None)}}
+                answers_by_payload={"c1": {"junk-check": ProcessorAnswer(1.0, None)}}
             )
         ]
     )
