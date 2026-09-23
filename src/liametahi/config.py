@@ -811,26 +811,25 @@ class TaskConfig(BaseModel):
 
 
 def _validate_processor_atom(
-    atom: ProcessorCondition,
-    *,
-    processors: Mapping[str, ProcessorConfig],
-    models: Mapping[str, ModelConfig],
+    atom: ProcessorCondition, *, processors: Mapping[str, ProcessorConfig]
 ) -> None:
     """Per-atom cross-reference rule, once the
     atom's processor name is already known to exist.
 
     A `field: confidence` comparison is only ever meaningful against a
-    `provider: jev` `choice`/`score` processor: jev always populates
-    `confidence` for those two types, but never for `noul` (a `noul`
-    answer is a single probability with no separate confidence, on any
-    backend), and a chat-backed processor's compiled schema
-    (`prompt.py: _answer_value_schema`) never includes one either -- there
-    is no config field that opts a chat processor into reporting one.
-    Left unchecked, `processor: "name.confidence ..."` against a processor
-    that can never populate it would load cleanly and then sit at
-    `Tri.UNKNOWN` forever, silently disabling whatever rule it's part of
-    -- exactly the "load-time error, not a silent runtime no-op" this
-    validation exists to enforce.
+    `choice`/`score` processor, on any backend: jev always populates
+    `confidence` for those two types natively; a chat-backed processor's
+    compiled schema (`prompt.py: build_response_schema`) asks for a
+    `value_probability`/`runner_up_probability` pair for those two types
+    and derives a margin-based `confidence` from them (see `prompt.py`'s
+    `_derive_chat_confidence`) rather than trusting a bare self-reported
+    number. `noul` never has one, on any backend -- a `noul` answer is a
+    single probability with no separate confidence at all. Left
+    unchecked, `processor: "name.confidence ..."` against a `noul`
+    processor would load cleanly and then sit at `Tri.UNKNOWN` forever,
+    silently disabling whatever rule it's part of -- exactly the
+    "load-time error, not a silent runtime no-op" this validation exists
+    to enforce.
 
     An equality/inequality comparison against `.value` on a `choice`/
     `score` processor must name one of its declared options/levels
@@ -853,15 +852,6 @@ def _validate_processor_atom(
                 "'.confidence' is always null on every backend (its "
                 "'.value' is already the resolved probability); this "
                 "condition could never resolve"
-            )
-        backend = models[processor.model].provider
-        if backend != "jev":
-            raise ConfigError(
-                f"processor {atom.name!r}: 'processor: \"{atom.name}.confidence "
-                f"{atom.op} {atom.value}\"' compares 'confidence', but "
-                f"{atom.name!r} is answered by model {processor.model!r} "
-                f"(provider {backend!r}); only provider 'jev' ever populates "
-                "'confidence' -- this condition could never resolve"
             )
         return
     if atom.field != "value" or atom.op not in ("==", "!="):
@@ -980,9 +970,7 @@ class Config(BaseModel):
             for rule in task.rules:
                 for atom in _collect_processor_atoms(rule.when):
                     if atom.name in self.processors:
-                        _validate_processor_atom(
-                            atom, processors=self.processors, models=self.models
-                        )
+                        _validate_processor_atom(atom, processors=self.processors)
 
         for target in sorted(routed_targets):
             if target not in self.tasks:

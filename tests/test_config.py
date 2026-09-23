@@ -1281,13 +1281,15 @@ def test_confidence_field_against_jev_processor_not_checked_against_vocabulary(
     load_config(path)  # should not raise
 
 
-def test_confidence_field_against_chat_processor_rejected(tmp_path: Path) -> None:
-    """'field: confidence' only ever resolves for a
-    `provider: jev` `choice`/`score` processor -- a chat-backed
-    processor's compiled schema never includes it (`prompt.py`'s
-    `_answer_value_schema` emits only `value`), so this must be a
-    load-time `ConfigError`, not a rule that silently sits at
-    `Tri.UNKNOWN` forever."""
+def test_confidence_field_against_chat_backed_choice_score_processor_accepted(
+    tmp_path: Path,
+) -> None:
+    """'field: confidence' resolves for a `choice`/`score` processor on
+    any backend now, not just `provider: jev`: a chat-backed processor's
+    compiled schema asks for `value_probability`/`runner_up_probability`
+    and derives a margin-based `.confidence` from them
+    (`prompt.py`'s `_derive_margin_confidence`), so this is no longer a
+    load-time rejection."""
     processors = {
         "urgency": {
             "model": "local",
@@ -1299,8 +1301,7 @@ def test_confidence_field_against_chat_processor_rejected(tmp_path: Path) -> Non
     path = _processors_config(
         tmp_path, processors, [{"processor": "urgency.confidence >= 0.5"}]
     )
-    with pytest.raises(ConfigError, match="confidence"):
-        load_config(path)
+    load_config(path)  # should not raise
 
 
 def test_confidence_field_against_noul_processor_rejected_on_any_backend(

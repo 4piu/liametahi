@@ -405,8 +405,14 @@ def test_response_schema_contains_exactly_declared_fields_noul() -> None:
     )
     value_schema = answer_props["vibe-check"]["properties"]["value"]
     assert value_schema == {"type": "number", "minimum": 0, "maximum": 1}
-    # No auto-injected confidence field anywhere in the compiled schema.
-    assert "confidence" not in answer_props["vibe-check"]["properties"]
+    # No auto-injected confidence field anywhere in the compiled schema,
+    # and no margin-probability fields either -- `noul`'s value already
+    # is the resolved probability.
+    props = answer_props["vibe-check"]["properties"]
+    assert "confidence" not in props
+    assert "value_probability" not in props
+    assert "runner_up_probability" not in props
+    assert answer_props["vibe-check"]["required"] == ["value"]
 
 
 def test_response_schema_choice_enumerates_option_keys() -> None:
@@ -429,6 +435,18 @@ def test_response_schema_choice_enumerates_option_keys() -> None:
     value_schema = answer_props["spam-category"]["properties"]["value"]
     assert value_schema["type"] == "string"
     assert set(value_schema["enum"]) == {"spam", "personal"}
+    props = answer_props["spam-category"]["properties"]
+    assert props["value_probability"] == {"type": "number", "minimum": 0, "maximum": 1}
+    assert props["runner_up_probability"] == {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+    }
+    assert set(answer_props["spam-category"]["required"]) == {
+        "value",
+        "value_probability",
+        "runner_up_probability",
+    }
 
 
 def test_response_schema_score_enumerates_levels() -> None:
@@ -450,6 +468,11 @@ def test_response_schema_score_enumerates_levels() -> None:
     )
     value_schema = answer_props["urgency"]["properties"]["value"]
     assert value_schema["enum"] == ["low", "medium", "high"]
+    assert set(answer_props["urgency"]["required"]) == {
+        "value",
+        "value_probability",
+        "runner_up_probability",
+    }
 
 
 # --- Response parsing --------------------------------------------------
@@ -458,7 +481,8 @@ def test_response_schema_score_enumerates_levels() -> None:
 def test_parse_valid_response() -> None:
     raw = (
         '{"results": [{"candidate": "c1", '
-        '"answers": {"spam-category": {"value": "spam", "confidence": 0.9}}, '
+        '"answers": {"spam-category": {"value": "spam", '
+        '"value_probability": 0.9, "runner_up_probability": 0.05}}, '
         '"reason": "ok"}]}'
     )
     parsed = prompt.parse_classification_response(raw, ["c1"])
@@ -468,18 +492,66 @@ def test_parse_valid_response() -> None:
     result = parsed.results[0]
     assert result.payload_id == "c1"
     assert result.answers["spam-category"] == ProcessorAnswer(
-        value="spam", confidence=0.9
+        value="spam", confidence=0.85
     )
     assert result.reason == "ok"
 
 
-def test_parse_answer_without_confidence_defaults_to_none() -> None:
+def test_parse_answer_without_confidence_fields_defaults_to_none() -> None:
     raw = (
         '{"results": [{"candidate": "c1", "answers": {"vibe-check": {"value": true}}}]}'
     )
     parsed = prompt.parse_classification_response(raw, ["c1"])
     assert parsed.results[0].answers["vibe-check"] == ProcessorAnswer(
         value=True, confidence=None
+    )
+
+
+def test_parse_answer_with_only_one_of_the_pair_defaults_to_none() -> None:
+    """A non-compliant model that reports only one of the two required
+    fields gets no confidence, not a crash or a bogus derivation from a
+    missing value treated as zero."""
+    raw = (
+        '{"results": [{"candidate": "c1", "answers": {"urgency": '
+        '{"value": "high", "value_probability": 0.9}}}]}'
+    )
+    parsed = prompt.parse_classification_response(raw, ["c1"])
+    assert parsed.results[0].answers["urgency"] == ProcessorAnswer(
+        value="high", confidence=None
+    )
+
+
+def test_parse_answer_with_non_numeric_probability_defaults_to_none() -> None:
+    raw = (
+        '{"results": [{"candidate": "c1", "answers": {"urgency": '
+        '{"value": "high", "value_probability": "high", '
+        '"runner_up_probability": 0.1}}}]}'
+    )
+    parsed = prompt.parse_classification_response(raw, ["c1"])
+    assert parsed.results[0].answers["urgency"] == ProcessorAnswer(
+        value="high", confidence=None
+    )
+
+
+def test_derive_margin_confidence_clips_to_zero_when_runner_up_wins() -> None:
+    """A model reporting a higher probability for the runner-up than for
+    its own chosen value is internally inconsistent -- clip to 0 rather
+    than a negative confidence, which `evaluate.py`'s bounds check would
+    reject anyway, but a defensive derivation should not even produce."""
+    assert (
+        prompt._derive_margin_confidence(
+            {"value_probability": 0.3, "runner_up_probability": 0.6}
+        )
+        == 0.0
+    )
+
+
+def test_derive_margin_confidence_clips_to_one_when_out_of_range() -> None:
+    assert (
+        prompt._derive_margin_confidence(
+            {"value_probability": 5.0, "runner_up_probability": -3.0}
+        )
+        == 1.0
     )
 
 

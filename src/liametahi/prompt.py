@@ -18,11 +18,14 @@ This module compiles a *processor*
 definition (`type`/`instructions`/`criteria`) into a system prompt and
 a per-batch JSON response schema, rather than the old per-rule free-form
 `llm` description. The compiled schema contains **exactly the fields the
-processor itself declares** — no auto-injected `needs_content`, no
-invented `confidence` — so a chat-backed processor's answer never carries
-more structure than its own config asked for (only `provider: jev`
-unconditionally reports `confidence`, and only for `choice`/`score`; see
-`classifier/jev.py`).
+processor itself declares, plus one addition**: a `choice`/`score`
+processor's answer also requires `value_probability`/
+`runner_up_probability`, which `_derive_margin_confidence` turns into a
+`.confidence` — never a bare self-reported `confidence` number, on any
+backend (see that function's docstring for why). `noul`'s `value` is
+already the resolved probability, so it never gets these extra fields or
+a `.confidence` at all, on any backend — `provider: jev` behaves exactly
+the same way (see `classifier/jev.py`).
 `classifier/openai_compatible.py` and `classifier/anthropic.py` both
 delegate to the functions here and carry no processor-type-specific logic
 of their own.
@@ -121,7 +124,7 @@ def _cap(value: str, max_len: int | None) -> tuple[str, bool]:
 #: point: a processor's own definition is covered by the processor
 #: identity hash (see `evaluate.py`), but nothing covers the instructions
 #: wrapped around it.
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
 
 
 SYSTEM_PROMPT = (
@@ -144,11 +147,20 @@ SYSTEM_PROMPT = (
     "option or level that was not listed, and never answer a processor "
     "that was not offered. Never return a candidate id that was not in "
     "the input.\n\n"
+    "A `choice` or `score` processor's answer also requires "
+    "`value_probability` (how likely your chosen `value` is the right "
+    "one, 0 to 1) and `runner_up_probability` (how likely the "
+    "next-most-likely alternative is, 0 to 1). Estimate both by actually "
+    "weighing the alternatives against each other, not by defaulting to a "
+    "fixed number -- these two are used together to measure how close the "
+    "decision was, not read individually. A `noul` processor's answer "
+    "never includes either field.\n\n"
     "Respond with a single JSON object of the shape "
     '{"results": [{"candidate": "<id>", "answers": {"<processor-name>": '
-    '{"value": <number-or-string>}, ...}, "reason": "<=200 chars"}]}. Every '
-    'offered processor must appear under "answers" for every candidate '
-    "you report."
+    '{"value": <number-or-string>, "value_probability": <number, '
+    'choice/score only>, "runner_up_probability": <number, choice/score '
+    'only>}, ...}, "reason": "<=200 chars"}]}. Every offered processor '
+    'must appear under "answers" for every candidate you report.'
 )
 
 # --- JSON schema for structured-output modes -------------------------------
@@ -173,17 +185,44 @@ def _answer_value_schema(processor: OfferedProcessor) -> dict[str, object]:
     return {"type": "string", "enum": list(processor.criteria)}
 
 
+#: Shared by both `choice` and `score`: a bounded, cardinality-independent
+#: way to ask for a confidence signal. Asking for a full probability
+#: distribution over every declared option would not scale to `choice`'s
+#: 255-option ceiling, so instead the model reports the chosen answer's
+#: own probability and the runner-up's — two fields regardless of how many
+#: options exist — and `_derive_margin_confidence` turns the gap between
+#: them into a `[0, 1]` confidence. This is deliberately not a bare
+#: self-reported "confidence" number: forcing an explicit two-way
+#: comparison is a more grounded elicitation than an abstract score, and
+#: it mirrors jev's own `confidence`, which is likewise derived from the
+#: shape of a probability distribution, not asked for directly.
+_PROBABILITY_FIELD_SCHEMA: dict[str, object] = {
+    "type": "number",
+    "minimum": 0,
+    "maximum": 1,
+}
+
+
 def build_response_schema(processors: Sequence[OfferedProcessor]) -> dict[str, object]:
     """Build the per-batch JSON response schema:
     one `answers` property per offered processor, containing exactly
     that processor's declared `value` shape — never an auto-injected
-    field a chat processor's own config did not ask for."""
+    field a chat processor's own config did not ask for. `choice`/`score`
+    additionally require `value_probability`/`runner_up_probability` (see
+    `_PROBABILITY_FIELD_SCHEMA`); `noul` does not, since its `value` is
+    already the resolved probability."""
     answer_properties: dict[str, object] = {}
     for processor in processors:
+        properties: dict[str, object] = {"value": _answer_value_schema(processor)}
+        required = ["value"]
+        if processor.type in ("choice", "score"):
+            properties["value_probability"] = _PROBABILITY_FIELD_SCHEMA
+            properties["runner_up_probability"] = _PROBABILITY_FIELD_SCHEMA
+            required += ["value_probability", "runner_up_probability"]
         answer_properties[processor.name] = {
             "type": "object",
-            "properties": {"value": _answer_value_schema(processor)},
-            "required": ["value"],
+            "properties": properties,
+            "required": required,
         }
     return {
         "type": "object",
@@ -433,6 +472,27 @@ def parse_classification_response(
     )
 
 
+def _derive_margin_confidence(raw_answer: Mapping[str, object]) -> float | None:
+    """Turn a `value_probability`/`runner_up_probability` pair into a
+    `[0, 1]` confidence -- the gap between how likely the chosen answer is
+    and how likely the next-best alternative is. Never raises: a missing
+    or malformed field (absent for `noul`, which never has either; or a
+    non-compliant model for `choice`/`score`) simply yields no confidence,
+    same as if the model had omitted a `confidence` field entirely under
+    the old shape -- this is a structural, not semantic, gap, and
+    unrelated processors/candidates in the same response are unaffected.
+    Clipped to `[0, 1]` defensively; `evaluate.py`'s generic bounds check
+    is the real backstop against a hostile or wildly miscalibrated pair
+    (e.g. a negative probability)."""
+    value_p = raw_answer.get("value_probability")
+    runner_up_p = raw_answer.get("runner_up_probability")
+    if not isinstance(value_p, int | float) or isinstance(value_p, bool):
+        return None
+    if not isinstance(runner_up_p, int | float) or isinstance(runner_up_p, bool):
+        return None
+    return max(0.0, min(1.0, float(value_p) - float(runner_up_p)))
+
+
 def _parse_item(item: object) -> tuple[str | None, Classification | None]:
     if not isinstance(item, dict):
         return None, None
@@ -453,10 +513,7 @@ def _parse_item(item: object) -> tuple[str | None, Classification | None]:
             return candidate_id, None
         if isinstance(value, int) and not isinstance(value, bool):
             value = float(value)
-        confidence_raw = raw_answer.get("confidence")
-        if confidence_raw is not None and not isinstance(confidence_raw, int | float):
-            return candidate_id, None
-        confidence = float(confidence_raw) if confidence_raw is not None else None
+        confidence = _derive_margin_confidence(raw_answer)
         answers[name] = ProcessorAnswer(value=value, confidence=confidence)
     reason = item.get("reason")
     if reason is not None and not isinstance(reason, str):

@@ -76,6 +76,11 @@ processor runs at all is derived from which rules reference it (see
 | `criteria` | Shape depends on `type`. `noul`: optional, exactly the keys `"true"`/`"false"` (a refinement alongside `instructions`, not an alternate encoding of it). `choice`: required, option name → description, at most 255 entries. `score`: required, ordered list of level names, 2–10 entries | — |
 | `include_body` | Always includes a bounded plain-text body excerpt in this processor's request | `false` |
 
+`instructions` and each `criteria` description must be plain strings — jev's
+real API also accepts a JSON object or array here for richer structured
+questions, but this project doesn't support that form yet; a list or map
+where a string is expected is rejected at config-load time.
+
 ## `tasks.<name>`
 
 | Key | Description | Default |
@@ -126,10 +131,13 @@ Both also accept `/regex/flags` (`i`/`m`/`s`/`g`), compiled at load time —
 avoid patterns vulnerable to catastrophic backtracking, since these run
 against sender-controlled input.
 
-A `processor:` atom's `.confidence` only resolves for a `jev`-backed
-`choice`/`score` processor (rejected at config-load time otherwise; never
-valid at all against a `noul` processor, on any backend — its single
-probability `.value` already describes it completely). A `noul`
+A `processor:` atom's `.confidence` resolves for a `choice`/`score`
+processor on any backend — `jev` populates it natively; a chat-backed
+processor is asked for the chosen answer's own probability and the
+runner-up's, and the gap between them becomes `.confidence`, rather than
+a bare self-reported number. It's never valid at all against a `noul`
+processor, on any backend (rejected at config-load time) — its single
+probability `.value` already describes it completely. A `noul`
 processor's `.value` is a probability in `[0, 1]`, so its comparand must
 be numeric — a string or boolean comparand (the old `.value == true`
 style) is rejected at config load. "One of several options" is `any:`
