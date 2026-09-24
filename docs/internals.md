@@ -50,6 +50,41 @@ later. What is deliberately *not* skipped is the existence check before a
 so dropping it would let a message that vanished in the last instant be
 recorded as successfully moved.
 
+## What a model sees
+
+Every candidate a processor is asked about carries exactly the same fixed
+field set by default, regardless of provider — jev's `state` and the
+chat-compiled request both carry the identical payload, and no rule or
+processor can add to it:
+
+| Field | Content |
+| --- | --- |
+| `from.address` | Sender address, capped at 200 characters |
+| `from.display_name` | Sender display name, capped at 100 characters |
+| `to` | Up to 5 recipient addresses (`To`/`Cc`/`Delivered-To`/`X-Original-To`, deduplicated), each capped at 200 characters |
+| `cc_count` | Recipient count beyond the 5 shown in `to`, folded in rather than dropped silently |
+| `subject` | Capped at 200 characters |
+| `mailbox` | The source mailbox name |
+| `list_id` | The `List-Id` header value, capped at 200 characters |
+| `has_list_unsubscribe` | Boolean: whether a `List-Unsubscribe` header is present |
+
+That's the complete set — no dates, ages, or flags (a processor never learns
+*why* a message aged into scope, only what it looks like). Setting
+`include_body: true` on a processor adds exactly one more field to *that
+processor's* requests, nothing else:
+
+| Field | Content |
+| --- | --- |
+| `excerpt` | Plain-text body excerpt (HTML stripped, quoted history and signatures removed), capped at `models.<name>.body_excerpt.max_chars` if set, otherwise uncapped |
+
+Every value that originates from message content is sanitised before being
+serialised — C0/C1 control characters, zero-width characters, and
+bidirectional-override characters stripped; newlines collapsed to a single
+space — regardless of the cap. The full field set, plus whether any value
+was truncated by a cap, participates in the decision cache's key, so
+tightening or loosening a cap invalidates previously-cached answers rather
+than silently reusing one computed against different-shaped input.
+
 ## Why each safety rule exists
 
 - **The model never mutates anything.** It answers a processor's question; a
