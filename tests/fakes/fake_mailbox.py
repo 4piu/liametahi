@@ -22,6 +22,7 @@ from email import message_from_bytes
 from email.message import Message
 from pathlib import Path
 
+from liametahi.domain import BodyShape
 from liametahi.imap_adapter import (
     MailboxStatus,
     MessageVanished,
@@ -71,6 +72,28 @@ def _has_attachment(msg: Message) -> bool:
         if part.get_filename() is not None:
             return True
     return False
+
+
+def _body_shape(msg: Message) -> BodyShape:
+    """A simpler, stdlib-based equivalent of the real adapter's
+    BODYSTRUCTURE-parsing heuristic (same rationale as `_has_attachment`):
+    walk every part directly rather than replicating wire-level
+    parsing."""
+    has_plain = False
+    has_html = False
+    for part in msg.walk():
+        content_type = part.get_content_type()
+        if content_type == "text/plain":
+            has_plain = True
+        elif content_type == "text/html":
+            has_html = True
+    if has_plain and has_html:
+        return "both"
+    if has_html:
+        return "html_only"
+    if has_plain:
+        return "plain_only"
+    return "neither"
 
 
 class FakeMailbox:
@@ -226,6 +249,7 @@ class FakeMailbox:
                     flags=frozenset(msg.flags),
                     headers=present,
                     has_attachment=_has_attachment(parsed),
+                    body_shape=_body_shape(parsed),
                 )
             )
         # \Seen is never touched by a metadata fetch.
@@ -260,6 +284,7 @@ class FakeMailbox:
                 flags=frozenset(msg.flags),
                 headers=headers,
                 has_attachment=_has_attachment(parsed),
+                body_shape=_body_shape(parsed),
             )
             return meta, msg.raw
         return None

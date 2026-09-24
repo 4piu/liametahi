@@ -97,7 +97,7 @@ def test_full_jev_provider_plan_example_config_loads(tmp_path: Path) -> None:
         "spam-review": {
             "model": "local",
             "type": "noul",
-            "include_body": True,
+            "fields": ["subject", "excerpt"],
             "instructions": "Is this spam?",
             "criteria": {"true": "this is spam", "false": "this is legitimate"},
         },
@@ -391,7 +391,8 @@ def test_allow_trash_without_backup_is_an_unknown_field_error(tmp_path: Path) ->
 
 def test_allow_body_excerpt_is_an_unknown_field_error(tmp_path: Path) -> None:
     """Body-excerpt opt-in moved to
-    `ProcessorConfig.include_body`; the old per-rule flag is gone."""
+    `ProcessorConfig.fields` (the `excerpt`/`html` catalog entries); the
+    old per-rule flag is gone."""
     data = make_config_dict()
     data["tasks"]["inbox-cleanup"]["rules"][0]["allow_body_excerpt"] = True
     path = write_config(tmp_path / "cfg.yaml", data)
@@ -1076,6 +1077,86 @@ def test_processor_instructions_required_for_every_type(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigError, match="instructions"):
         load_config(path)
+
+
+# --- `ProcessorConfig.fields` -----------------------------------------------
+
+
+def test_processor_with_no_fields_gets_the_default_profile(tmp_path: Path) -> None:
+    from liametahi import prompt
+
+    processors = {
+        "vibe-check": {
+            "model": "local",
+            "type": "noul",
+            "instructions": "x?",
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "vibe-check.value >= 0.5"}]
+    )
+    cfg = load_config(path)
+    assert cfg.processors["vibe-check"].fields is None
+    assert (
+        cfg.processors["vibe-check"].resolved_fields == prompt.DEFAULT_PROCESSOR_FIELDS
+    )
+
+
+def test_processor_fields_unknown_catalog_name_rejected(tmp_path: Path) -> None:
+    """An unrecognised name is a `ConfigError` at load time, not a
+    silent no-op."""
+    processors = {
+        "vibe-check": {
+            "model": "local",
+            "type": "noul",
+            "instructions": "x?",
+            "fields": ["subject", "not-a-real-field"],
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "vibe-check.value >= 0.5"}]
+    )
+    with pytest.raises(ConfigError, match="not-a-real-field"):
+        load_config(path)
+
+
+def test_processor_fields_is_a_full_replace_not_a_merge(tmp_path: Path) -> None:
+    """Setting `fields:` at all means exactly the listed fields and
+    nothing else -- no partial-override syntax that extends the default
+    profile, matching the project's existing no-partial-merge convention
+    for `criteria`/`options`."""
+    processors = {
+        "vibe-check": {
+            "model": "local",
+            "type": "noul",
+            "instructions": "x?",
+            "fields": ["subject"],
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "vibe-check.value >= 0.5"}]
+    )
+    cfg = load_config(path)
+    assert cfg.processors["vibe-check"].resolved_fields == ("subject",)
+
+
+def test_processor_fields_empty_list_is_not_the_default(tmp_path: Path) -> None:
+    """An explicit empty list is a real, if degenerate, selection -- it
+    must not be silently treated the same as omitting `fields:` entirely."""
+    processors = {
+        "vibe-check": {
+            "model": "local",
+            "type": "noul",
+            "instructions": "x?",
+            "fields": [],
+        }
+    }
+    path = _processors_config(
+        tmp_path, processors, [{"processor": "vibe-check.value >= 0.5"}]
+    )
+    cfg = load_config(path)
+    assert cfg.processors["vibe-check"].fields == []
+    assert cfg.processors["vibe-check"].resolved_fields == ()
 
 
 def test_choice_processor_requires_nonempty_criteria(tmp_path: Path) -> None:

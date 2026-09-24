@@ -63,7 +63,13 @@ class OfferedProcessor:
     type: str  # "noul" | "choice" | "score"
     instructions: str
     criteria: Mapping[str, str] | Sequence[str] | None = None
-    include_body: bool = False
+    #: This processor's resolved `fields:` selection (`config.
+    #: ProcessorConfig.resolved_fields`) -- the model-visible metadata
+    #: catalog names it depends on, used to compute its cache/processor
+    #: identity hash and to decide whether it needs a body fetch. Not
+    #: itself sent to the model; only `prompt.py`'s payload builder reads
+    #: it, same as `include_body` was never read by an adapter either.
+    fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

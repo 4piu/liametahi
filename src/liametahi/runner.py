@@ -48,7 +48,7 @@ from html import unescape
 from pathlib import Path
 from typing import Literal
 
-from liametahi import backup, evaluate, execute, policy, report, rules, state
+from liametahi import backup, evaluate, execute, policy, prompt, report, rules, state
 from liametahi.classifier import Classifier
 from liametahi.classifier.anthropic import AnthropicClassifier
 from liametahi.classifier.jev import JevClassifier
@@ -495,19 +495,20 @@ def _run_phases(
         len(eligible),
         len(protected_ids),
     )
-    # `include_body` is a static per-processor
-    # switch, not a dynamic escalation -- if a still-undecided rule
-    # needs a body-requiring processor answered, fetch the excerpt now,
+    # A processor's resolved `fields` selection is a static per-processor
+    # choice, not a dynamic escalation -- if a still-undecided rule needs
+    # a body-field-requiring processor answered, fetch the body text now,
     # before asking anything, rather than after an unsure round-trip.
     excerpt_candidate_ids = _candidates_needing_excerpt(task, config, eligible, now)
     excerpts: dict[int, str] = {}
+    html_bodies: dict[int, str] = {}
     if excerpt_candidate_ids:
         logger.info(
-            "run %s: fetching %d body excerpt(s) for include_body processor(s)",
+            "run %s: fetching %d body field(s) for excerpt/html processor(s)",
             run_id,
             len(excerpt_candidate_ids),
         )
-        excerpts = _fetch_excerpts(
+        excerpts, html_bodies = _fetch_body_texts(
             conn,
             mailbox_factory=mailbox_factory,
             account_cfg=account_cfg,
@@ -526,6 +527,7 @@ def _run_phases(
         now=now,
         reevaluate=reevaluate,
         excerpts=excerpts,
+        html_bodies=html_bodies,
         progress=progress,
     )
     logger.info(
@@ -917,15 +919,16 @@ def _merge_routed_candidates(
 
 # --- Body-excerpt prefetch --------------------------------------------------
 #
-# `include_body` is a static per-processor switch, not a dynamic
-# escalation ("there is no dynamically-triggered
+# A processor's resolved `fields` selection is a static per-processor
+# choice, not a dynamic escalation ("there is no dynamically-triggered
 # second pass"). `evaluate.py` has no mailbox access at all, so this
 # module determines up front -- via the same pure, no-cache first pass
 # `evaluate.processors_needed_for_candidate` exposes -- which eligible
-# candidates reference a body-requiring processor from a still-undecided
-# rule, fetches a bounded plain-text excerpt for exactly those, and hands
-# the text to `evaluate.evaluate_candidates(..., excerpts=...)`. A
-# candidate absent from the returned mapping (fetch failed, message
+# candidates reference an `excerpt`/`html`-selecting processor from a
+# still-undecided rule, fetches both a bounded plain-text excerpt and the
+# raw HTML body for exactly those, and hands the text to
+# `evaluate.evaluate_candidates(..., excerpts=..., html_bodies=...)`. A
+# candidate absent from the returned mappings (fetch failed, message
 # vanished, `UIDVALIDITY` moved) simply leaves that processor unresolved
 # for this round, the same as a processor that was never asked at all.
 
@@ -937,7 +940,9 @@ def _candidates_needing_excerpt(
     now: datetime,
 ) -> list[int]:
     body_processors = {
-        name for name, cfg in config.processors.items() if cfg.include_body
+        name
+        for name, cfg in config.processors.items()
+        if set(cfg.resolved_fields) & prompt.BODY_FIELDS
     }
     if not body_processors:
         return []
@@ -949,7 +954,7 @@ def _candidates_needing_excerpt(
     return result
 
 
-def _fetch_excerpts(
+def _fetch_body_texts(
     conn: sqlite3.Connection,
     *,
     mailbox_factory: MailboxFactory,
@@ -957,12 +962,15 @@ def _fetch_excerpts(
     account_id: int,
     candidates_by_id: dict[int, Candidate],
     candidate_ids: Sequence[int],
-) -> dict[int, str]:
-    """Fetch a bounded plain-text excerpt for each candidate (read-only,
-    `PEEK`). A brief, separate reconnect: the bulk
-    evaluate phase holds no mailbox connection, but this is a
-    small, bounded (`max_messages_per_run`, default 20) exception, and
-    the connection is closed again before any classify() calls happen.
+) -> tuple[dict[int, str], dict[int, str]]:
+    """Fetch a bounded plain-text excerpt and the raw HTML body for each
+    candidate (read-only, `PEEK`) -- one raw-message fetch per candidate
+    serves both, since which of `excerpt`/`html` any given processor
+    actually asked for is a payload-construction concern, not a fetch
+    one. A brief, separate reconnect: the bulk evaluate phase holds no
+    mailbox connection, but this is a small, bounded
+    (`max_messages_per_run`, default 20) exception, and the connection is
+    closed again before any classify() calls happen.
     """
     by_mailbox: dict[str, list[int]] = {}
     for candidate_id in candidate_ids:
@@ -970,6 +978,7 @@ def _fetch_excerpts(
         by_mailbox.setdefault(mailbox_name, []).append(candidate_id)
 
     excerpts: dict[int, str] = {}
+    html_bodies: dict[int, str] = {}
     mailbox = _connect(mailbox_factory, account_cfg)
     try:
         for mailbox_name, ids in by_mailbox.items():
@@ -993,13 +1002,15 @@ def _fetch_excerpts(
                     if backup.is_vanished_error(exc):
                         continue
                     raise
-                excerpts[candidate_id] = extract_plain_text_excerpt(raw)
+                excerpt, html_text = extract_body_texts(raw)
+                excerpts[candidate_id] = excerpt
+                html_bodies[candidate_id] = html_text
     finally:
         _close_mailbox(mailbox)
-    return excerpts
+    return excerpts, html_bodies
 
 
-# --- Plain-text excerpt extraction ------------------------------------------
+# --- Plain-text excerpt / raw HTML extraction -------------------------------
 #
 # Nothing in the codebase does this yet: `prompt.build_excerpt_payload`'s
 # own docstring is explicit that turning a raw message into "cleaned
@@ -1023,8 +1034,32 @@ _SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style)[^>]*>.*?</\1>")
 
 def extract_plain_text_excerpt(raw: bytes) -> str:
     """Best-effort: raw RFC 822 bytes -> cleaned plain text."""
+    return extract_body_texts(raw)[0]
+
+
+def extract_raw_html(raw: bytes) -> str:
+    """Best-effort: raw RFC 822 bytes -> the raw (unstripped) `text/html`
+    part, or `""` if the message has none. This is the `html` catalog
+    field's source -- deliberately *not* run through `_strip_html`/the
+    excerpt cleanup heuristics, since a user selecting `html` wants the
+    actual markup (tracking pixels, disguised link targets), not
+    de-tagged text."""
+    return extract_body_texts(raw)[1]
+
+
+def extract_body_texts(raw: bytes) -> tuple[str, str]:
+    """Parse `raw` once and return `(cleaned_plain_excerpt, raw_html)`:
+    the same cleaned, capped-source plain-text excerpt
+    `extract_plain_text_excerpt` has always produced (prefer `text/plain`,
+    else strip `text/html`), plus the raw, unstripped `text/html` part if
+    present, else `""`. One parse serves both `excerpt` and `html`
+    selection -- which of the two any given processor actually asked for
+    is a payload-construction concern, not a fetch/parse one.
+    """
     message = message_from_bytes(raw)
-    text = _first_text_part(message)[:_MAX_RAW_TEXT_CHARS]
+    plain, html = _extract_body_parts(message)
+    excerpt_source = plain if plain is not None else _strip_html(html or "")
+    text = excerpt_source[:_MAX_RAW_TEXT_CHARS]
 
     reply_match = _REPLY_HEADER_RE.search(text)
     if reply_match:
@@ -1035,10 +1070,17 @@ def extract_plain_text_excerpt(raw: bytes) -> str:
     text = _QUOTE_LINE_RE.sub("", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+
+    raw_html = (html or "")[:_MAX_RAW_TEXT_CHARS]
+    return text.strip(), raw_html
 
 
-def _first_text_part(message: Message) -> str:
+def _extract_body_parts(message: Message) -> tuple[str | None, str | None]:
+    """The first `text/plain` and first `text/html` part found, decoded
+    and charset-normalised but otherwise unprocessed -- `None` for
+    whichever is absent. Both are returned (rather than picking one, as
+    the old `_first_text_part` did) since `excerpt` and `html` are now
+    independently selectable fields that may both be requested."""
     if message.is_multipart():
         plain: str | None = None
         html: str | None = None
@@ -1050,14 +1092,12 @@ def _first_text_part(message: Message) -> str:
                 plain = _decode_part(part)
             elif content_type == "text/html" and html is None:
                 html = _decode_part(part)
-        if plain is not None:
-            return plain
-        if html is not None:
-            return _strip_html(html)
-        return ""
+        return plain, html
     content_type = message.get_content_type()
     payload = _decode_part(message)
-    return _strip_html(payload) if content_type == "text/html" else payload
+    if content_type == "text/html":
+        return None, payload
+    return payload, None
 
 
 def _decode_part(part: Message) -> str:

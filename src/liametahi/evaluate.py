@@ -18,16 +18,16 @@ each references, ask each group once per candidate that still needs it
 (deduplicated by *processor*, not by rule -- two rules sharing one named
 processor invoke it once), merge every answer into one per-candidate
 `processor_values` map, and re-run `rules.evaluate(...,
-processor_values=...)` to finalize. A processor with `include_body: true`
-needs an excerpt this module has no mailbox access to fetch; `runner.py`
-fetches it up front (a static, always-needed fetch now, not a dynamic
-"escalation" -- there is deliberately no `when:`-gated processor) and
-passes the text in via `excerpts`. A
-candidate whose only unresolved processor needs a body that was not
-available this round (fetch failed, or `runner.py` never called for it)
-simply stays unresolved for whatever rules reference that processor --
-the exact same "no answer this round" shape a cache miss followed by no
-ask at all would produce.
+processor_values=...)` to finalize. A processor whose resolved `fields`
+selection includes `excerpt`/`html` needs body text this module has no
+mailbox access to fetch; `runner.py` fetches it up front (a static,
+always-needed fetch now, not a dynamic "escalation" -- there is
+deliberately no `when:`-gated processor) and passes the text in via
+`excerpts`/`html_bodies`. A candidate whose only unresolved processor
+needs a body field that was not available this round (fetch failed, or
+`runner.py` never called for it) simply stays unresolved for whatever
+rules reference that processor -- the exact same "no answer this round"
+shape a cache miss followed by no ask at all would produce.
 
 Safety-critical property enforced here, not in any adapter: a
 `Classification` returned by a `Classifier` is untrusted until every
@@ -135,7 +135,7 @@ def _offered_processor(name: str, cfg: ProcessorConfig) -> OfferedProcessor:
         type=cfg.type,
         instructions=cfg.instructions,
         criteria=cfg.criteria,
-        include_body=cfg.include_body,
+        fields=cfg.resolved_fields,
     )
 
 
@@ -168,9 +168,9 @@ def processors_needed_for_candidate(
     """Every processor name a still-`UNKNOWN` rule references for this
     candidate, with no prior processor knowledge -- exactly pass 1 of
     `evaluate_candidates`, exposed so `runner.py` can decide which
-    candidates need a body excerpt fetched *before* evaluation starts at
-    all (`include_body` is a static per-processor
-    switch, not a dynamically-triggered second pass)."""
+    candidates need a body field fetched *before* evaluation starts at
+    all (a processor's resolved `fields` selection is a static per-
+    processor choice, not a dynamically-triggered second pass)."""
     _, needed = _evaluate_rules(task_rules, candidate, now, {})
     return frozenset(needed)
 
@@ -212,20 +212,33 @@ def _processor_input_hash(
     cfg: ProcessorConfig,
     model_cfg: ModelConfig,
     excerpt_text: str | None,
+    html_text: str | None,
 ) -> str | None:
     """The cache/request input hash for one processor against one
-    candidate. `None` means "cannot be resolved this round" -- an
-    `include_body` processor with no excerpt text available."""
-    if cfg.include_body:
-        if excerpt_text is None:
+    candidate, computed from *this processor's own* resolved fields only
+    -- independent of whatever else happened to be unioned into a shared
+    batch payload, so the cache reflects exactly what this processor's
+    identity says it depends on. `None` means "cannot be resolved this
+    round" -- a processor whose fields need a body field with no text
+    available yet."""
+    fields = cfg.resolved_fields
+    needs_body = bool(set(fields) & prompt.BODY_FIELDS)
+    if needs_body:
+        if ("excerpt" in fields and excerpt_text is None) or (
+            "html" in fields and html_text is None
+        ):
             return None
         return prompt.build_excerpt_payload(
             candidate,
             payload_id="c0",
+            fields=fields,
             excerpt_text=excerpt_text,
+            html_text=html_text,
             max_chars=model_cfg.body_excerpt.max_chars,
         ).input_hash
-    return prompt.build_candidate_payload(candidate, payload_id="c0").input_hash
+    return prompt.build_candidate_payload(
+        candidate, payload_id="c0", fields=fields
+    ).input_hash
 
 
 # --- Entry point --------------------------------------------------------
@@ -243,20 +256,22 @@ def evaluate_candidates(
     now: datetime,
     reevaluate: bool,
     excerpts: Mapping[int, str] | None = None,
+    html_bodies: Mapping[int, str] | None = None,
     progress: Progress | None = None,
 ) -> EvaluateOutcome:
     """Run the evaluate phase over already-scanned, already
     protected-filtered candidates.
 
-    `excerpts` maps a candidate id to already-fetched, already-cleaned
-    plain text for any candidate that needs one of this
-    task's `include_body: true` processors answered -- `runner.py`'s
-    job, since this module has no mailbox access. Absent from the map
-    means "no excerpt available this round"; a processor that needs one
-    simply stays unresolved for that candidate.
+    `excerpts`/`html_bodies` map a candidate id to already-fetched text
+    for any candidate that needs one of this task's `excerpt`/`html`
+    field-selecting processors answered -- `runner.py`'s job, since this
+    module has no mailbox access. Absent from a map means "no such text
+    available this round"; a processor that needs it simply stays
+    unresolved for that candidate.
     """
     reporter = progress or NullProgress()
     excerpts = excerpts or {}
+    html_bodies = html_bodies or {}
     states: dict[int, _CandidateState] = {
         candidate_id: _CandidateState(candidate_id=candidate_id, candidate=candidate)
         for candidate_id, candidate in candidates
@@ -289,6 +304,7 @@ def evaluate_candidates(
             item=item,
             needed=needed,
             excerpts=excerpts,
+            html_bodies=html_bodies,
         )
         matches, needed_after = _evaluate_rules(
             task.rules, item.candidate, now, item.processor_values
@@ -324,6 +340,7 @@ def evaluate_candidates(
                 states=states,
                 to_ask=to_ask,
                 excerpts=excerpts,
+                html_bodies=html_bodies,
                 reporter=reporter,
             )
         finally:
@@ -369,6 +386,7 @@ def _consult_cache(
     item: _CandidateState,
     needed: set[str],
     excerpts: Mapping[int, str],
+    html_bodies: Mapping[int, str],
 ) -> set[str]:
     """Resolve as many of `needed` as possible from the decision cache,
     writing hits into `item.processor_values`. Returns the
@@ -379,8 +397,11 @@ def _consult_cache(
     for name in needed:
         cfg = config.processors[name]
         model_cfg = config.models[cfg.model]
-        excerpt_text = excerpts.get(item.candidate_id) if cfg.include_body else None
-        input_hash = _processor_input_hash(item.candidate, cfg, model_cfg, excerpt_text)
+        excerpt_text = excerpts.get(item.candidate_id)
+        html_text = html_bodies.get(item.candidate_id)
+        input_hash = _processor_input_hash(
+            item.candidate, cfg, model_cfg, excerpt_text, html_text
+        )
         if input_hash is None:
             continue
         offered = _offered_processor(name, cfg)
@@ -457,6 +478,11 @@ def _group_by_model(
 class _Job:
     candidate_ids: tuple[int, ...]
     processors: tuple[OfferedProcessor, ...]
+    #: The union of every offered processor's own resolved fields --
+    #: every candidate in this job shares one payload (batch-level, like
+    #: `processors` itself), so the payload must satisfy whichever
+    #: processor asked for the most, not just one of them.
+    fields: tuple[str, ...]
     needs_body: bool
 
 
@@ -470,6 +496,7 @@ def _classify_all(
     states: dict[int, _CandidateState],
     to_ask: Mapping[int, set[str]],
     excerpts: Mapping[int, str],
+    html_bodies: Mapping[int, str],
     reporter: Progress,
 ) -> _BatchStats:
     """Classify every still-needed candidate, model by model.
@@ -498,11 +525,12 @@ def _classify_all(
                 _offered_processor(name, config.processors[name])
                 for name in sorted(name_set)
             )
-            needs_body = any(p.include_body for p in processors)
+            job_fields = tuple(sorted({f for p in processors for f in p.fields}))
+            needs_body = bool(set(job_fields) & prompt.BODY_FIELDS)
             batch_size = model_cfg.mails_per_request
             for start in range(0, len(candidate_ids), batch_size):
                 chunk = tuple(candidate_ids[start : start + batch_size])
-                jobs.append(_Job(chunk, processors, needs_body))
+                jobs.append(_Job(chunk, processors, job_fields, needs_body))
         if not jobs:
             continue
 
@@ -517,9 +545,10 @@ def _classify_all(
                 states,
                 job.candidate_ids,
                 job.processors,
-                needs_body=job.needs_body,
+                fields=job.fields,
                 max_chars=model_cfg.body_excerpt.max_chars,
                 excerpts=excerpts,
+                html_bodies=html_bodies,
                 run_id=run_id,
             )
 
@@ -536,6 +565,7 @@ def _classify_all(
                         run_id=run_id,
                         account_id=account_id,
                         excerpts=excerpts,
+                        html_bodies=html_bodies,
                     ),
                 )
             reporter.advance(len(job.candidate_ids))
@@ -565,9 +595,11 @@ def _build_payloads(
     states: dict[int, _CandidateState],
     candidate_ids: Sequence[int],
     *,
+    fields: Sequence[str],
     needs_body: bool,
     max_chars: int | None,
     excerpts: Mapping[int, str],
+    html_bodies: Mapping[int, str],
 ) -> tuple[list[CandidatePayload], dict[str, int], dict[str, str], str]:
     payloads: list[CandidatePayload] = []
     by_payload_id: dict[str, int] = {}
@@ -576,15 +608,22 @@ def _build_payloads(
     for index, candidate_id in enumerate(candidate_ids, start=1):
         payload_id = f"c{index}"
         candidate = states[candidate_id].candidate
-        if needs_body and candidate_id in excerpts:
+        excerpt_text = excerpts.get(candidate_id)
+        html_text = html_bodies.get(candidate_id)
+        if needs_body and (excerpt_text is not None or html_text is not None):
             built = prompt.build_excerpt_payload(
                 candidate,
                 payload_id=payload_id,
-                excerpt_text=excerpts[candidate_id],
+                fields=fields,
+                excerpt_text=excerpt_text,
+                html_text=html_text,
                 max_chars=max_chars,
             )
         else:
-            built = prompt.build_candidate_payload(candidate, payload_id=payload_id)
+            non_body_fields = [f for f in fields if f not in prompt.BODY_FIELDS]
+            built = prompt.build_candidate_payload(
+                candidate, payload_id=payload_id, fields=non_body_fields
+            )
         payloads.append(built.payload)
         by_payload_id[payload_id] = candidate_id
         input_hash_by_payload_id[payload_id] = built.input_hash
@@ -616,18 +655,22 @@ def _classify_network(
     candidate_ids: Sequence[int],
     processors: Sequence[OfferedProcessor],
     *,
-    needs_body: bool,
+    fields: Sequence[str],
     max_chars: int | None,
     excerpts: Mapping[int, str],
+    html_bodies: Mapping[int, str],
     run_id: str,
     allow_retry: bool = True,
 ) -> list[_NetworkAttempt]:
+    needs_body = bool(set(fields) & prompt.BODY_FIELDS)
     payloads, by_payload_id, input_hash_by_payload_id, input_level = _build_payloads(
         states,
         candidate_ids,
+        fields=fields,
         needs_body=needs_body,
         max_chars=max_chars,
         excerpts=excerpts,
+        html_bodies=html_bodies,
     )
 
     failure_reason = "unparseable or wholly invalid model response"
@@ -649,9 +692,10 @@ def _classify_network(
                     states,
                     half,
                     processors,
-                    needs_body=needs_body,
+                    fields=fields,
                     max_chars=max_chars,
                     excerpts=excerpts,
+                    html_bodies=html_bodies,
                     run_id=run_id,
                     allow_retry=False,
                 )
@@ -680,6 +724,7 @@ def _record_attempt(
     run_id: str,
     account_id: int,
     excerpts: Mapping[int, str],
+    html_bodies: Mapping[int, str],
 ) -> _BatchStats:
     """The bookkeeping half: record what `_classify_network` came back
     with. Pure local work -- one transaction per batch rather than one
@@ -746,6 +791,7 @@ def _record_attempt(
                 run_id=run_id,
                 account_id=account_id,
                 excerpts=excerpts,
+                html_bodies=html_bodies,
                 input_level=input_level,
                 input_hash=input_hash_by_payload_id[payload_id],
             )
@@ -858,6 +904,7 @@ def _resolve_item(
     run_id: str,
     account_id: int,
     excerpts: Mapping[int, str],
+    html_bodies: Mapping[int, str],
     input_level: str,
     input_hash: str,
 ) -> None:
@@ -891,9 +938,10 @@ def _resolve_item(
         accepted_count += 1
 
         model_for_processor = config.models[cfg.model]
-        excerpt_text = excerpts.get(candidate_id) if cfg.include_body else None
+        excerpt_text = excerpts.get(candidate_id)
+        html_text = html_bodies.get(candidate_id)
         cache_input_hash = _processor_input_hash(
-            item.candidate, cfg, model_for_processor, excerpt_text
+            item.candidate, cfg, model_for_processor, excerpt_text, html_text
         )
         if cache_input_hash is not None:
             processor_hash = prompt.compute_processor_hash(offered)

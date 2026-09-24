@@ -41,7 +41,7 @@ from pydantic import (
     model_validator,
 )
 
-from liametahi import rules
+from liametahi import prompt, rules
 from liametahi.rules import ConditionTree, ProcessorCondition
 
 # --- Errors ------------------------------------------------------------
@@ -239,6 +239,18 @@ BASE_FETCH_HEADERS: tuple[str, ...] = (
     "LIST-UNSUBSCRIBE",
     "DELIVERED-TO",
     "X-ORIGINAL-TO",
+    # Unconditional, unlike `Authentication-Results` below: these back the
+    # default field profile and common opt-in fields rather than one
+    # narrow condition, so every task fetches them, not just one that
+    # references them.
+    "REPLY-TO",
+    "FEEDBACK-ID",
+    "SENDER",
+    "PRECEDENCE",
+    "AUTO-SUBMITTED",
+    "X-AUTO-RESPONSE-SUPPRESS",
+    "IN-REPLY-TO",
+    "REFERENCES",
 )
 
 #: `appauthor=False` avoids inventing a per-platform "author" namespace
@@ -615,12 +627,12 @@ class AccountConfig(BaseModel):
 
 class BodyExcerptConfig(BaseModel):
     """No separate on/off switch here:
-    a processor's own `include_body` is already the opt-in, and a second
-    gate at the model level would only mean two places to enable the same
-    thing before it does anything, with no clear story for what one
-    enabled and the other disabled means. This holds the shape/budget
-    settings (`format`, `max_chars`) that apply once a processor has
-    already opted in."""
+    a processor's own `fields` selection (`excerpt`/`html`) is already the
+    opt-in, and a second gate at the model level would only mean two
+    places to enable the same thing before it does anything, with no
+    clear story for what one enabled and the other disabled means. This
+    holds the shape/budget settings (`format`, `max_chars`) that apply
+    once a processor has already opted in."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -702,7 +714,39 @@ class ProcessorConfig(BaseModel):
     type: Literal["noul", "choice", "score"]
     instructions: str = Field(min_length=1)
     criteria: dict[str, str] | list[str] | None = None
-    include_body: bool = False
+    # Optional: omitted means the default profile
+    # (`prompt.DEFAULT_PROCESSOR_FIELDS`) applies. When given, this is a
+    # full replace, not a merge -- exactly the listed fields and nothing
+    # else, matching this project's existing no-partial-merge convention
+    # for `criteria`/`options` elsewhere in config. `include_body: bool`
+    # no longer exists at all; `fields: [..., "excerpt"]` is its
+    # replacement, one entry in the same general mechanism rather than a
+    # second, parallel switch.
+    fields: list[str] | None = None
+
+    @field_validator("fields")
+    @classmethod
+    def _validate_fields(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        unknown = sorted(set(value) - prompt.FIELD_CATALOG)
+        if unknown:
+            raise ConfigError(
+                f"processors: unknown field(s) {unknown} in 'fields'; "
+                f"expected one of {sorted(prompt.FIELD_CATALOG)}"
+            )
+        return value
+
+    @property
+    def resolved_fields(self) -> tuple[str, ...]:
+        """The effective field selection: `fields` verbatim if set,
+        else the default profile. Every caller that needs to know what a
+        processor actually sees goes through this, never `self.fields`
+        directly, so the "omitted means default" rule lives in exactly
+        one place."""
+        if self.fields is not None:
+            return tuple(self.fields)
+        return prompt.DEFAULT_PROCESSOR_FIELDS
 
     @model_validator(mode="after")
     def _validate_shape(self) -> Self:

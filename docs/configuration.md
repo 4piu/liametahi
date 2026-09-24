@@ -76,7 +76,7 @@ processor runs at all is derived from which rules reference it (see
 | `type` * | string: `noul` \| `choice` \| `score` | `noul` = a calibrated probability; `choice` = one of several named options; `score` = one of an ordered list of levels | — |
 | `instructions` * | non-empty string | Natural-language question sent to the model, alongside `criteria` | — |
 | `criteria` | shape depends on `type` — see below | The processor's vocabulary | — (required for `choice`/`score`; optional for `noul`) |
-| `include_body` | boolean | Always includes a bounded plain-text body excerpt in this processor's request | `false` |
+| `fields` | list of field names — see [Reading the message body](#reading-the-message-body) | Exactly which candidate metadata (and, if listed, body text) this processor's request carries | the default profile below |
 
 `criteria`'s type and constraints depend on `type`:
 
@@ -181,13 +181,57 @@ sub-condition: `any: [{all: [A, B]}, C]` reads "(A and B) or C".
 
 ## Reading the message body
 
-A processor sees only metadata by default. `include_body: true` makes its
-request always carry a bounded plain-text excerpt — a static property of
-the processor, not a runtime escalation — so reserve it for processors that
-only reach an already-filtered-down subset of mail (see `task:<id>`
-chaining below). Each such call is its own un-batched request plus a full
-message fetch. See [docs/internals.md](internals.md#what-a-model-sees) for
-the exact field list a model receives, with and without `include_body`.
+Every processor sees a chosen subset of candidate metadata, named by its
+`fields:` list. Omitting `fields:` entirely applies the default profile:
+
+```yaml
+fields: [from.address, from.display_name, subject, mailbox, list_id,
+         has_list_unsubscribe, has_feedback_id, reply_to, has_attachment,
+         cc_count]
+```
+
+Setting `fields:` at all is a **full replace, not a merge** — exactly the
+listed names and nothing else, the same convention `criteria`/`options`
+already use elsewhere in this config. Extending the default by one field
+means listing all of it plus the addition (`config.example.yaml`'s
+`spam-review` processor does exactly this).
+
+Every name below is legal in `fields:`; an unrecognised name is a
+config-load error, not a silent no-op.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `from.address` | string or null | `From` address |
+| `from.display_name` | string or null | `From` display name |
+| `to` | list of strings | `To`/`Cc`/`Delivered-To`/`X-Original-To` union, capped at 5 entries |
+| `cc_count` | integer | `Cc` header count, plus any overflow beyond `to`'s cap |
+| `recipient_count` | integer | total recipient union count, uncapped |
+| `subject` | string or null | `Subject` header |
+| `mailbox` | string | source mailbox name |
+| `list_id` | string or null | `List-Id` header |
+| `has_list_unsubscribe` | boolean | `List-Unsubscribe` presence |
+| `has_attachment` | boolean | heuristic from `BODYSTRUCTURE`, same one the `has-attachment` rule condition uses |
+| `size` | integer | `RFC822.SIZE`, bytes |
+| `reply_to` | string or null | `Reply-To` header |
+| `has_feedback_id` | boolean | `Feedback-ID` presence (ESP complaint-loop marker) |
+| `sender` | string or null | `Sender` header, distinct from `From` |
+| `precedence` | string or null | raw `Precedence` value (`bulk`/`list`/`junk`/...) |
+| `is_auto_submitted` | boolean | `Auto-Submitted` presence |
+| `has_auto_response_suppress` | boolean | `X-Auto-Response-Suppress` presence |
+| `is_reply` | boolean | `In-Reply-To` or `References` presence |
+| `body_shape` | string: `both` \| `html_only` \| `plain_only` \| `neither` | which of `text/plain`/`text/html` the message has, from `BODYSTRUCTURE` alone — no body fetch |
+| `excerpt` | string | a bounded, cleaned plain-text body excerpt (prefer `text/plain`, else strip `text/html`) |
+| `html` | string | the raw, unstripped `text/html` part, or empty if none |
+
+Only `excerpt` and `html` trigger the extra per-candidate body fetch
+(`BODY.PEEK[]`) — every other field, `body_shape` included, comes from the
+scan phase's existing metadata fetch, no extra round trip. Selecting
+`excerpt`/`html` is a static property of the processor, not a runtime
+escalation — so reserve it for processors that only reach an
+already-filtered-down subset of mail (see `task:<id>` chaining below). Each
+such call is its own un-batched request plus a full message fetch. See
+[docs/internals.md](internals.md#what-a-model-sees) for how this fits into
+the wider payload shape.
 
 ## Chaining tasks together
 

@@ -60,7 +60,7 @@ def test_open_database_creates_all_tables(tmp_path: Path) -> None:
         version_row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 1
+        assert version_row["v"] == state._LATEST_SCHEMA_VERSION
     finally:
         state.close_database(conn)
 
@@ -72,7 +72,7 @@ def test_reopening_database_is_idempotent(tmp_path: Path) -> None:
     conn2 = state.open_database(db_path)  # must not re-run already-applied migrations
     try:
         count = conn2.execute("SELECT COUNT(*) AS c FROM schema_version").fetchone()
-        assert count["c"] == 1
+        assert count["c"] == state._LATEST_SCHEMA_VERSION
     finally:
         state.close_database(conn2)
 
@@ -167,6 +167,44 @@ def test_candidate_upsert_and_round_trip(tmp_path: Path) -> None:
         assert candidate_id_2 == candidate_id
         rows = conn.execute("SELECT COUNT(*) AS c FROM candidates").fetchone()
         assert rows["c"] == 1
+    finally:
+        state.close_database(conn)
+
+
+def test_candidate_new_model_field_columns_round_trip(tmp_path: Path) -> None:
+    """The 8 columns added for the model-visible field catalog
+    (`reply_to`, `sender`, `precedence`, `has_feedback_id`,
+    `is_auto_submitted`, `has_auto_response_suppress`, `is_reply`,
+    `body_shape`) survive an upsert/fetch round trip, since a candidate
+    is written once at scan time and reloaded fresh from these columns
+    at evaluate time -- a field that is not actually persisted here would
+    silently and permanently read back as `None`/`False`."""
+    conn = state.open_database(tmp_path / "state.sqlite3")
+    try:
+        account_id = state.upsert_account(conn, name="personal", host="h", username="u")
+        candidate = make_candidate(
+            account_id=account_id,
+            reply_to="reply@example.com",
+            sender="sender@example.com",
+            precedence="bulk",
+            has_feedback_id=True,
+            is_auto_submitted=True,
+            has_auto_response_suppress=True,
+            is_reply=True,
+            body_shape="both",
+        )
+        state.upsert_candidate(conn, candidate)
+        fetched = state.get_candidate(conn, key=candidate.key)
+        assert fetched is not None
+        _, fetched_candidate = fetched
+        assert fetched_candidate.reply_to == "reply@example.com"
+        assert fetched_candidate.sender == "sender@example.com"
+        assert fetched_candidate.precedence == "bulk"
+        assert fetched_candidate.has_feedback_id is True
+        assert fetched_candidate.is_auto_submitted is True
+        assert fetched_candidate.has_auto_response_suppress is True
+        assert fetched_candidate.is_reply is True
+        assert fetched_candidate.body_shape == "both"
     finally:
         state.close_database(conn)
 

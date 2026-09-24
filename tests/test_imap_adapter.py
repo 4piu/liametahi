@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 
 from liametahi.imap_adapter import (
     RawMetadata,
+    _bodystructure_body_shape,
     _bodystructure_has_attachment,
     _parse_fetch_line,
     normalize,
@@ -249,6 +250,7 @@ def test_raw_metadata_accepts_has_attachment_field() -> None:
         flags=frozenset(),
         headers={},
         has_attachment=True,
+        body_shape="neither",
     )
     assert meta.has_attachment is True
 
@@ -277,6 +279,127 @@ def test_normalize_uses_topmost_authentication_results_header() -> None:
             )
         },
         has_attachment=False,
+        body_shape="neither",
     )
     candidate = normalize(raw, account_id=1, mailbox="INBOX", uidvalidity=1000)
     assert candidate.auth_results == "mx.recipient.example; spf=pass"
+
+
+# --- `body_shape`: derived from BODYSTRUCTURE alone, no body fetch --------
+
+
+def test_body_shape_plain_only() -> None:
+    body = b'("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 1152 23)'
+    assert _bodystructure_body_shape(_bodystructure_line(body)) == "plain_only"
+
+
+def test_body_shape_both_in_multipart_alternative() -> None:
+    body = (
+        b'(("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 51 3)'
+        b'("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "7BIT" 102 5)'
+        b'"ALTERNATIVE")'
+    )
+    assert _bodystructure_body_shape(_bodystructure_line(body)) == "both"
+
+
+def test_body_shape_plain_only_alongside_an_attachment() -> None:
+    """A `text/plain` part nested inside `multipart/mixed` alongside a
+    non-text attachment is still found -- `body_shape` walks every leaf
+    part, not just a top-level one."""
+    body = (
+        b'(("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 100 5)'
+        b'("APPLICATION" "PDF" ("NAME" "invoice.pdf") NIL NIL "BASE64" 45000 NIL '
+        b'("attachment" ("FILENAME" "invoice.pdf")) NIL NIL) "MIXED")'
+    )
+    assert _bodystructure_body_shape(_bodystructure_line(body)) == "plain_only"
+
+
+def test_body_shape_neither_when_bodystructure_absent() -> None:
+    line = b"1 (UID 101 FLAGS (\\Seen))"
+    assert _bodystructure_body_shape(line) == "neither"
+
+
+def test_body_shape_neither_on_unbalanced_parens() -> None:
+    # No closing paren anywhere before the line ends -- `_parse_list`
+    # must run out of data and raise, not hang or crash.
+    line = b'1 (UID 101 BODYSTRUCTURE ("TEXT" "PLAIN"'
+    assert _bodystructure_body_shape(line) == "neither"
+
+
+def test_body_shape_html_only_single_part_message() -> None:
+    """A non-multipart message whose sole part is `text/html`."""
+    body = b'("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "7BIT" 200 10)'
+    assert _bodystructure_body_shape(_bodystructure_line(body)) == "html_only"
+
+
+def test_body_shape_neither_for_a_non_text_single_part_message() -> None:
+    body = b'("APPLICATION" "PDF" ("NAME" "report.pdf") NIL NIL "BASE64" 1000 NIL)'
+    assert _bodystructure_body_shape(_bodystructure_line(body)) == "neither"
+
+
+# --- normalize(): new header-derived fields -----------------------------
+
+
+def test_normalize_extracts_new_header_derived_fields() -> None:
+    raw = RawMetadata(
+        uid=1,
+        internaldate=datetime(2026, 1, 1, tzinfo=UTC),
+        rfc822_size=10,
+        flags=frozenset(),
+        headers={
+            "reply-to": ("Someone <reply@example.com>",),
+            "sender": ("agent@example.com",),
+            "precedence": ("bulk",),
+            "feedback-id": ("1:2:3:SES",),
+            "auto-submitted": ("auto-generated",),
+            "x-auto-response-suppress": ("All",),
+            "in-reply-to": ("<parent@example.com>",),
+        },
+        has_attachment=False,
+        body_shape="plain_only",
+    )
+    candidate = normalize(raw, account_id=1, mailbox="INBOX", uidvalidity=1000)
+    assert candidate.reply_to == "Someone <reply@example.com>"
+    assert candidate.sender == "agent@example.com"
+    assert candidate.precedence == "bulk"
+    assert candidate.has_feedback_id is True
+    assert candidate.is_auto_submitted is True
+    assert candidate.has_auto_response_suppress is True
+    assert candidate.is_reply is True
+    assert candidate.body_shape == "plain_only"
+
+
+def test_normalize_is_reply_true_from_references_alone() -> None:
+    """`is_reply` is presence of `In-Reply-To` OR `References` -- either
+    alone is sufficient."""
+    raw = RawMetadata(
+        uid=1,
+        internaldate=datetime(2026, 1, 1, tzinfo=UTC),
+        rfc822_size=10,
+        flags=frozenset(),
+        headers={"references": ("<ancestor@example.com>",)},
+        has_attachment=False,
+        body_shape="neither",
+    )
+    candidate = normalize(raw, account_id=1, mailbox="INBOX", uidvalidity=1000)
+    assert candidate.is_reply is True
+
+
+def test_normalize_new_header_fields_absent_by_default() -> None:
+    raw = RawMetadata(
+        uid=1,
+        internaldate=datetime(2026, 1, 1, tzinfo=UTC),
+        rfc822_size=10,
+        flags=frozenset(),
+        headers={},
+        has_attachment=False,
+        body_shape="neither",
+    )
+    candidate = normalize(raw, account_id=1, mailbox="INBOX", uidvalidity=1000)
+    assert candidate.reply_to is None
+    assert candidate.sender is None
+    assert candidate.precedence is None
+    assert candidate.has_feedback_id is False
+    assert candidate.is_auto_submitted is False
+    assert candidate.has_auto_response_suppress is False
+    assert candidate.is_reply is False

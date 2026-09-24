@@ -20,13 +20,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from liametahi import rules
-from liametahi.domain import Candidate, MessageKey
+from liametahi.domain import BodyShape, Candidate, MessageKey
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
-_LATEST_SCHEMA_VERSION = 1
+_LATEST_SCHEMA_VERSION = 2
 
 _CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
 
@@ -259,8 +259,11 @@ def upsert_candidate(conn: sqlite3.Connection, candidate: Candidate) -> int:
             account_id, mailbox, uidvalidity, uid, fingerprint, message_id,
             internaldate, rfc822_size, flags, headers_present, from_address,
             from_display, recipients, cc_count, subject, list_id,
-            has_list_unsubscribe, has_attachment, auth_results, first_seen_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            has_list_unsubscribe, has_attachment, auth_results, reply_to,
+            sender, precedence, has_feedback_id, is_auto_submitted,
+            has_auto_response_suppress, is_reply, body_shape, first_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (account_id, mailbox, uidvalidity, uid) DO UPDATE SET
             fingerprint = excluded.fingerprint,
             message_id = excluded.message_id,
@@ -276,7 +279,15 @@ def upsert_candidate(conn: sqlite3.Connection, candidate: Candidate) -> int:
             list_id = excluded.list_id,
             has_list_unsubscribe = excluded.has_list_unsubscribe,
             has_attachment = excluded.has_attachment,
-            auth_results = excluded.auth_results
+            auth_results = excluded.auth_results,
+            reply_to = excluded.reply_to,
+            sender = excluded.sender,
+            precedence = excluded.precedence,
+            has_feedback_id = excluded.has_feedback_id,
+            is_auto_submitted = excluded.is_auto_submitted,
+            has_auto_response_suppress = excluded.has_auto_response_suppress,
+            is_reply = excluded.is_reply,
+            body_shape = excluded.body_shape
         """,
         (
             key.account_id,
@@ -298,6 +309,14 @@ def upsert_candidate(conn: sqlite3.Connection, candidate: Candidate) -> int:
             int(candidate.has_list_unsubscribe),
             int(candidate.has_attachment),
             candidate.auth_results,
+            candidate.reply_to,
+            candidate.sender,
+            candidate.precedence,
+            int(candidate.has_feedback_id),
+            int(candidate.is_auto_submitted),
+            int(candidate.has_auto_response_suppress),
+            int(candidate.is_reply),
+            candidate.body_shape,
             _iso_now(),
         ),
     )
@@ -332,6 +351,14 @@ def _row_to_candidate(row: sqlite3.Row) -> Candidate:
         has_list_unsubscribe=bool(row["has_list_unsubscribe"]),
         has_attachment=bool(row["has_attachment"]),
         auth_results=row["auth_results"],
+        reply_to=row["reply_to"],
+        sender=row["sender"],
+        precedence=row["precedence"],
+        has_feedback_id=bool(row["has_feedback_id"]),
+        is_auto_submitted=bool(row["is_auto_submitted"]),
+        has_auto_response_suppress=bool(row["has_auto_response_suppress"]),
+        is_reply=bool(row["is_reply"]),
+        body_shape=cast("BodyShape", row["body_shape"]),
     )
 
 

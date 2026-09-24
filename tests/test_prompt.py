@@ -54,7 +54,9 @@ def test_sanitize_text_leaves_ordinary_text_untouched() -> None:
 
 def test_subject_over_cap_is_truncated_and_flagged() -> None:
     candidate = make_candidate(subject="x" * 250)
-    built = prompt.build_candidate_payload(candidate, payload_id="c1")
+    built = prompt.build_candidate_payload(
+        candidate, payload_id="c1", fields=["subject"]
+    )
     subject = built.payload.fields["subject"]
     assert isinstance(subject, str)
     assert len(subject) == prompt.SUBJECT_CAP
@@ -63,14 +65,18 @@ def test_subject_over_cap_is_truncated_and_flagged() -> None:
 
 def test_subject_under_cap_is_not_truncated() -> None:
     candidate = make_candidate(subject="short subject")
-    built = prompt.build_candidate_payload(candidate, payload_id="c1")
+    built = prompt.build_candidate_payload(
+        candidate, payload_id="c1", fields=["subject"]
+    )
     assert built.payload.fields["subject"] == "short subject"
     assert built.truncated is False
 
 
 def test_display_name_over_cap_is_truncated() -> None:
     candidate = make_candidate(from_display="y" * 150)
-    built = prompt.build_candidate_payload(candidate, payload_id="c1")
+    built = prompt.build_candidate_payload(
+        candidate, payload_id="c1", fields=["from.display_name"]
+    )
     from_field = built.payload.fields["from"]
     assert isinstance(from_field, dict)
     assert len(from_field["display_name"]) == prompt.DISPLAY_NAME_CAP
@@ -79,7 +85,9 @@ def test_display_name_over_cap_is_truncated() -> None:
 
 def test_address_over_cap_is_truncated() -> None:
     candidate = make_candidate(from_address="a" * 250 + "@example.com")
-    built = prompt.build_candidate_payload(candidate, payload_id="c1")
+    built = prompt.build_candidate_payload(
+        candidate, payload_id="c1", fields=["from.address"]
+    )
     from_field = built.payload.fields["from"]
     assert isinstance(from_field, dict)
     assert len(from_field["address"]) == prompt.ADDRESS_CAP
@@ -88,7 +96,9 @@ def test_address_over_cap_is_truncated() -> None:
 
 def test_list_id_over_cap_is_truncated() -> None:
     candidate = make_candidate(list_id="l" * 250)
-    built = prompt.build_candidate_payload(candidate, payload_id="c1")
+    built = prompt.build_candidate_payload(
+        candidate, payload_id="c1", fields=["list_id"]
+    )
     list_id = built.payload.fields["list_id"]
     assert isinstance(list_id, str)
     assert len(list_id) == prompt.LIST_ID_CAP
@@ -98,7 +108,9 @@ def test_list_id_over_cap_is_truncated() -> None:
 def test_recipients_over_cap_overflow_into_cc_count() -> None:
     recipients = tuple(f"r{i}@example.com" for i in range(8))
     candidate = make_candidate(recipients=recipients, cc_count=1)
-    built = prompt.build_candidate_payload(candidate, payload_id="c1")
+    built = prompt.build_candidate_payload(
+        candidate, payload_id="c1", fields=["to", "cc_count"]
+    )
     to_field = built.payload.fields["to"]
     assert isinstance(to_field, list)
     assert len(to_field) == prompt.RECIPIENTS_CAP
@@ -109,7 +121,7 @@ def test_recipients_over_cap_overflow_into_cc_count() -> None:
 
 def test_recipients_under_cap_not_truncated() -> None:
     candidate = make_candidate(recipients=("a@example.com", "b@example.com"))
-    built = prompt.build_candidate_payload(candidate, payload_id="c1")
+    built = prompt.build_candidate_payload(candidate, payload_id="c1", fields=["to"])
     assert built.payload.fields["to"] == ["a@example.com", "b@example.com"]
     assert built.truncated is False
 
@@ -117,17 +129,72 @@ def test_recipients_under_cap_not_truncated() -> None:
 def test_recipient_address_itself_capped() -> None:
     long_addr = "z" * 250 + "@example.com"
     candidate = make_candidate(recipients=(long_addr,))
-    built = prompt.build_candidate_payload(candidate, payload_id="c1")
+    built = prompt.build_candidate_payload(candidate, payload_id="c1", fields=["to"])
     to_field = built.payload.fields["to"]
     assert isinstance(to_field, list)
     assert len(to_field[0]) == prompt.ADDRESS_CAP
     assert built.truncated is True
 
 
+def test_recipient_count_is_the_uncapped_total_distinct_from_cc_count() -> None:
+    recipients = tuple(f"r{i}@example.com" for i in range(8))
+    candidate = make_candidate(recipients=recipients, cc_count=1)
+    built = prompt.build_candidate_payload(
+        candidate, payload_id="c1", fields=["recipient_count"]
+    )
+    assert built.payload.fields["recipient_count"] == 8
+
+
+def test_size_field_is_rfc822_size() -> None:
+    candidate = make_candidate(rfc822_size=12345)
+    built = prompt.build_candidate_payload(candidate, payload_id="c1", fields=["size"])
+    assert built.payload.fields["size"] == 12345
+
+
+def test_new_header_derived_fields_pass_through() -> None:
+    candidate = make_candidate(
+        reply_to="reply@example.com",
+        sender="sender@example.com",
+        precedence="bulk",
+        has_feedback_id=True,
+        is_auto_submitted=True,
+        has_auto_response_suppress=True,
+        is_reply=True,
+        body_shape="both",
+    )
+    built = prompt.build_candidate_payload(
+        candidate,
+        payload_id="c1",
+        fields=[
+            "reply_to",
+            "sender",
+            "precedence",
+            "has_feedback_id",
+            "is_auto_submitted",
+            "has_auto_response_suppress",
+            "is_reply",
+            "body_shape",
+        ],
+    )
+    fields = built.payload.fields
+    assert fields["reply_to"] == "reply@example.com"
+    assert fields["sender"] == "sender@example.com"
+    assert fields["precedence"] == "bulk"
+    assert fields["has_feedback_id"] is True
+    assert fields["is_auto_submitted"] is True
+    assert fields["has_auto_response_suppress"] is True
+    assert fields["is_reply"] is True
+    assert fields["body_shape"] == "both"
+
+
 def test_excerpt_capped_at_max_chars() -> None:
     candidate = make_candidate()
     built = prompt.build_excerpt_payload(
-        candidate, payload_id="c1", excerpt_text="e" * 5000, max_chars=2000
+        candidate,
+        payload_id="c1",
+        fields=["excerpt"],
+        excerpt_text="e" * 5000,
+        max_chars=2000,
     )
     excerpt = built.payload.fields["excerpt"]
     assert isinstance(excerpt, str)
@@ -138,31 +205,87 @@ def test_excerpt_capped_at_max_chars() -> None:
 def test_excerpt_under_cap_not_truncated_and_metadata_fields_preserved() -> None:
     candidate = make_candidate(subject="short")
     built = prompt.build_excerpt_payload(
-        candidate, payload_id="c1", excerpt_text="short body text", max_chars=2000
+        candidate,
+        payload_id="c1",
+        fields=["subject", "excerpt"],
+        excerpt_text="short body text",
+        max_chars=2000,
     )
     assert built.payload.fields["excerpt"] == "short body text"
     assert built.payload.fields["subject"] == "short"
     assert built.truncated is False
 
 
-# --- Fixed metadata field set -----------------------------------------
-
-
-def test_metadata_field_set_is_exactly_fixed() -> None:
-    """The field set must be exactly what the specification lists -- no
-    dates, ages, or flags -- because it is what keeps the decision
-    cache's input_hash stable."""
+def test_html_field_is_raw_unstripped() -> None:
     candidate = make_candidate()
-    built = prompt.build_candidate_payload(candidate, payload_id="c1")
+    built = prompt.build_excerpt_payload(
+        candidate,
+        payload_id="c1",
+        fields=["html"],
+        html_text="<p>hi <b>there</b></p>",
+        max_chars=2000,
+    )
+    assert built.payload.fields["html"] == "<p>hi <b>there</b></p>"
+    assert "excerpt" not in built.payload.fields
+
+
+def test_body_field_with_no_text_supplied_is_omitted_not_emitted_empty() -> None:
+    """A selected body field with no text available this round (fetch
+    failed, or never attempted) is simply absent from the payload, not a
+    bogus empty string that a cache lookup could mistake for a real,
+    empty message body."""
+    candidate = make_candidate()
+    built = prompt.build_excerpt_payload(
+        candidate, payload_id="c1", fields=["excerpt", "html"], max_chars=2000
+    )
+    assert "excerpt" not in built.payload.fields
+    assert "html" not in built.payload.fields
+
+
+# --- Field selection ----------------------------------------------------
+
+
+def test_payload_contains_exactly_the_selected_fields() -> None:
+    """A processor's `fields:` selection is a full replace, and the
+    payload emits exactly those catalog names, nothing else -- because
+    it is what keeps the decision cache's input_hash meaningful."""
+    candidate = make_candidate()
+    built = prompt.build_candidate_payload(
+        candidate, payload_id="c1", fields=["subject", "mailbox", "has_attachment"]
+    )
+    assert set(built.payload.fields.keys()) == {"subject", "mailbox", "has_attachment"}
+
+
+def test_from_subkeys_present_only_when_selected() -> None:
+    candidate = make_candidate()
+    built = prompt.build_candidate_payload(
+        candidate, payload_id="c1", fields=["from.address"]
+    )
+    from_field = built.payload.fields["from"]
+    assert isinstance(from_field, dict)
+    assert set(from_field.keys()) == {"address"}
+
+
+def test_default_profile_field_set() -> None:
+    """The shipped default profile is exactly what the field-selection
+    contract specifies: `to` dropped, `has_feedback_id`/`reply_to`/
+    `has_attachment` added relative to the old fixed field set."""
+    candidate = make_candidate()
+    built = prompt.build_candidate_payload(
+        candidate, payload_id="c1", fields=list(prompt.DEFAULT_PROCESSOR_FIELDS)
+    )
     assert set(built.payload.fields.keys()) == {
         "from",
-        "to",
-        "cc_count",
         "subject",
         "mailbox",
         "list_id",
         "has_list_unsubscribe",
+        "has_feedback_id",
+        "reply_to",
+        "has_attachment",
+        "cc_count",
     }
+    assert "to" not in built.payload.fields
     from_field = built.payload.fields["from"]
     assert isinstance(from_field, dict)
     assert set(from_field.keys()) == {"address", "display_name"}
@@ -170,7 +293,11 @@ def test_metadata_field_set_is_exactly_fixed() -> None:
 
 def test_metadata_field_set_never_carries_dates_ages_or_flags() -> None:
     candidate = make_candidate(flags=frozenset({"\\Seen", "\\Flagged"}))
-    built = prompt.build_candidate_payload(candidate, payload_id="c1")
+    built = prompt.build_candidate_payload(
+        candidate,
+        payload_id="c1",
+        fields=sorted(prompt.FIELD_CATALOG - prompt.BODY_FIELDS),
+    )
     serialised = str(built.payload.fields)
     assert "internaldate" not in serialised
     assert "flags" not in built.payload.fields
@@ -178,21 +305,29 @@ def test_metadata_field_set_never_carries_dates_ages_or_flags() -> None:
     assert "\\Flagged" not in serialised
 
 
-def test_excerpt_payload_adds_exactly_one_field_to_the_fixed_set() -> None:
+def test_body_shape_selected_without_excerpt_does_not_need_excerpt_text() -> None:
+    """`body_shape` comes from `BODYSTRUCTURE` alone, already present on
+    every candidate from the scan phase -- selecting it must not require
+    (or trigger) a body fetch."""
+    candidate = make_candidate(body_shape="html_only")
+    built = prompt.build_candidate_payload(
+        candidate, payload_id="c1", fields=["subject", "body_shape"]
+    )
+    assert built.payload.fields["body_shape"] == "html_only"
+    assert "excerpt" not in built.payload.fields
+    assert "html" not in built.payload.fields
+
+
+def test_excerpt_payload_adds_exactly_the_selected_body_fields() -> None:
     candidate = make_candidate()
     built = prompt.build_excerpt_payload(
-        candidate, payload_id="c1", excerpt_text="hi", max_chars=100
+        candidate,
+        payload_id="c1",
+        fields=["subject", "excerpt"],
+        excerpt_text="hi",
+        max_chars=100,
     )
-    assert set(built.payload.fields.keys()) == {
-        "from",
-        "to",
-        "cc_count",
-        "subject",
-        "mailbox",
-        "list_id",
-        "has_list_unsubscribe",
-        "excerpt",
-    }
+    assert set(built.payload.fields.keys()) == {"subject", "excerpt"}
 
 
 # --- Input hash stability ---------------------------------------------
@@ -201,8 +336,8 @@ def test_excerpt_payload_adds_exactly_one_field_to_the_fixed_set() -> None:
 def test_input_hash_stable_for_identical_content() -> None:
     c1 = make_candidate(subject="same subject", uid=1)
     c2 = make_candidate(subject="same subject", uid=2)
-    built1 = prompt.build_candidate_payload(c1, payload_id="c1")
-    built2 = prompt.build_candidate_payload(c2, payload_id="c9")
+    built1 = prompt.build_candidate_payload(c1, payload_id="c1", fields=["subject"])
+    built2 = prompt.build_candidate_payload(c2, payload_id="c9", fields=["subject"])
     # payload_id does not participate in the hash: only the
     # capped/sanitised field content, input level, and truncation flag.
     assert built1.input_hash == built2.input_hash
@@ -211,16 +346,22 @@ def test_input_hash_stable_for_identical_content() -> None:
 def test_input_hash_changes_when_content_differs() -> None:
     c1 = make_candidate(subject="subject A")
     c2 = make_candidate(subject="subject B")
-    built1 = prompt.build_candidate_payload(c1, payload_id="c1")
-    built2 = prompt.build_candidate_payload(c2, payload_id="c1")
+    built1 = prompt.build_candidate_payload(c1, payload_id="c1", fields=["subject"])
+    built2 = prompt.build_candidate_payload(c2, payload_id="c1", fields=["subject"])
     assert built1.input_hash != built2.input_hash
 
 
 def test_input_hash_changes_when_input_level_differs() -> None:
     candidate = make_candidate()
-    meta = prompt.build_candidate_payload(candidate, payload_id="c1")
+    meta = prompt.build_candidate_payload(
+        candidate, payload_id="c1", fields=["subject"]
+    )
     excerpt = prompt.build_excerpt_payload(
-        candidate, payload_id="c1", excerpt_text="", max_chars=100
+        candidate,
+        payload_id="c1",
+        fields=["subject", "excerpt"],
+        excerpt_text="",
+        max_chars=100,
     )
     assert meta.input_hash != excerpt.input_hash
 
@@ -243,12 +384,15 @@ def test_truncated_and_untruncated_candidate_with_same_final_field_differ() -> N
     """A subject that lands exactly on the cap boundary (not truncated)
     must hash differently from a candidate whose *capped* subject is
     identical but which was truncated to get there -- otherwise the
-    truncation event is invisible to a cache lookup, which is exactly
-    the case section 5.2 requires to be visible."""
+    truncation event would be invisible to a cache lookup."""
     exact = make_candidate(subject="s" * prompt.SUBJECT_CAP)
     over = make_candidate(subject="s" * (prompt.SUBJECT_CAP + 1))
-    built_exact = prompt.build_candidate_payload(exact, payload_id="c1")
-    built_over = prompt.build_candidate_payload(over, payload_id="c1")
+    built_exact = prompt.build_candidate_payload(
+        exact, payload_id="c1", fields=["subject"]
+    )
+    built_over = prompt.build_candidate_payload(
+        over, payload_id="c1", fields=["subject"]
+    )
     assert built_exact.payload.fields["subject"] == built_over.payload.fields["subject"]
     assert built_exact.truncated is False
     assert built_over.truncated is True
@@ -308,6 +452,38 @@ def test_processor_hash_ignores_name() -> None:
     surrounding cache key, not the definition hash)."""
     a = _choice_processor(name="spam-category")
     b = _choice_processor(name="renamed")
+    assert prompt.compute_processor_hash(a) == prompt.compute_processor_hash(b)
+
+
+def test_processor_hash_changes_when_fields_selection_edited() -> None:
+    """An edited `fields:` selection means the model saw different input,
+    so it must invalidate the processor's cached decisions same as an
+    edited `instructions`/`criteria` does."""
+    a = OfferedProcessor(
+        name="vibe-check", type="noul", instructions="junk?", fields=("subject",)
+    )
+    b = OfferedProcessor(
+        name="vibe-check",
+        type="noul",
+        instructions="junk?",
+        fields=("subject", "mailbox"),
+    )
+    assert prompt.compute_processor_hash(a) != prompt.compute_processor_hash(b)
+
+
+def test_processor_hash_ignores_fields_order() -> None:
+    a = OfferedProcessor(
+        name="vibe-check",
+        type="noul",
+        instructions="junk?",
+        fields=("subject", "mailbox"),
+    )
+    b = OfferedProcessor(
+        name="vibe-check",
+        type="noul",
+        instructions="junk?",
+        fields=("mailbox", "subject"),
+    )
     assert prompt.compute_processor_hash(a) == prompt.compute_processor_hash(b)
 
 

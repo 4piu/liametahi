@@ -311,8 +311,7 @@ def test_response_content_is_passed_through_to_structural_parser_unvalidated() -
     """The adapter must not perform semantic validation itself -- an
     unoffered processor name, or a value outside the declared vocabulary,
     must survive intact into the returned `ClassifyOutcome`, because
-    rejecting it is `evaluate.py`'s job, not the adapter's (contracts
-    section 5.3)."""
+    rejecting it is `evaluate.py`'s job, not the adapter's."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

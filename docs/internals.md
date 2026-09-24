@@ -52,38 +52,37 @@ recorded as successfully moved.
 
 ## What a model sees
 
-Every candidate a processor is asked about carries exactly the same fixed
-field set by default, regardless of provider — jev's `state` and the
-chat-compiled request both carry the identical payload, and no rule or
-processor can add to it:
+A processor's own `fields:` config names exactly which candidate metadata
+its requests carry, drawn from a fixed catalog (see
+[docs/configuration.md](configuration.md#reading-the-message-body) for the
+full field-by-field list and types) — no rule or processor can add a field
+outside that catalog. Regardless of provider, jev's `state` and the
+chat-compiled request carry the identical payload for a given field
+selection: `from.address` is capped at 200 characters, `from.display_name`
+at 100, `subject`/`list_id` at 200, up to 5 deduplicated recipient
+addresses in `to` (each capped at 200, with any overflow folded into
+`cc_count` rather than dropped silently). No date, age, or flag is ever in
+the catalog at all — a processor never learns *why* a message aged into
+scope, only what it looks like.
 
-| Field | Content |
-| --- | --- |
-| `from.address` | Sender address, capped at 200 characters |
-| `from.display_name` | Sender display name, capped at 100 characters |
-| `to` | Up to 5 recipient addresses (`To`/`Cc`/`Delivered-To`/`X-Original-To`, deduplicated), each capped at 200 characters |
-| `cc_count` | Recipient count beyond the 5 shown in `to`, folded in rather than dropped silently |
-| `subject` | Capped at 200 characters |
-| `mailbox` | The source mailbox name |
-| `list_id` | The `List-Id` header value, capped at 200 characters |
-| `has_list_unsubscribe` | Boolean: whether a `List-Unsubscribe` header is present |
-
-That's the complete set — no dates, ages, or flags (a processor never learns
-*why* a message aged into scope, only what it looks like). Setting
-`include_body: true` on a processor adds exactly one more field to *that
-processor's* requests, nothing else:
-
-| Field | Content |
-| --- | --- |
-| `excerpt` | Plain-text body excerpt (HTML stripped, quoted history and signatures removed), capped at `models.<name>.body_excerpt.max_chars` if set, otherwise uncapped |
+Selecting `excerpt` adds a plain-text body excerpt (HTML stripped, quoted
+history and signatures removed); selecting `html` adds the raw, unstripped
+`text/html` part instead. Both are capped at
+`models.<name>.body_excerpt.max_chars` if set, otherwise uncapped, and are
+the only two fields that trigger the extra per-candidate body fetch — every
+other field, including `body_shape` (`both`/`html_only`/`plain_only`/
+`neither`, derived from the same `BODYSTRUCTURE` data the has-attachment
+heuristic already uses), comes from the scan phase's existing metadata
+fetch.
 
 Every value that originates from message content is sanitised before being
 serialised — C0/C1 control characters, zero-width characters, and
 bidirectional-override characters stripped; newlines collapsed to a single
-space — regardless of the cap. The full field set, plus whether any value
-was truncated by a cap, participates in the decision cache's key, so
-tightening or loosening a cap invalidates previously-cached answers rather
-than silently reusing one computed against different-shaped input.
+space — regardless of the cap. The resolved field selection, its content,
+and whether any value was truncated by a cap all participate in the
+decision cache's key, so editing a processor's `fields:` list, tightening
+or loosening a cap, invalidates previously-cached answers rather than
+silently reusing one computed against different-shaped input.
 
 ## Why each safety rule exists
 

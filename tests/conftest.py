@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 import yaml
 
-from liametahi.domain import Candidate, MessageKey
+from liametahi.domain import BodyShape, Candidate, MessageKey
 
 # A minimal, fully valid config as a plain dict — mutate/deep-copy per test
 # rather than re-typing the whole structure each time.
@@ -93,6 +93,14 @@ def make_candidate(
     has_list_unsubscribe: bool = False,
     has_attachment: bool = False,
     auth_results: str | None = None,
+    reply_to: str | None = None,
+    sender: str | None = None,
+    precedence: str | None = None,
+    has_feedback_id: bool = False,
+    is_auto_submitted: bool = False,
+    has_auto_response_suppress: bool = False,
+    is_reply: bool = False,
+    body_shape: BodyShape = "neither",
 ) -> Candidate:
     return Candidate(
         key=MessageKey(account_id, mailbox, uidvalidity, uid),
@@ -111,6 +119,14 @@ def make_candidate(
         has_list_unsubscribe=has_list_unsubscribe,
         has_attachment=has_attachment,
         auth_results=auth_results,
+        reply_to=reply_to,
+        sender=sender,
+        precedence=precedence,
+        has_feedback_id=has_feedback_id,
+        is_auto_submitted=is_auto_submitted,
+        has_auto_response_suppress=has_auto_response_suppress,
+        is_reply=is_reply,
+        body_shape=body_shape,
     )
 
 

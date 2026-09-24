@@ -38,7 +38,23 @@ processors:
   spam-review:
     model: local
     type: noul
-    include_body: true
+    # The default profile plus `excerpt`, written out in full: `fields:`
+    # is a full replace, not a merge, so extending the default by one
+    # field means listing all of it plus the addition.
+    fields:
+      [
+        from.address,
+        from.display_name,
+        subject,
+        mailbox,
+        list_id,
+        has_list_unsubscribe,
+        has_feedback_id,
+        reply_to,
+        has_attachment,
+        cc_count,
+        excerpt,
+      ]
     instructions: "Is this message spam: unsolicited bulk mail, phishing, or a scam?"
     criteria:
       "true": "This message is spam: unsolicited bulk mail, phishing, or a scam."

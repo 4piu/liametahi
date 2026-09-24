@@ -1,12 +1,12 @@
-"""Tests for the `include_body` processor path.
+"""Tests for the `excerpt`/`html` field-selecting processor path.
 
 This replaces the old dynamic "the model reports unsure,
 fetch a body excerpt and re-ask" escalation with a static per-processor
-switch: `include_body: true` means this processor's request always
-carries a body excerpt, decided purely from which processors a
-still-undecided rule references (`runner._candidates_needing_excerpt`),
-never from a model response. There is no `needs_content`/"unsure"
-concept left at all.
+choice: a processor whose resolved `fields` selection includes `excerpt`
+(or `html`) always carries that body text in its request, decided purely
+from which processors a still-undecided rule references
+(`runner._candidates_needing_excerpt`), never from a model response.
+There is no `needs_content`/"unsure" concept left at all.
 """
 
 from datetime import UTC, datetime
@@ -35,7 +35,7 @@ def _config_with_state(tmp_path: Path) -> Path:
         "maybe-archive": {
             "model": "local",
             "type": "noul",
-            "include_body": True,
+            "fields": ["excerpt"],
             "instructions": "should this be archived?",
         },
     }
@@ -189,3 +189,175 @@ def test_a_failed_classify_call_is_not_cached(tmp_path: Path) -> None:
         assert cached["c"] == 0, "a failed call must never be cached as a decision"
     finally:
         state.close_database(conn)
+
+
+class _FetchCountingMailbox(FakeMailbox):
+    """Wraps `fetch_raw` to count calls -- `FakeMailbox`'s own
+    `mutation_log` only records mutations (`move`/`add_keyword`/`append`),
+    not this read, so this is the simplest way to assert "no body fetch
+    was triggered" for a `body_shape`-only field selection."""
+
+    fetch_raw_calls: int = 0
+
+    def fetch_raw(self, uid: int) -> bytes:
+        self.fetch_raw_calls += 1
+        return super().fetch_raw(uid)
+
+
+def _config_with_body_shape_only(tmp_path: Path) -> Path:
+    data = make_config_dict()
+    data["settings"] = {
+        "log_level": "info",
+        "state_db": str(tmp_path / "state.sqlite3"),
+        "backup_dir": str(tmp_path / "backups"),
+        "task_lock_dir": str(tmp_path / "locks"),
+    }
+    data["processors"] = {
+        "maybe-archive": {
+            "model": "local",
+            "type": "noul",
+            "fields": ["subject", "body_shape"],
+            "instructions": "should this be archived?",
+        },
+    }
+    data["tasks"]["inbox-cleanup"]["rules"][0] = {
+        "when": [{"processor": "maybe-archive.value >= 0.5"}],
+        "actions": ["move_to:Archive"],
+    }
+    return write_config(tmp_path / "cfg.yaml", data)
+
+
+def test_body_shape_selected_without_excerpt_never_fetches_the_body(
+    tmp_path: Path,
+) -> None:
+    """`body_shape` is derived from `BODYSTRUCTURE` alone, already present
+    on every candidate from the scan phase -- selecting it (without also
+    selecting `excerpt`/`html`) must never trigger the extra per-candidate
+    `BODY.PEEK[]` fetch."""
+    path = _config_with_body_shape_only(tmp_path)
+    cfg = load_config(path)
+
+    raw = (
+        "From: sender@example.com\r\n"
+        "To: me@example.com\r\n"
+        "Subject: Weekly Digest\r\n"
+        f"Message-Id: {MESSAGE_ID}\r\n"
+        "Date: Mon, 1 Jun 2026 08:00:00 +0000\r\n"
+        "\r\n"
+        "body text\r\n"
+    ).encode()
+    mailbox = _FetchCountingMailbox(
+        messages=[
+            _StoredMessage(
+                uid=1,
+                raw=raw,
+                flags=set(),
+                internaldate=datetime(2026, 6, 1, tzinfo=UTC),
+                mailbox="INBOX",
+            )
+        ],
+        uidvalidity={"INBOX": 1000, "Archive": 1000},
+    )
+    clf = FakeClassifier(
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"maybe-archive": ProcessorAnswer(1.0, None)}}
+            )
+        ]
+    )
+
+    runner_mod.run_task(
+        config=cfg,
+        config_path=path,
+        task_name="inbox-cleanup",
+        dry_run=True,
+        fail_fast=False,
+        reevaluate=False,
+        wait_seconds=0.0,
+        mailbox_factory=lambda account_cfg: mailbox,
+        classifier_factory=lambda model_cfg: clf,
+    )
+
+    assert clf.call_count == 1
+    payloads, _processors = clf.calls[0]
+    assert "body_shape" in payloads[0].fields
+    assert "excerpt" not in payloads[0].fields
+    assert "html" not in payloads[0].fields
+    assert mailbox.fetch_raw_calls == 0, "body_shape alone must not fetch the body"
+
+
+def test_html_field_selection_gets_the_raw_html_fetched_up_front(
+    tmp_path: Path,
+) -> None:
+    """`html` is the raw-HTML counterpart of `excerpt`: also a body field,
+    also fetched up front via the same static per-processor mechanism."""
+    data = make_config_dict()
+    data["settings"] = {
+        "log_level": "info",
+        "state_db": str(tmp_path / "state.sqlite3"),
+        "backup_dir": str(tmp_path / "backups"),
+        "task_lock_dir": str(tmp_path / "locks"),
+    }
+    data["processors"] = {
+        "maybe-archive": {
+            "model": "local",
+            "type": "noul",
+            "fields": ["html"],
+            "instructions": "should this be archived?",
+        },
+    }
+    data["tasks"]["inbox-cleanup"]["rules"][0] = {
+        "when": [{"processor": "maybe-archive.value >= 0.5"}],
+        "actions": ["move_to:Archive"],
+    }
+    path = write_config(tmp_path / "cfg.yaml", data)
+    cfg = load_config(path)
+
+    raw = (
+        "From: sender@example.com\r\n"
+        "To: me@example.com\r\n"
+        "Subject: Weekly Digest\r\n"
+        f"Message-Id: {MESSAGE_ID}\r\n"
+        "Date: Mon, 1 Jun 2026 08:00:00 +0000\r\n"
+        'Content-Type: text/html; charset="utf-8"\r\n'
+        "\r\n"
+        "<p>hello</p>\r\n"
+    ).encode()
+    mailbox = FakeMailbox(
+        messages=[
+            _StoredMessage(
+                uid=1,
+                raw=raw,
+                flags=set(),
+                internaldate=datetime(2026, 6, 1, tzinfo=UTC),
+                mailbox="INBOX",
+            )
+        ],
+        uidvalidity={"INBOX": 1000, "Archive": 1000},
+    )
+    clf = FakeClassifier(
+        [
+            outcome_with_answers(
+                answers_by_payload={"c1": {"maybe-archive": ProcessorAnswer(1.0, None)}}
+            )
+        ]
+    )
+
+    runner_mod.run_task(
+        config=cfg,
+        config_path=path,
+        task_name="inbox-cleanup",
+        dry_run=True,
+        fail_fast=False,
+        reevaluate=False,
+        wait_seconds=0.0,
+        mailbox_factory=lambda account_cfg: mailbox,
+        classifier_factory=lambda model_cfg: clf,
+    )
+
+    assert clf.call_count == 1
+    payloads, _processors = clf.calls[0]
+    html_field = payloads[0].fields.get("html")
+    assert isinstance(html_field, str)
+    assert html_field.strip() == "<p>hello</p>"
+    assert "excerpt" not in payloads[0].fields

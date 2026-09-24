@@ -26,7 +26,7 @@ from email.utils import getaddresses, parseaddr
 from typing import Protocol
 
 from liametahi import state
-from liametahi.domain import Candidate, MessageKey, fingerprint
+from liametahi.domain import BodyShape, Candidate, MessageKey, fingerprint
 from liametahi.logging import get_logger
 from liametahi.progress import NullProgress, Progress
 
@@ -75,6 +75,7 @@ class RawMetadata:
     flags: frozenset[str]
     headers: Mapping[str, tuple[str, ...]]  # lowercased name -> all values
     has_attachment: bool  # derived from BODYSTRUCTURE
+    body_shape: BodyShape  # derived from BODYSTRUCTURE, no body fetch
 
 
 class MailboxAdapter(Protocol):
@@ -317,6 +318,62 @@ def _bodystructure_has_attachment(line: bytes) -> bool:
     return any(token.upper() in _ATTACHMENT_MARKER_TOKENS for token in tokens)
 
 
+def _leaf_body_type_pairs(value: object) -> list[tuple[str, str]]:
+    """Walk a parsed `BODYSTRUCTURE` value collecting every leaf part's
+    (type, subtype) pair, uppercased.
+
+    RFC 3501 §7.4.2's grammar makes the two shapes distinguishable
+    structurally, with no need to understand the rest of either grammar:
+    a *non-multipart* part's list always starts with two bare/quoted
+    strings (media type, then subtype); a *multipart* part's list always
+    starts with one or more nested lists (one per child part), followed
+    by a single trailing subtype atom. So "is the first element itself a
+    list" is enough to tell which shape this list is and recurse
+    accordingly -- this correctly finds a `text/plain` or `text/html`
+    part however deeply it is nested inside `multipart/mixed`,
+    `multipart/alternative`, etc."""
+    if not isinstance(value, list) or not value:
+        return []
+    first = value[0]
+    if isinstance(first, list):
+        pairs: list[tuple[str, str]] = []
+        for item in value:
+            if isinstance(item, list):
+                pairs.extend(_leaf_body_type_pairs(item))
+        return pairs
+    if isinstance(first, str) and len(value) >= 2 and isinstance(value[1], str):
+        return [(first.upper(), value[1].upper())]
+    return []
+
+
+def _bodystructure_body_shape(line: bytes) -> BodyShape:
+    """Whether a `text/plain` and/or `text/html` part is present anywhere
+    in the message's `BODYSTRUCTURE`. `"neither"` if `BODYSTRUCTURE ` is
+    absent from `line`, or parsing fails for any reason -- never raises,
+    same defensive fallback `_bodystructure_has_attachment` uses."""
+    start = _find_bodystructure_value_start(line)
+    if start is None:
+        return "neither"
+    cursor = _Cursor(line, start)
+    _skip_ws(cursor)
+    if cursor.pos >= len(cursor.data) or cursor.peek() != b"(":
+        return "neither"
+    try:
+        parsed = _parse_list(cursor)
+    except _BodystructureParseError:
+        return "neither"
+    pairs = _leaf_body_type_pairs(parsed)
+    has_plain = ("TEXT", "PLAIN") in pairs
+    has_html = ("TEXT", "HTML") in pairs
+    if has_plain and has_html:
+        return "both"
+    if has_html:
+        return "html_only"
+    if has_plain:
+        return "plain_only"
+    return "neither"
+
+
 def _parse_fetch_line(line: bytes, literal: bytes) -> RawMetadata | None:
     """Parse one `(line, literal)` element of an `imaplib` FETCH response
     into a `RawMetadata`. Returns `None` if the line does not look like a
@@ -335,6 +392,7 @@ def _parse_fetch_line(line: bytes, literal: bytes) -> RawMetadata | None:
     )
     headers = _parse_header_literal(literal)
     has_attachment = _bodystructure_has_attachment(line)
+    body_shape = _bodystructure_body_shape(line)
     return RawMetadata(
         uid=int(uid_match.group(1)),
         internaldate=_parse_internaldate(date_match.group(1)),
@@ -342,6 +400,7 @@ def _parse_fetch_line(line: bytes, literal: bytes) -> RawMetadata | None:
         flags=flags,
         headers=headers,
         has_attachment=has_attachment,
+        body_shape=body_shape,
     )
 
 
@@ -721,6 +780,14 @@ def normalize(
     )
     has_list_unsubscribe = "list-unsubscribe" in raw.headers
 
+    reply_to = _first(raw.headers, "reply-to")
+    sender = _first(raw.headers, "sender")
+    precedence = _first(raw.headers, "precedence")
+    has_feedback_id = "feedback-id" in raw.headers
+    is_auto_submitted = "auto-submitted" in raw.headers
+    has_auto_response_suppress = "x-auto-response-suppress" in raw.headers
+    is_reply = "in-reply-to" in raw.headers or "references" in raw.headers
+
     fp = fingerprint(
         message_id=message_id,
         internaldate=raw.internaldate,
@@ -748,6 +815,14 @@ def normalize(
         has_list_unsubscribe=has_list_unsubscribe,
         has_attachment=raw.has_attachment,
         auth_results=_first(raw.headers, "authentication-results"),
+        reply_to=reply_to,
+        sender=sender,
+        precedence=precedence,
+        has_feedback_id=has_feedback_id,
+        is_auto_submitted=is_auto_submitted,
+        has_auto_response_suppress=has_auto_response_suppress,
+        is_reply=is_reply,
+        body_shape=raw.body_shape,
     )
 
 

@@ -125,7 +125,9 @@ def test_acceptance_16_cached_non_match_reevaluate_and_edit_semantics(
     assert result_1.status == "no_match"
     processor_hash_v1 = _processor_hash(config_v1)
     metadata_input_hash = prompt.build_candidate_payload(
-        cand, payload_id="c0"
+        cand,
+        payload_id="c0",
+        fields=config_v1.processors["stale-updates"].resolved_fields,
     ).input_hash
     assert (
         state.get_cached_processor_decision(

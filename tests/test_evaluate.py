@@ -145,7 +145,11 @@ def _processor_hash(config: Config, name: str) -> str:
 
 
 def _metadata_hash(candidate: object) -> str:
-    return prompt.build_candidate_payload(candidate, payload_id="c0").input_hash  # type: ignore[arg-type]
+    return prompt.build_candidate_payload(
+        candidate,  # type: ignore[arg-type]
+        payload_id="c0",
+        fields=prompt.DEFAULT_PROCESSOR_FIELDS,
+    ).input_hash
 
 
 # =========================================================================

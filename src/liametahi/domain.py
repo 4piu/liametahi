@@ -6,6 +6,12 @@ Frozen dataclasses for internal domain values. No I/O in this module.
 import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
+
+#: A candidate's body shape, derived from `BODYSTRUCTURE` at scan time
+#: (no body fetch needed): whether a `text/plain` and/or `text/html` part
+#: is present anywhere in the message structure.
+BodyShape = Literal["both", "html_only", "plain_only", "neither"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +52,14 @@ class Candidate:
     has_list_unsubscribe: bool
     has_attachment: bool
     auth_results: str | None  # topmost Authentication-Results value only
+    reply_to: str | None
+    sender: str | None  # `Sender` header, RFC 5322 -- distinct from `From`
+    precedence: str | None  # raw `Precedence` header value (bulk/list/junk/...)
+    has_feedback_id: bool  # `Feedback-ID` presence (opaque ESP token)
+    is_auto_submitted: bool  # `Auto-Submitted` presence (RFC 3834)
+    has_auto_response_suppress: bool  # `X-Auto-Response-Suppress` presence
+    is_reply: bool  # `In-Reply-To` or `References` presence
+    body_shape: BodyShape
 
 
 def fingerprint(
