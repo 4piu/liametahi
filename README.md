@@ -34,7 +34,8 @@ tasks:
 ## Install
 
 Needs Python ≥ 3.14, [`uv`](https://docs.astral.sh/uv/), an IMAP account, and
-a model endpoint — an OpenAI-compatible chat API, Anthropic, or `jev`.
+a model endpoint — an OpenAI-compatible chat API, Anthropic, or a
+Jev-compatible API.
 
 ```sh
 uv tool install liametahi
