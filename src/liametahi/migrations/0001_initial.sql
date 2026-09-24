@@ -45,7 +45,8 @@ CREATE TABLE candidates (
   has_attachment       INTEGER NOT NULL DEFAULT 0,
   auth_results         TEXT,               -- prunable; topmost header value only
   first_seen_at        TEXT    NOT NULL,
-  content_pruned_at    TEXT,
+  retired_at           TEXT,
+  retired_reason       TEXT,
   UNIQUE (account_id, mailbox, uidvalidity, uid)
 );
 CREATE INDEX idx_candidates_fingerprint
@@ -69,7 +70,7 @@ CREATE TABLE runs (
   ended_at               TEXT,
   exit_code              INTEGER,
   candidates_scanned     INTEGER NOT NULL DEFAULT 0,
-  llm_calls              INTEGER NOT NULL DEFAULT 0,
+  model_calls            INTEGER NOT NULL DEFAULT 0,
   input_tokens           INTEGER,
   output_tokens          INTEGER
 );
@@ -87,32 +88,34 @@ CREATE TABLE result_items (
 );
 
 CREATE TABLE classifications (
-  classification_id INTEGER PRIMARY KEY,
-  run_id        TEXT    NOT NULL REFERENCES runs(run_id),
-  candidate_id  INTEGER NOT NULL REFERENCES candidates(candidate_id),
-  input_level   TEXT    NOT NULL,          -- metadata|excerpt
-  input_hash    TEXT    NOT NULL,
-  offered_rules TEXT    NOT NULL,          -- JSON array of rule ids
-  matches       TEXT    NOT NULL,          -- JSON array of rule ids
-  needs_content INTEGER NOT NULL DEFAULT 0,
-  reason        TEXT,                      -- audit only, never read by policy
-  valid         INTEGER NOT NULL,
-  error         TEXT,
-  latency_ms    INTEGER,
-  created_at    TEXT    NOT NULL
+  classification_id  INTEGER PRIMARY KEY,
+  run_id              TEXT    NOT NULL REFERENCES runs(run_id),
+  candidate_id        INTEGER NOT NULL REFERENCES candidates(candidate_id),
+  input_level         TEXT    NOT NULL,          -- metadata|excerpt
+  input_hash          TEXT    NOT NULL,
+  offered_processors  TEXT    NOT NULL,          -- JSON array of processor names
+  processor_answers   TEXT    NOT NULL,          -- JSON {name: {value, confidence}}
+  reason              TEXT,                       -- audit only, never read by policy
+  valid               INTEGER NOT NULL,
+  error               TEXT,
+  latency_ms          INTEGER,
+  created_at          TEXT    NOT NULL
 );
 
-CREATE TABLE llm_decision_cache (
-  account_id     INTEGER NOT NULL REFERENCES accounts(account_id),
-  fingerprint    TEXT    NOT NULL,
-  rule_id        TEXT    NOT NULL,
-  rule_text_hash TEXT    NOT NULL,
-  input_hash     TEXT    NOT NULL,
-  model_id       TEXT    NOT NULL,
-  decided_at     TEXT    NOT NULL,
-  PRIMARY KEY (account_id, fingerprint, rule_id, rule_text_hash, input_hash)
+CREATE TABLE processor_decision_cache (
+  account_id      INTEGER NOT NULL REFERENCES accounts(account_id),
+  fingerprint     TEXT    NOT NULL,
+  processor_name  TEXT    NOT NULL,
+  processor_hash  TEXT    NOT NULL,
+  input_hash      TEXT    NOT NULL,
+  model_id        TEXT    NOT NULL,
+  prompt_version  INTEGER NOT NULL,
+  decided_at      TEXT    NOT NULL,
+  value_json      TEXT    NOT NULL,
+  confidence      REAL,
+  PRIMARY KEY (account_id, fingerprint, processor_name, processor_hash,
+               input_hash, model_id, prompt_version)
 );
--- non-matches only; a match is never cached
 
 CREATE TABLE key_claims (
   account_id  INTEGER NOT NULL,
@@ -167,6 +170,14 @@ CREATE TABLE action_attempts (
 );
 CREATE INDEX idx_actions_open ON action_attempts(state)
   WHERE state IN ('pending', 'in_flight');
+
+CREATE TABLE task_routes (
+  account_id   INTEGER NOT NULL REFERENCES accounts(account_id),
+  fingerprint  TEXT    NOT NULL,
+  target_task  TEXT    NOT NULL,
+  routed_at    TEXT    NOT NULL,
+  PRIMARY KEY (account_id, fingerprint, target_task)
+);
 
 CREATE TABLE audit_events (
   event_id INTEGER PRIMARY KEY,

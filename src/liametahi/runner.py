@@ -1080,13 +1080,6 @@ def _strip_html(html: str) -> str:
     return unescape(text)
 
 
-# --- Candidate content retention --------------------------------------------
-#
-# No other module calls `state.prune_candidate_content`; it is run-time
-# housekeeping with no natural owner among Units 1-4's phase callables,
-# so it is invoked once per run here.
-
-
 # --- `config check --connect` -----------------------------------------------
 
 

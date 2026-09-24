@@ -26,7 +26,7 @@ from liametahi import rules
 from liametahi.domain import Candidate, MessageKey
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
-_LATEST_SCHEMA_VERSION = 6
+_LATEST_SCHEMA_VERSION = 1
 
 _CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
 
@@ -1025,14 +1025,15 @@ def fingerprints_with_completed_destructive_action(
     action (`trash` or `move_to:*` -- never `label:*` or `backup`) from
     some run other than `exclude_run_id`.
 
-    The cache key `(account_id, fingerprint, rule_id, rule_text_hash,
-    input_hash)` is stable across a move (`fingerprint` survives it by
-    design), so restoring a trashed message back to a source
-    mailbox re-scans it under a new UID/mailbox and can hit a cached
-    positive decision -- re-trashing it with no model call and no signal
-    to the user. `runner.py` calls this once per run, batched over every
-    candidate about to be offered a winning rule, rather than per
-    candidate, and reports a hit as `restored` instead of executing it.
+    The cache key `(account_id, fingerprint, processor_name, processor_hash,
+    input_hash, model_id, prompt_version)` is stable across a move
+    (`fingerprint` survives it by design), so restoring a trashed message
+    back to a source mailbox re-scans it under a new UID/mailbox and can
+    hit a cached positive decision -- re-trashing it with no model call
+    and no signal to the user. `runner.py` calls this once per run,
+    batched over every candidate about to be offered a winning rule,
+    rather than per candidate, and reports a hit as `restored` instead
+    of executing it.
     """
     if not fingerprints:
         return set()

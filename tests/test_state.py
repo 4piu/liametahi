@@ -60,7 +60,7 @@ def test_open_database_creates_all_tables(tmp_path: Path) -> None:
         version_row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 6
+        assert version_row["v"] == 1
     finally:
         state.close_database(conn)
 
@@ -72,7 +72,7 @@ def test_reopening_database_is_idempotent(tmp_path: Path) -> None:
     conn2 = state.open_database(db_path)  # must not re-run already-applied migrations
     try:
         count = conn2.execute("SELECT COUNT(*) AS c FROM schema_version").fetchone()
-        assert count["c"] == 6
+        assert count["c"] == 1
     finally:
         state.close_database(conn2)
 
@@ -88,82 +88,6 @@ def test_newer_schema_version_raises_clear_error(tmp_path: Path) -> None:
 
     with pytest.raises(state.SchemaVersionError):
         state.open_database(db_path)
-
-
-def test_migrations_upgrade_a_v2_database_in_place(tmp_path: Path) -> None:
-    """Build a v2 database directly from
-    the migration files (mirroring the ad-hoc check used for migration
-    0002), open it through `state.open_database`, and confirm it lands
-    on the latest schema version with `retired_at`/`retired_reason`
-    added (migration 0003) and every pre-existing row's data intact."""
-    db_path = tmp_path / "state.sqlite3"
-    migrations_dir = Path(state.__file__).parent / "migrations"
-    raw = sqlite3.connect(str(db_path))
-    try:
-        raw.execute("PRAGMA foreign_keys = ON")
-        for name in ("0001_initial.sql", "0002_llm_decision_cache_matched.sql"):
-            raw.executescript((migrations_dir / name).read_text(encoding="utf-8"))
-        now = datetime.now(UTC).isoformat()
-        raw.execute(
-            "INSERT INTO schema_version (version, applied_at) VALUES (1, ?)", (now,)
-        )
-        raw.execute(
-            "INSERT INTO schema_version (version, applied_at) VALUES (2, ?)", (now,)
-        )
-        raw.execute(
-            "INSERT INTO accounts (name, host, username, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("personal", "imap.example.com", "me@example.com", now),
-        )
-        account_id = raw.execute(
-            "SELECT account_id FROM accounts WHERE name = 'personal'"
-        ).fetchone()[0]
-        raw.execute(
-            """
-            INSERT INTO candidates (
-                account_id, mailbox, uidvalidity, uid, fingerprint, message_id,
-                internaldate, rfc822_size, flags, headers_present, from_address,
-                from_display, recipients, cc_count, subject, list_id,
-                has_list_unsubscribe, has_attachment, auth_results, first_seen_at
-            ) VALUES (?, 'INBOX', 1000, 1, 'fp-preexisting', '<x@example.com>',
-                '2026-06-01T00:00:00Z', 1024, '[]', '[]', 'sender@example.com',
-                'Sender', '[]', 0, 'Pre-migration subject', NULL, 0, 0, NULL, ?)
-            """,
-            (account_id, now),
-        )
-        raw.commit()
-    finally:
-        raw.close()
-
-    conn = state.open_database(db_path)
-    try:
-        version_row = conn.execute(
-            "SELECT MAX(version) AS v FROM schema_version"
-        ).fetchone()
-        assert version_row["v"] == 6
-
-        row = conn.execute(
-            "SELECT candidate_id, fingerprint, subject, from_address, "
-            "retired_at, retired_reason FROM candidates WHERE uid = 1"
-        ).fetchone()
-        assert row["fingerprint"] == "fp-preexisting"
-        assert row["subject"] == "Pre-migration subject"
-        assert row["from_address"] == "sender@example.com"
-        assert row["retired_at"] is None
-        assert row["retired_reason"] is None
-
-        # The upgraded row participates normally in the new schema's
-        # functions.
-        state.retire_candidate(
-            conn, candidate_id=int(row["candidate_id"]), reason="moved"
-        )
-        retired_row = conn.execute(
-            "SELECT retired_at, retired_reason FROM candidates WHERE uid = 1"
-        ).fetchone()
-        assert retired_row["retired_at"] is not None
-        assert retired_row["retired_reason"] == "moved"
-    finally:
-        state.close_database(conn)
 
 
 def test_audit_events_are_append_only(tmp_path: Path) -> None:
