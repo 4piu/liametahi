@@ -37,9 +37,12 @@ Needs Python ≥ 3.14, [`uv`](https://docs.astral.sh/uv/), an IMAP account, and
 a model endpoint — an OpenAI-compatible chat API, Anthropic, or `jev`.
 
 ```sh
-uv sync
-uv run liametahi --help
+uv tool install liametahi
+liametahi --help
 ```
+
+Running from a source checkout instead? See
+[docs/development.md](docs/development.md).
 
 ## Usage
 
@@ -56,15 +59,15 @@ liametahi restore BACKUP_ID --mailbox MAILBOX [--account NAME] [--dry-run]
 ## Quickstart
 
 ```sh
-cp config.example.yaml config.yaml
+curl -o config.yaml https://raw.githubusercontent.com/4piu/liametahi/master/config.example.yaml
 $EDITOR config.yaml    # at least an account and a model
 chmod 600 config.yaml
 
-uv run liametahi config check --connect
-uv run liametahi run inbox-classify --dry-run --verbose  # preview, no mutation
-uv run liametahi run inbox-classify                      # for real
-uv run liametahi report                                  # review the last run
-uv run liametahi restore 4w8w --mailbox INBOX            # undo a trash
+liametahi config check --connect
+liametahi run inbox-classify --dry-run --verbose  # preview, no mutation
+liametahi run inbox-classify                      # for real
+liametahi report                                  # review the last run
+liametahi restore 4w8w --mailbox INBOX            # undo a trash
 ```
 
 See [docs/configuration.md](docs/configuration.md) for every key and how

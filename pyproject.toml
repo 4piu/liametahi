@@ -4,6 +4,16 @@ version = "0.1.0"
 description = "A local, cron-friendly IMAP mailbox cleanup CLI using an LLM as a constrained classifier."
 readme = "README.md"
 requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "4piu" }]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Topic :: Communications :: Email",
+    "Topic :: Utilities",
+]
 dependencies = [
     "anthropic>=0.120.2",
     "httpx>=0.28.1",
@@ -12,6 +22,11 @@ dependencies = [
     "pyyaml>=6.0.3",
     "typer>=0.27.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/4piu/liametahi"
+Repository = "https://github.com/4piu/liametahi"
+Issues = "https://github.com/4piu/liametahi/issues"
 
 [project.scripts]
 liametahi = "liametahi.cli:main"
@@ -31,9 +46,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/liametahi"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/liametahi/migrations" = "liametahi/migrations"
 
 [tool.ruff]
 line-length = 88
