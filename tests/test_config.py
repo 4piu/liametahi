@@ -118,12 +118,9 @@ def test_full_jev_provider_plan_example_config_loads(tmp_path: Path) -> None:
         "account": "personal",
         "rules": [
             {
-                # The original worked example pairs `trash`
-                # with only a `processor:` atom, which actually violates
-                # the safety invariant ("a processor: atom never
-                # counts as deterministic... a trash rule still needs at
-                # least one non-processor atom") -- see the final report.
-                # `in-mailbox` supplies the required deterministic atom.
+                # A rule that trashes needs at least one non-processor
+                # atom -- a `processor:` atom alone never counts as
+                # deterministic. `in-mailbox` supplies it here.
                 "when": [
                     {"processor": "spam-review.value >= 0.9"},
                     {"in-mailbox": "INBOX"},

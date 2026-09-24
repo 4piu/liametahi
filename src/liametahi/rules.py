@@ -486,7 +486,7 @@ def is_protected(
     protected flag, a protected sender, or (when `protect_unread`) the
     absence of `\\Seen`. Pure and synchronous — nothing here can reach a
     model, which is exactly what guarantees a protected message never
-    triggers an LLM call.
+    triggers a model call.
     """
     if is_protected_by_flags(
         candidate.flags,

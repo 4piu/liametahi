@@ -52,7 +52,7 @@ recorded as successfully moved.
 
 ## Why each safety rule exists
 
-- **The LLM never mutates anything.** It answers a processor's question; a
+- **The model never mutates anything.** It answers a processor's question; a
   separate, deterministic phase decides what to do and does it.
 - **`backup` before `trash` is available, not required.** Most IMAP
   providers already retain trashed mail server-side for some window, so a
@@ -147,7 +147,7 @@ consideration entirely rather than re-reported on every future run. There is
 currently no flag to force Liametahi to re-trash a message you've restored on
 purpose; delete its old `action_attempts` history from the state database, or
 match it with a different rule, if you truly want that.
-`--reevaluate` does not affect this check — it governs only the LLM cache.
+`--reevaluate` does not affect this check — it governs only the decision cache.
 
 ## Identifiers
 

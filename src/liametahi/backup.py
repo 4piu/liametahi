@@ -285,14 +285,12 @@ def _find_existing_backup(
     sha256: str,
 ) -> sqlite3.Row | None:
     """A natural-key lookup `state.py` does not expose (it only offers
-    `get_backup(backup_id)`; its insert-only surface for backups was
-    not extended with this query). This is the one
-    read this module cannot route through `state.py`'s typed surface
-    without a change to a file this unit does not own (Unit 1's
-    file-ownership boundary); it is read-only,
-    scoped to exactly the manifest's own uniqueness constraint, and
-    called out in the final report as a gap
-    Unit 1 should close by adding this query to `state.py` itself.
+    `get_backup(backup_id)`; its insert-only surface for backups was not
+    extended with this query). This is the one read this module cannot
+    route through `state.py`'s typed surface without a change to a file
+    this unit does not own; it is read-only, scoped to exactly the
+    manifest's own uniqueness constraint -- a known gap `state.py` should
+    close by adding this query to its own typed surface.
     """
     return conn.execute(  # type: ignore[no-any-return]
         """

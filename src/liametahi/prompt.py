@@ -1,4 +1,4 @@
-"""LLM payload construction, capping, sanitisation, and the wire-level
+"""Model payload construction, capping, sanitisation, and the wire-level
 request/response shape shared by the two chat-backed classifier adapters.
 
 This module owns everything the specification calls "payload
@@ -252,8 +252,8 @@ def build_response_schema(processors: Sequence[OfferedProcessor]) -> dict[str, o
 
 @dataclass(frozen=True, slots=True)
 class BuiltPayload:
-    """A `CandidatePayload` plus the bookkeeping needed for the LLM
-    decision cache: the input hash (which the truncation flag
+    """A `CandidatePayload` plus the bookkeeping needed for the decision
+    cache: the input hash (which the truncation flag
     participates in) and the truncation flag itself."""
 
     payload: CandidatePayload

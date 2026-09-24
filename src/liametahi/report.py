@@ -8,8 +8,8 @@ surface (it exposes `insert_result_item`/`insert_action_attempt` but no
 matching list-by-run query, and `upsert_account`/`get_account_id` but
 no id-to-name lookup). These are read-only, narrowly scoped to exactly
 what rendering needs, and documented at each call site; see also the
-same gap noted in `backup.py`. This is flagged in the final report as
-something `state.py` should grow proper query functions for.
+same gap noted in `backup.py`. `state.py` should grow proper query
+functions for both eventually.
 
 Status derivation: a `result_items` row for a candidate whose winning
 rule actually ran actions is written once with `status="pending"` (see
@@ -38,7 +38,10 @@ QUIET_STATUSES = frozenset(
     {"no_match", "cached_no_match", "protected", "shadowed", "restored"}
 )
 
-REPORT_VERSION = 1
+#: Bump whenever the JSON document's own field set or shape changes, so a
+#: consumer parsing stored/older reports can tell which shape it's
+#: reading. Bumped 1 -> 2 for the `llm_calls` -> `model_calls` rename.
+REPORT_VERSION = 2
 
 
 class ReportNotFoundError(Exception):
@@ -69,7 +72,7 @@ class ReportTotals:
     scanned: int
     acted: int
     failed: int
-    llm_calls: int
+    model_calls: int
     by_status: Mapping[str, int]
 
 
@@ -186,7 +189,7 @@ def load_report(conn: sqlite3.Connection, run_id: str) -> ReportData:
         scanned=run.candidates_scanned,
         acted=acted,
         failed=failed,
-        llm_calls=run.llm_calls,
+        model_calls=run.model_calls,
         by_status=status_counts,
     )
     return ReportData(
@@ -227,7 +230,7 @@ def to_json_document(data: ReportData, *, verbose: bool) -> dict[str, Any]:
             "scanned": data.totals.scanned,
             "acted": data.totals.acted,
             "failed": data.totals.failed,
-            "llm_calls": data.totals.llm_calls,
+            "model_calls": data.totals.model_calls,
             "by_status": dict(data.totals.by_status),
         },
         "items": [
@@ -271,7 +274,7 @@ def render_table(data: ReportData, *, verbose: bool) -> str:
         f"exit_code={run.exit_code if run.exit_code is not None else '-'}  "
         f"structured_output={run.structured_output_level or '-'}",
         f"  scanned={data.totals.scanned}  acted={data.totals.acted}  "
-        f"failed={data.totals.failed}  llm_calls={data.totals.llm_calls}",
+        f"failed={data.totals.failed}  model_calls={data.totals.model_calls}",
     ]
     by_status = ", ".join(f"{k}={v}" for k, v in sorted(data.totals.by_status.items()))
     lines.append(f"  by_status: {by_status or '(none)'}")

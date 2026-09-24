@@ -280,8 +280,8 @@ def _dump(conn: sqlite3.Connection) -> dict[str, list[tuple[object, ...]]]:
     ).fetchall()
     cache = conn.execute(
         "SELECT fingerprint, processor_name, processor_hash, input_hash, "
-        "model_id, prompt_version, value_json, confidence FROM llm_decision_cache "
-        "ORDER BY fingerprint, processor_name"
+        "model_id, prompt_version, value_json, confidence "
+        "FROM processor_decision_cache ORDER BY fingerprint, processor_name"
     ).fetchall()
     return {
         "classifications": [tuple(row) for row in classifications],
@@ -345,7 +345,7 @@ def test_out_of_order_completion_still_records_in_batch_order(
         (r.candidate_id, r.matches, r.status, r.valid) for r in concurrent.results
     ] == [(r.candidate_id, r.matches, r.status, r.valid) for r in serial.results]
     assert concurrent_rows == serial_rows
-    assert concurrent.llm_calls == serial.llm_calls
+    assert concurrent.model_calls == serial.model_calls
 
 
 def test_workers_never_touch_the_database(tmp_path: Path) -> None:

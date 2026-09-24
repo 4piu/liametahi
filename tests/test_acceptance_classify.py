@@ -1,16 +1,16 @@
 """Work Unit 3's named acceptance test 16. Acceptance
 tests 3 and 4 live in `tests/test_evaluate.py`, alongside the rest of
 the response-validation matrix they are part of; this one is kept
-separate because it is specifically about the LLM decision cache across
+separate because it is specifically about the decision cache across
 multiple simulated runs, which needs its own small
 harness of repeated `evaluate_candidates()` calls sharing one candidate
 row.
 
 The cache is now keyed on processor identity
 (`processor_hash`, analogous to the old `rule_text_hash`) rather than a
-rule id -- editing a processor's own definition (its `question`, in this
-test) invalidates its cached decisions exactly the way editing a rule's
-`llm` text used to.
+rule id -- editing a processor's own definition (its `instructions`, in
+this test) invalidates its cached decisions exactly the way editing a
+rule's `llm` text used to.
 """
 
 import sqlite3

@@ -20,17 +20,15 @@ Ordering and the non-negotiable safety properties:
    run of the *same* task has already exited... before this run could
    acquire the lock" (see `execute.reconcile_task`'s own docstring); that
    guarantee only holds if reconcile runs *after* lock acquisition, so
-   that is the order implemented here, even though it reads "reconcile,
-   then lock" if the two clauses of the work-unit brief are read as a
-   strict sequence rather than as two properties step 1 must satisfy.
-   This is documented as a deliberate, conservative reading, not an
-   oversight -- see the final report for the reasoning.
+   that is the order implemented here -- a deliberate, conservative
+   reading chosen specifically to preserve that guarantee, not an
+   oversight.
 2. The scan phase connects, fetches, and disconnects; the evaluate phase
    never touches a mailbox connection at all, so an idle local-model
    batch never holds a socket open.
 3. Protected messages (`rules.is_protected`) are filtered before *any*
    candidate reaches a classifier -- protected candidates never enter
-   `evaluate.evaluate_candidates`, so they can never trigger an LLM call.
+   `evaluate.evaluate_candidates`, so they can never trigger a model call.
 4. A dry run performs no backup write and no remote mutation (enforced
    inside `execute.execute_items`), but a `result_items` row -- and a
    full stored report -- is written regardless.
@@ -316,7 +314,7 @@ def _run_locked(
                 run_id=run_id,
                 exit_code=EXIT_AUTH_FAILURE,
                 candidates_scanned=0,
-                llm_calls=0,
+                model_calls=0,
             )
             logger.error("run %s: authentication failure: %s", run_id, exc)
             report_data = report.load_report(conn, run_id)
@@ -342,7 +340,7 @@ def _run_locked(
                 run_id=run_id,
                 exit_code=EXIT_INTERRUPTED,
                 candidates_scanned=0,
-                llm_calls=0,
+                model_calls=0,
             )
             logger.warning("run %s: interrupted (SIGINT/SIGTERM)", run_id)
             state.append_audit_event(conn, run_id=run_id, kind="run_interrupted")
@@ -360,7 +358,7 @@ def _run_locked(
                 run_id=run_id,
                 exit_code=EXIT_RUNTIME_FAILURE,
                 candidates_scanned=0,
-                llm_calls=0,
+                model_calls=0,
             )
             logger.error("run %s: unhandled error: %s", run_id, exc)
             state.append_audit_event(
@@ -531,34 +529,33 @@ def _run_phases(
         progress=progress,
     )
     logger.info(
-        "run %s: evaluate complete: %d LLM call(s)%s",
+        "run %s: evaluate complete: %d model call(s)%s",
         run_id,
-        evaluate_outcome.llm_calls,
+        evaluate_outcome.model_calls,
         f" (structured_output={evaluate_outcome.structured_output_level})"
         if evaluate_outcome.structured_output_level
         else "",
     )
     results_by_id = {r.candidate_id: r for r in evaluate_outcome.results}
 
-    # The LLM decision cache is keyed on
-    # `fingerprint`, which is stable across a move -- so a
-    # message the user restores from Trash back to a source mailbox
-    # re-scans under a new UID/mailbox, hits a cached positive decision,
-    # and would otherwise be re-trashed with no model call and no signal
-    # to the user. One batched query, over every candidate that has a
-    # winning match this run, finds any whose fingerprint already has a
-    # completed `trash`/`move_to:*` from an earlier run; those are
-    # reported `restored` instead of executed. This is deliberately
-    # unconditional -- it does not matter whether the match this run came
-    # from the cache or a fresh classification, and it is intentionally
-    # skip-the-whole-item rather than "only skip if the winning action
-    # would itself be destructive": a message with this history looks
-    # like a deliberate user restore, so the conservative choice is to
-    # leave it alone entirely rather than second-guess which of its
-    # matched rules are safe to still apply. `--reevaluate` does not
-    # override this: it governs the LLM cache, a different concern (see
-    # final report for the resulting gap -- there is currently no way to
-    # deliberately re-trash a restored message).
+    # The decision cache is keyed on `fingerprint`, which is stable
+    # across a move -- so a message the user restores from Trash back to
+    # a source mailbox re-scans under a new UID/mailbox, hits a cached
+    # positive decision, and would otherwise be re-trashed with no model
+    # call and no signal to the user. One batched query, over every
+    # candidate that has a winning match this run, finds any whose
+    # fingerprint already has a completed `trash`/`move_to:*` from an
+    # earlier run; those are reported `restored` instead of executed.
+    # This is deliberately unconditional -- it does not matter whether
+    # the match this run came from the cache or a fresh classification,
+    # and it is intentionally skip-the-whole-item rather than "only skip
+    # if the winning action would itself be destructive": a message with
+    # this history looks like a deliberate user restore, so the
+    # conservative choice is to leave it alone entirely rather than
+    # second-guess which of its matched rules are safe to still apply.
+    # `--reevaluate` does not override this: it governs the decision
+    # cache, a different concern. There is currently no way to
+    # deliberately re-trash a restored message.
     candidates_pending_decision = [
         (candidate_id, candidate)
         for candidate_id, candidate in eligible
@@ -722,7 +719,7 @@ def _run_phases(
         run_id=run_id,
         exit_code=exit_code,
         candidates_scanned=scan_result.candidates_scanned,
-        llm_calls=evaluate_outcome.llm_calls,
+        model_calls=evaluate_outcome.model_calls,
         structured_output_level=evaluate_outcome.structured_output_level,
         input_tokens=evaluate_outcome.input_tokens,
         output_tokens=evaluate_outcome.output_tokens,
@@ -755,7 +752,7 @@ def _run_phases(
 # from the server). Excluding retired rows is what makes
 # `max_new_mails`'s "no cap" default bound the evaluate set at
 # all: without it every successfully-trashed or confirmed-vanished
-# message came back forever, re-matching from the LLM decision cache at
+# message came back forever, re-matching from the decision cache at
 # zero model cost but still burning a claim + re-verify round trip every
 # run. It does *not* detect a candidate whose
 # message was already moved out of the mailbox by an earlier action
@@ -863,9 +860,9 @@ def _drop_unsupported_for_dry_run(
 # NULL columns (unaltered by this migration), so this
 # collapses whatever models a task's rules actually reference into one
 # display-only summary per column: the single value if there is exactly
-# one, else a sorted comma-joined list. This is a deliberate,
-# documented choice (see the final report) filling a gap the plan
-# doesn't address, not a spec/contracts requirement.
+# one, else a sorted comma-joined list. This is a deliberate choice
+# filling a gap the config schema doesn't address on its own, not a
+# spec/contracts requirement.
 
 
 def _summarize_task_models(task: TaskConfig, config: Config) -> tuple[str, str, str]:

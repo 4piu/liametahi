@@ -649,7 +649,7 @@ def _run_action_sequence(
             # A completed relocation
             # moves the message out of the source mailbox, so this
             # candidate row is done -- retire it so it stops being
-            # re-evaluated (and, via cache, re-matched at zero LLM cost)
+            # re-evaluated (and, via cache, re-matched at zero model cost)
             # on every future run. A completed `label` never leaves the
             # message in place, so it is deliberately excluded: the
             # message may still legitimately match other rules later.

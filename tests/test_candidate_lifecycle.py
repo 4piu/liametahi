@@ -336,7 +336,7 @@ def test_stale_candidate_for_an_already_gone_message_retires(tmp_path: Path) -> 
 
 
 def test_restored_message_reevaluate_does_not_override_fix_d(tmp_path: Path) -> None:
-    """`--reevaluate` governs the LLM cache, a different concern -- it
+    """`--reevaluate` governs the decision cache, a different concern -- it
     must not become an escape hatch for skipping a restored message.
     Even with a fresh (non-cached) classification that matches again, a
     restored message is still skipped."""

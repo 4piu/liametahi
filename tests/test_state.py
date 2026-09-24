@@ -49,7 +49,7 @@ def test_open_database_creates_all_tables(tmp_path: Path) -> None:
             "runs",
             "result_items",
             "classifications",
-            "llm_decision_cache",
+            "processor_decision_cache",
             "task_routes",
             "key_claims",
             "backups",
@@ -60,7 +60,7 @@ def test_open_database_creates_all_tables(tmp_path: Path) -> None:
         version_row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 5
+        assert version_row["v"] == 6
     finally:
         state.close_database(conn)
 
@@ -72,7 +72,7 @@ def test_reopening_database_is_idempotent(tmp_path: Path) -> None:
     conn2 = state.open_database(db_path)  # must not re-run already-applied migrations
     try:
         count = conn2.execute("SELECT COUNT(*) AS c FROM schema_version").fetchone()
-        assert count["c"] == 5
+        assert count["c"] == 6
     finally:
         state.close_database(conn2)
 
@@ -94,8 +94,8 @@ def test_migrations_upgrade_a_v2_database_in_place(tmp_path: Path) -> None:
     """Build a v2 database directly from
     the migration files (mirroring the ad-hoc check used for migration
     0002), open it through `state.open_database`, and confirm it lands
-    on version 3 with `retired_at`/`retired_reason` added and every
-    pre-existing row's data intact."""
+    on the latest schema version with `retired_at`/`retired_reason`
+    added (migration 0003) and every pre-existing row's data intact."""
     db_path = tmp_path / "state.sqlite3"
     migrations_dir = Path(state.__file__).parent / "migrations"
     raw = sqlite3.connect(str(db_path))
@@ -140,7 +140,7 @@ def test_migrations_upgrade_a_v2_database_in_place(tmp_path: Path) -> None:
         version_row = conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 5
+        assert version_row["v"] == 6
 
         row = conn.execute(
             "SELECT candidate_id, fingerprint, subject, from_address, "
@@ -493,7 +493,7 @@ def test_run_create_finish_get_list(tmp_path: Path) -> None:
             run_id=run_id,
             exit_code=0,
             candidates_scanned=5,
-            llm_calls=2,
+            model_calls=2,
             structured_output_level="json_schema",
         )
         finished = state.get_run(conn, run_id)

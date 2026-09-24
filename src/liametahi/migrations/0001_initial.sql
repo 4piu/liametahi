@@ -1,4 +1,4 @@
--- Schema version 1 (implementation-contracts.md §4, verbatim).
+-- Schema version 1.
 -- Connection PRAGMAs (journal_mode, foreign_keys, busy_timeout,
 -- synchronous) are applied by state.py on every open, not here.
 
@@ -63,7 +63,7 @@ CREATE TABLE runs (
   dry_run                INTEGER NOT NULL,
   reevaluate             INTEGER NOT NULL,
   structured_output_level TEXT,              -- json_schema|json_object|none
-  fetch_headers          TEXT    NOT NULL,   -- JSON array, derived (spec §4.1)
+  fetch_headers          TEXT    NOT NULL,   -- JSON array, derived
   config_hash            TEXT    NOT NULL,
   started_at             TEXT    NOT NULL,
   ended_at               TEXT,
@@ -79,7 +79,7 @@ CREATE TABLE result_items (
   result_id    INTEGER PRIMARY KEY,
   run_id       TEXT    NOT NULL REFERENCES runs(run_id),
   candidate_id INTEGER NOT NULL REFERENCES candidates(candidate_id),
-  status       TEXT    NOT NULL,           -- spec §9 status vocabulary
+  status       TEXT    NOT NULL,           -- fixed status vocabulary
   winning_rule TEXT,
   shadowed_by  TEXT,
   detail       TEXT,
@@ -112,7 +112,7 @@ CREATE TABLE llm_decision_cache (
   decided_at     TEXT    NOT NULL,
   PRIMARY KEY (account_id, fingerprint, rule_id, rule_text_hash, input_hash)
 );
--- non-matches only; a match is never cached (spec §13)
+-- non-matches only; a match is never cached
 
 CREATE TABLE key_claims (
   account_id  INTEGER NOT NULL,

@@ -215,10 +215,10 @@ def test_response_candidate_id_outside_batch_is_dropped_without_affecting_batch(
         candidates=[(cid, cand)],
     )
     # "c999" affects nothing; the real candidate ("c1") is simply absent
-    # from the response and finalises as no_llm_response.
+    # from the response and finalises as no_model_response.
     result = outcome.results[0]
     assert result.matches == ()
-    assert result.status == "no_llm_response"
+    assert result.status == "no_model_response"
 
 
 # =========================================================================
@@ -950,7 +950,6 @@ def test_split_retry_does_not_recurse_a_second_time(tmp_path: Path) -> None:
 # Note: acceptance test 4 ("unsure classification with
 # content escalation unavailable") no longer has an analog: the
 # yes/no/unsure vocabulary it exercised (`needs_content`) does not exist
-# in this redesign -- a processor either answers or it
-# doesn't, this round, with no separate "I looked and I'm unsure" signal
-# (the chat-compiled schema deliberately has no
-# invented field for it). See the final report.
+# in this redesign -- a processor either answers or it doesn't, this
+# round, with no separate "I looked and I'm unsure" signal (the
+# chat-compiled schema deliberately has no invented field for it).

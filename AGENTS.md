@@ -1,8 +1,8 @@
 # AGENTS.md
 
 Instructions for any agent (or human) working in this repository. Liametahi
-is a local, cron-friendly Python CLI that cleans up an IMAP mailbox, using an
-LLM only as a constrained classifier — never as the thing that decides or
+is a local, cron-friendly Python CLI that cleans up an IMAP mailbox, using a
+model only as a constrained classifier — never as the thing that decides or
 acts. If anything here conflicts with the documents it points to, those
 documents win; this file is a map and a set of reminders, not a new source of
 truth.

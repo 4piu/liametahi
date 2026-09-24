@@ -101,7 +101,7 @@ def _run_one_matched_item(
         fail_fast=False,
     )
     state.finish_run(
-        conn, run_id=run_id, exit_code=0, candidates_scanned=1, llm_calls=0
+        conn, run_id=run_id, exit_code=0, candidates_scanned=1, model_calls=0
     )
 
 
@@ -151,7 +151,7 @@ def test_quiet_statuses_hidden_by_default_and_shown_verbose(tmp_path: Path) -> N
             conn, run_id=run_id, candidate_id=candidate_id, status="no_match"
         )
         state.finish_run(
-            conn, run_id=run_id, exit_code=0, candidates_scanned=1, llm_calls=0
+            conn, run_id=run_id, exit_code=0, candidates_scanned=1, model_calls=0
         )
 
         data = report.load_report(conn, run_id)
@@ -193,7 +193,7 @@ def test_restored_status_is_quiet(tmp_path: Path) -> None:
             detail="fingerprint already has a completed trash from a previous run",
         )
         state.finish_run(
-            conn, run_id=run_id, exit_code=0, candidates_scanned=1, llm_calls=0
+            conn, run_id=run_id, exit_code=0, candidates_scanned=1, model_calls=0
         )
 
         data = report.load_report(conn, run_id)
@@ -220,7 +220,7 @@ def test_render_json_matches_pinned_shape(tmp_path: Path) -> None:
         data = report.load_report(conn, run_id)
 
         document = json.loads(report.render_json(data, verbose=False))
-        assert document["report_version"] == 1
+        assert document["report_version"] == 2
         assert set(document.keys()) == {"report_version", "run", "totals", "items"}
         assert set(document["run"].keys()) == {
             "run_id",
@@ -240,7 +240,7 @@ def test_render_json_matches_pinned_shape(tmp_path: Path) -> None:
             "scanned",
             "acted",
             "failed",
-            "llm_calls",
+            "model_calls",
             "by_status",
         }
         item = document["items"][0]
@@ -282,7 +282,7 @@ def test_render_run_list(tmp_path: Path) -> None:
     try:
         account_id, run_id = _setup(conn, task="task-a")
         state.finish_run(
-            conn, run_id=run_id, exit_code=0, candidates_scanned=0, llm_calls=0
+            conn, run_id=run_id, exit_code=0, candidates_scanned=0, model_calls=0
         )
         runs = state.list_runs(conn)
         table = report.render_run_list(runs)
@@ -366,7 +366,7 @@ def test_render_table_aligns_a_long_sender(tmp_path: Path) -> None:
                 winning_rule="junk",
             )
         state.finish_run(
-            conn, run_id=run_id, exit_code=1, candidates_scanned=3, llm_calls=0
+            conn, run_id=run_id, exit_code=1, candidates_scanned=3, model_calls=0
         )
         table = report.render_table(report.load_report(conn, run_id), verbose=False)
         body = [line for line in table.splitlines() if "junk" in line]
@@ -406,7 +406,7 @@ def test_rendered_output_trims_time_but_json_keeps_full_precision(
     try:
         _, run_id = _setup(conn)
         state.finish_run(
-            conn, run_id=run_id, exit_code=0, candidates_scanned=0, llm_calls=0
+            conn, run_id=run_id, exit_code=0, candidates_scanned=0, model_calls=0
         )
         data = report.load_report(conn, run_id)
         stored = data.run.started_at

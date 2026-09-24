@@ -1,6 +1,6 @@
-"""The evaluate phase: three-valued rule evaluation against the LLM
-decision cache, batched processor classification, response validation,
-and split-and-retry failure handling.
+"""The evaluate phase: three-valued rule evaluation against the decision
+cache, batched processor classification, response validation, and
+split-and-retry failure handling.
 
 This module is the callable `runner.py` sequences for phase 2.
 `evaluate_candidates()` consumes already-scanned candidates plus a task's
@@ -8,7 +8,7 @@ configuration and produces, per candidate, either a set of validated
 matched rules (deterministic and/or processor-backed, ready for the
 policy engine to pick a winner) or a terminal no-op status drawn from the
 fixed vocabulary (`no_match`/`cached_no_match`/`invalid_response`/
-`no_llm_response`).
+`no_model_response`).
 
 This generalises the old "the one `llm` atom, ask once,
 finalize" loop into: collect the distinct **processor names** referenced
@@ -102,7 +102,7 @@ class CandidateResult:
 @dataclass(frozen=True, slots=True)
 class EvaluateOutcome:
     results: tuple[CandidateResult, ...]
-    llm_calls: int
+    model_calls: int
     structured_output_level: str | None
     input_tokens: int | None
     output_tokens: int | None
@@ -182,7 +182,7 @@ def _finalize(state_item: _CandidateState, matches: list[ValidatedMatch]) -> Non
     elsewhere, but `valid`/`error` on the row still records that failure
     for audit; a candidate with no match is `invalid_response` if any
     job it needed raised or failed structural validation,
-    `no_llm_response` if a well-formed response simply never mentioned
+    `no_model_response` if a well-formed response simply never mentioned
     it, `cached_no_match` if every remaining processor resolved from
     cache, else a confident `no_match`.
     """
@@ -192,7 +192,7 @@ def _finalize(state_item: _CandidateState, matches: list[ValidatedMatch]) -> Non
     elif state_item.saw_invalid:
         status = "invalid_response"
     elif state_item.saw_missing:
-        status = "no_llm_response"
+        status = "no_model_response"
     elif state_item.used_cache:
         status = "cached_no_match"
     else:
@@ -272,7 +272,7 @@ def evaluate_candidates(
             pending.append(candidate_id)
 
     if not pending:
-        return _assemble_outcome(states, candidates, _BatchStats(llm_calls=0))
+        return _assemble_outcome(states, candidates, _BatchStats(model_calls=0))
 
     # --- Pass 2: decision cache -----------------------------------------
     still_pending: list[int] = []
@@ -299,7 +299,7 @@ def evaluate_candidates(
             still_pending.append(candidate_id)
 
     if not still_pending:
-        return _assemble_outcome(states, candidates, _BatchStats(llm_calls=0))
+        return _assemble_outcome(states, candidates, _BatchStats(model_calls=0))
 
     # --- Pass 3: batch the rest by (model, exact processor set needed) --
     to_ask: dict[int, set[str]] = {}
@@ -311,7 +311,7 @@ def evaluate_candidates(
         if needed:
             to_ask[candidate_id] = needed
 
-    stats = _BatchStats(llm_calls=0)
+    stats = _BatchStats(model_calls=0)
     if to_ask:
         reporter.start("classifying", total=len(to_ask))
         try:
@@ -353,7 +353,7 @@ def _assemble_outcome(
         results.append(finalized)
     return EvaluateOutcome(
         results=tuple(results),
-        llm_calls=stats.llm_calls,
+        model_calls=stats.model_calls,
         structured_output_level=stats.structured_output_level,
         input_tokens=stats.input_tokens,
         output_tokens=stats.output_tokens,
@@ -409,7 +409,7 @@ def _consult_cache(
 
 @dataclass(frozen=True, slots=True)
 class _BatchStats:
-    llm_calls: int
+    model_calls: int
     structured_output_level: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -425,7 +425,7 @@ def _sum_optional(a: int | None, b: int | None) -> int | None:
 
 def _combine_stats(left: _BatchStats, right: _BatchStats) -> _BatchStats:
     return _BatchStats(
-        llm_calls=left.llm_calls + right.llm_calls,
+        model_calls=left.model_calls + right.model_calls,
         structured_output_level=right.structured_output_level
         or left.structured_output_level,
         input_tokens=_sum_optional(left.input_tokens, right.input_tokens),
@@ -487,7 +487,7 @@ def _classify_all(
     """
     classifiers: dict[str, Classifier] = {}
     grouped = _group_by_model(to_ask, config)
-    stats = _BatchStats(llm_calls=0)
+    stats = _BatchStats(model_calls=0)
 
     for model_name, by_names in grouped.items():
         model_cfg = config.models[model_name]
@@ -711,7 +711,7 @@ def _record_attempt(
                     error=attempt.failure_reason,
                     latency_ms=None,
                 )
-            return _BatchStats(llm_calls=1)
+            return _BatchStats(model_calls=1)
 
         seen_payload_ids: set[str] = set()
         for classification in outcome.results:
@@ -802,7 +802,7 @@ def _record_attempt(
             states[candidate_id].last_error = "absent from model response"
 
     return _BatchStats(
-        llm_calls=1,
+        model_calls=1,
         structured_output_level=outcome.structured_output_level,
         input_tokens=outcome.input_tokens,
         output_tokens=outcome.output_tokens,

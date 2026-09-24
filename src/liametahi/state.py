@@ -26,7 +26,7 @@ from liametahi import rules
 from liametahi.domain import Candidate, MessageKey
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
-_LATEST_SCHEMA_VERSION = 5
+_LATEST_SCHEMA_VERSION = 6
 
 _CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
 
@@ -453,7 +453,7 @@ class RunRow:
     ended_at: str | None
     exit_code: int | None
     candidates_scanned: int
-    llm_calls: int
+    model_calls: int
     input_tokens: int | None
     output_tokens: int | None
 
@@ -478,7 +478,7 @@ def create_run(
             run_id, task, account_id, model_name, provider, model_id,
             dry_run, reevaluate, structured_output_level, fetch_headers,
             config_hash, started_at, ended_at, exit_code,
-            candidates_scanned, llm_calls, input_tokens, output_tokens
+            candidates_scanned, model_calls, input_tokens, output_tokens
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, 0, 0, NULL, NULL)
         """,
         (
@@ -503,7 +503,7 @@ def finish_run(
     run_id: str,
     exit_code: int,
     candidates_scanned: int,
-    llm_calls: int,
+    model_calls: int,
     structured_output_level: str | None = None,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
@@ -511,7 +511,7 @@ def finish_run(
     conn.execute(
         """
         UPDATE runs SET
-            ended_at = ?, exit_code = ?, candidates_scanned = ?, llm_calls = ?,
+            ended_at = ?, exit_code = ?, candidates_scanned = ?, model_calls = ?,
             structured_output_level = ?, input_tokens = ?, output_tokens = ?
         WHERE run_id = ?
         """,
@@ -519,7 +519,7 @@ def finish_run(
             _iso_now(),
             exit_code,
             candidates_scanned,
-            llm_calls,
+            model_calls,
             structured_output_level,
             input_tokens,
             output_tokens,
@@ -545,7 +545,7 @@ def _row_to_run(row: sqlite3.Row) -> RunRow:
         ended_at=row["ended_at"],
         exit_code=row["exit_code"],
         candidates_scanned=row["candidates_scanned"],
-        llm_calls=row["llm_calls"],
+        model_calls=row["model_calls"],
         input_tokens=row["input_tokens"],
         output_tokens=row["output_tokens"],
     )
@@ -693,7 +693,7 @@ def insert_classification(
     return int(cur.lastrowid)
 
 
-# --- LLM decision cache -----------------------------------------------
+# --- Decision cache -----------------------------------------------
 #
 # One row per (account, fingerprint, processor, processor definition,
 # input) -- `value_json`/`confidence` record how the processor answered,
@@ -716,7 +716,7 @@ def get_cached_processor_decision(
 ) -> rules.ProcessorAnswer | None:
     row = conn.execute(
         """
-        SELECT value_json, confidence FROM llm_decision_cache
+        SELECT value_json, confidence FROM processor_decision_cache
         WHERE account_id=? AND fingerprint=? AND processor_name=?
           AND processor_hash=? AND input_hash=? AND model_id=?
           AND prompt_version=?
@@ -754,7 +754,7 @@ def record_processor_decision(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO llm_decision_cache (
+        INSERT INTO processor_decision_cache (
             account_id, fingerprint, processor_name, processor_hash, input_hash,
             model_id, prompt_version, decided_at, value_json, confidence
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

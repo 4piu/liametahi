@@ -183,7 +183,9 @@ def test_a_failed_classify_call_is_not_cached(tmp_path: Path) -> None:
 
     conn = state.open_database(cfg.settings.state_db)
     try:
-        cached = conn.execute("SELECT COUNT(*) c FROM llm_decision_cache").fetchone()
+        cached = conn.execute(
+            "SELECT COUNT(*) c FROM processor_decision_cache"
+        ).fetchone()
         assert cached["c"] == 0, "a failed call must never be cached as a decision"
     finally:
         state.close_database(conn)
