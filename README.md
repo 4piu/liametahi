@@ -34,9 +34,7 @@ tasks:
 ## Install
 
 Needs Python ≥ 3.14, [`uv`](https://docs.astral.sh/uv/), an IMAP account, and
-a model endpoint — OpenAI-compatible (including a local
-[llama.cpp](https://github.com/ggml-org/llama.cpp) server), Anthropic,
-OpenRouter, or `jev`.
+a model endpoint — an OpenAI-compatible chat API, Anthropic, or `jev`.
 
 ```sh
 uv sync
@@ -53,13 +51,7 @@ liametahi restore BACKUP_ID --mailbox MAILBOX [--account NAME] [--dry-run]
 ```
 
 `--config PATH` works on every subcommand. Run/backup ids are short strings
-(`4w8wbbs3fs`); type any unambiguous leading prefix. `run` draws a live
-progress bar on an interactive terminal; under cron/CI it just logs phase
-boundaries.
-
-Exit codes: `0` ok, `1` runtime/partial failure, `2` bad config, `3`
-interrupted, `4` auth failure, `5` task already running — cron-safe:
-`liametahi run TASK || [ $? -eq 5 ]`.
+(`4w8wbbs3fs`); type any unambiguous leading prefix (eg. `4w8b`).
 
 ## Quickstart
 
@@ -75,11 +67,13 @@ uv run liametahi report                                  # review the last run
 uv run liametahi restore 4w8w --mailbox INBOX            # undo a trash
 ```
 
-`./config.yaml` in the current directory is picked up automatically — no
-flag needed. The example ships two tasks wired together with a `jev` model
-and `task:` routing; see [docs/configuration.md](docs/configuration.md) for
-every key, other config locations (`--config`, `$LIAMETAHI_CONFIG`,
-`~/.config/liametahi/config.yaml`), and how conditions/rules compose.
+See [docs/configuration.md](docs/configuration.md) for every key and how
+conditions/rules compose. Config file location, first match wins:
+
+1. `--config PATH`
+2. `$LIAMETAHI_CONFIG`
+3. `$(pwd)/config.yaml`
+4. `~/.config/liametahi/config.yaml` (Linux); `~/Library/Application Support/liametahi` (macOS); `%LOCALAPPDATA%\liametahi` (Windows)
 
 ## Documentation
 
