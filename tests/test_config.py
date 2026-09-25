@@ -79,11 +79,11 @@ def test_settings_defaults_applied(config_path: Path) -> None:
     assert cfg.settings.log_level == "info"
 
 
-def test_full_jev_provider_plan_example_config_loads(tmp_path: Path) -> None:
+def test_full_two_task_two_processor_worked_example_loads(tmp_path: Path) -> None:
     """The two-task, two-processor worked example (trimmed to what this
     config already has: account/model names, trash_mailbox)."""
     data = make_config_dict()
-    data["models"]["local"]["provider"] = "openai_compatible"
+    data["models"]["local"]["provider"] = "openai"
     data["processors"] = {
         "spam-category": {
             "model": "local",
@@ -730,7 +730,7 @@ def test_value_that_is_just_a_slash_stays_literal() -> None:
 # --- Model provider requirements ----------------------------------------
 
 
-def test_openai_compatible_requires_base_url(tmp_path: Path) -> None:
+def test_openai_requires_base_url(tmp_path: Path) -> None:
     data = make_config_dict()
     del data["models"]["local"]["base_url"]
     path = write_config(tmp_path / "cfg.yaml", data)
@@ -1328,16 +1328,16 @@ def test_noul_processor_atom_value_numeric_comparand_needs_no_vocabulary_check(
     load_config(path)  # should not raise
 
 
-def test_confidence_field_against_jev_processor_not_checked_against_vocabulary(
+def test_confidence_field_against_systemone_processor_not_checked_against_vocabulary(
     tmp_path: Path,
 ) -> None:
     """Only `.value` equality/inequality is checked against a declared
-    vocabulary; `.confidence` on a `provider: jev` processor is a plain
-    float with nothing to validate against (and jev always populates
-    it for `choice`/`score`)."""
+    vocabulary; `.confidence` on a `provider: systemone` processor is a
+    plain float with nothing to validate against (and a systemone model
+    always populates it for `choice`/`score`)."""
     data = make_config_dict()
     data["models"]["jev-primary"] = {
-        "provider": "jev",
+        "provider": "systemone",
         "base_url": "https://jev.example.com/v1/systemone",
         "model": "jev-latest",
         "api_key": "secret",
@@ -1363,7 +1363,7 @@ def test_confidence_field_against_chat_backed_choice_score_processor_accepted(
     tmp_path: Path,
 ) -> None:
     """'field: confidence' resolves for a `choice`/`score` processor on
-    any backend now, not just `provider: jev`: a chat-backed processor's
+    any backend now, not just `provider: systemone`: a chat-backed processor's
     compiled schema asks for `value_probability`/`runner_up_probability`
     and derives a margin-based `.confidence` from them
     (`prompt.py`'s `_derive_margin_confidence`), so this is no longer a
@@ -1387,10 +1387,10 @@ def test_confidence_field_against_noul_processor_rejected_on_any_backend(
 ) -> None:
     """A `.confidence` atom against a `noul` processor is rejected at
     config-load time regardless of provider -- `noul` never populates a
-    separate confidence, on jev or on a chat-compiled schema."""
+    separate confidence, on systemone or on a chat-compiled schema."""
     data = make_config_dict()
     data["models"]["jev-primary"] = {
-        "provider": "jev",
+        "provider": "systemone",
         "base_url": "https://jev.example.com/v1/systemone",
         "model": "jev-latest",
         "api_key": "secret",
@@ -1416,8 +1416,8 @@ def test_confidence_field_against_chat_backed_noul_processor_rejected(
     tmp_path: Path,
 ) -> None:
     """The same rejection applies to a `noul` processor answered by a
-    chat-compiled provider (`openai_compatible`/`anthropic`) -- not just
-    `jev` -- since the "jev-only" carve-out in
+    chat-compiled provider (`openai`/`anthropic`) -- not just
+    `systemone` -- since the "systemone-only" carve-out in
     `_validate_processor_atom` is for `choice`/`score` only, never for
     `noul` on any backend."""
     processors = {
@@ -1525,21 +1525,21 @@ def test_task_empty_target_rejected(tmp_path: Path) -> None:
         load_config(path)
 
 
-# --- `jev` provider requirements ---------------------------------------------
+# --- `systemone` provider requirements --------------------------------------
 
 
-def test_jev_provider_requires_base_url_and_api_key(tmp_path: Path) -> None:
+def test_systemone_provider_requires_base_url_and_api_key(tmp_path: Path) -> None:
     data = make_config_dict()
-    data["models"]["jev-primary"] = {"provider": "jev", "model": "jev-latest"}
+    data["models"]["jev-primary"] = {"provider": "systemone", "model": "jev-latest"}
     path = write_config(tmp_path / "cfg.yaml", data)
     with pytest.raises(ConfigError, match="base_url"):
         load_config(path)
 
 
-def test_jev_provider_requires_mails_per_request_one(tmp_path: Path) -> None:
+def test_systemone_provider_requires_mails_per_request_one(tmp_path: Path) -> None:
     data = make_config_dict()
     data["models"]["jev-primary"] = {
-        "provider": "jev",
+        "provider": "systemone",
         "model": "jev-latest",
         "base_url": "https://api.example.com/v1/systemone",
         "api_key": "k",
@@ -1550,10 +1550,10 @@ def test_jev_provider_requires_mails_per_request_one(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_jev_provider_valid_config_loads(tmp_path: Path) -> None:
+def test_systemone_provider_valid_config_loads(tmp_path: Path) -> None:
     data = make_config_dict()
     data["models"]["jev-primary"] = {
-        "provider": "jev",
+        "provider": "systemone",
         "model": "jev-latest",
         "base_url": "https://api.example.com/v1/systemone",
         "api_key": "k",

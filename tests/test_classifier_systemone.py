@@ -1,4 +1,4 @@
-"""Tests for `liametahi.classifier.jev`.
+"""Tests for `liametahi.classifier.systemone`.
 
 All tests use `httpx.MockTransport`: no network, no Docker.
 """
@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from liametahi.classifier import CandidatePayload, OfferedProcessor
-from liametahi.classifier.jev import JevClassifier
+from liametahi.classifier.systemone import SystemOneClassifier
 from liametahi.config import ConfigError, ModelConfig
 
 CANDIDATE = CandidatePayload(payload_id="c1", fields={"subject": "hi"})
@@ -24,7 +24,7 @@ SPAM_PROCESSOR = OfferedProcessor(
 
 def _config(**overrides: object) -> ModelConfig:
     base: dict[str, object] = {
-        "provider": "jev",
+        "provider": "systemone",
         "base_url": "http://local/v1/systemone",
         "model": "jev-latest",
         "api_key": "secret",
@@ -48,12 +48,12 @@ def test_wrong_provider_rejected() -> None:
     cfg = ModelConfig.model_validate(
         {"provider": "anthropic", "model": "m", "api_key": "x"}
     )
-    with pytest.raises(ValueError, match="jev"):
-        JevClassifier(cfg)
+    with pytest.raises(ValueError, match="systemone"):
+        SystemOneClassifier(cfg)
 
 
 def test_authorization_header_is_bearer_api_key() -> None:
-    clf = JevClassifier(_config())
+    clf = SystemOneClassifier(_config())
     headers = clf._client.headers  # noqa: SLF001
     assert headers["authorization"] == "Bearer secret"
 
@@ -81,7 +81,7 @@ def test_one_http_call_per_candidate_bundling_every_processor() -> None:
         instructions="how urgent?",
         criteria=["low", "high"],
     )
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR, urgency])
     assert calls == 1
     questions = captured["questions"]
@@ -101,7 +101,7 @@ def test_request_uses_state_not_input() -> None:
         captured.update(json.loads(request.content))
         return _answers_response({"spam-category": {"choice": "spam"}})
 
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     clf.classify([CANDIDATE], [SPAM_PROCESSOR])
     assert captured["state"] == {"subject": "hi"}
     assert "input" not in captured
@@ -112,12 +112,12 @@ def test_noul_value_is_raw_probability_no_confidence() -> None:
         return _answers_response({"vibe": {"noul": 0.73, "confidence": 0.99}})
 
     processor = OfferedProcessor(name="vibe", type="noul", instructions="is this junk?")
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [processor])
     answer = outcome.results[0].answers["vibe"]
     assert answer.value == 0.73
     # A stray 'confidence' key in the noul answer sub-object is ignored:
-    # jev has no confidence concept for noul, and this adapter never
+    # a systemone model has no confidence concept for noul, and this adapter never
     # reports one for it regardless of what a hostile/malformed response
     # includes.
     assert answer.confidence is None
@@ -129,7 +129,7 @@ def test_noul_boundary_values_pass_through(probability: float) -> None:
         return _answers_response({"vibe": {"noul": probability}})
 
     processor = OfferedProcessor(name="vibe", type="noul", instructions="junk?")
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [processor])
     assert outcome.results[0].answers["vibe"].value == probability
 
@@ -144,7 +144,7 @@ def test_score_rounds_to_nearest_declared_level() -> None:
         instructions="how urgent?",
         criteria=["low", "medium", "high"],
     )
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [processor])
     answer = outcome.results[0].answers["urgency"]
     assert answer.value == "high"
@@ -161,7 +161,7 @@ def test_score_rounds_at_exact_boundary() -> None:
         instructions="how urgent?",
         criteria=["low", "medium", "high"],
     )
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [processor])
     # Python's round() uses banker's rounding: 0.5 rounds to 0 (even).
     assert outcome.results[0].answers["urgency"].value == "low"
@@ -177,7 +177,7 @@ def test_score_out_of_range_position_is_clamped() -> None:
         instructions="how urgent?",
         criteria=["low", "medium", "high"],
     )
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [processor])
     assert outcome.results[0].answers["urgency"].value == "high"
 
@@ -189,7 +189,7 @@ def test_criteria_included_in_request_body_when_set() -> None:
         captured.update(json.loads(request.content))
         return _answers_response({"spam-category": {"choice": "spam"}})
 
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     clf.classify([CANDIDATE], [SPAM_PROCESSOR])
     questions = captured["questions"]
     assert isinstance(questions, dict)
@@ -208,7 +208,7 @@ def test_criteria_omitted_from_request_body_when_unset() -> None:
         return _answers_response({"vibe": {"noul": 0.5}})
 
     processor = OfferedProcessor(name="vibe", type="noul", instructions="junk?")
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     clf.classify([CANDIDATE], [processor])
     questions = captured["questions"]
     assert isinstance(questions, dict)
@@ -217,7 +217,7 @@ def test_criteria_omitted_from_request_body_when_unset() -> None:
 
 def test_mails_per_request_must_be_one() -> None:
     """Enforced at config load (`config.py`'s provider-requirements
-    check) -- `JevClassifier.__init__`'s own check is a defensive
+    check) -- `SystemOneClassifier.__init__`'s own check is a defensive
     backstop that can only be reached by constructing a `ModelConfig`
     without going through `Config.model_validate`."""
     with pytest.raises(ConfigError, match="mails_per_request"):
@@ -237,7 +237,7 @@ def test_429_is_retried_up_to_max_retries_then_succeeds() -> None:
             return httpx.Response(429, text="slow down")
         return _answers_response({"spam-category": {"choice": "spam"}})
 
-    clf = JevClassifier(_config(max_retries=3), client=_client(handler))
+    clf = SystemOneClassifier(_config(max_retries=3), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR])
     assert attempts == 3
     assert len(outcome.results) == 1
@@ -253,7 +253,7 @@ def test_529_is_retried() -> None:
             return httpx.Response(529, text="overloaded")
         return _answers_response({"spam-category": {"choice": "spam"}})
 
-    clf = JevClassifier(_config(max_retries=2), client=_client(handler))
+    clf = SystemOneClassifier(_config(max_retries=2), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR])
     assert attempts == 2
     assert len(outcome.results) == 1
@@ -267,7 +267,7 @@ def test_429_exhausting_retries_leaves_candidate_invalid() -> None:
         attempts += 1
         return httpx.Response(429, text="slow down")
 
-    clf = JevClassifier(_config(max_retries=2), client=_client(handler))
+    clf = SystemOneClassifier(_config(max_retries=2), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR])
     assert attempts == 3  # max_retries + 1
     assert outcome.results == ()
@@ -283,7 +283,7 @@ def test_non_retryable_status_fails_immediately(status: int) -> None:
         attempts += 1
         return httpx.Response(status, text="nope")
 
-    clf = JevClassifier(_config(max_retries=3), client=_client(handler))
+    clf = SystemOneClassifier(_config(max_retries=3), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR])
     assert attempts == 1
     assert outcome.invalid == ("c1",)
@@ -310,7 +310,7 @@ def test_one_processor_malformed_in_response_does_not_void_the_others() -> None:
         instructions="how urgent?",
         criteria=["low", "high"],
     )
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR, urgency])
     assert len(outcome.results) == 1
     answers = outcome.results[0].answers
@@ -328,7 +328,7 @@ def test_processor_absent_from_answers_map_does_not_void_the_others() -> None:
         instructions="how urgent?",
         criteria=["low", "high"],
     )
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR, urgency])
     assert len(outcome.results) == 1
     answers = outcome.results[0].answers
@@ -340,7 +340,7 @@ def test_all_processors_failing_marks_candidate_invalid() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, text="unauthorized")
 
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR])
     assert outcome.results == ()
     assert outcome.invalid == ("c1",)
@@ -350,7 +350,7 @@ def test_malformed_response_body_is_treated_as_failure() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"oops": "no answers map"})
 
-    clf = JevClassifier(_config(), client=_client(handler))
+    clf = SystemOneClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR])
     assert outcome.invalid == ("c1",)
 
@@ -365,7 +365,7 @@ def test_transport_error_is_retried() -> None:
             raise httpx.ConnectError("boom", request=request)
         return _answers_response({"spam-category": {"choice": "spam"}})
 
-    clf = JevClassifier(_config(max_retries=1), client=_client(handler))
+    clf = SystemOneClassifier(_config(max_retries=1), client=_client(handler))
     outcome = clf.classify([CANDIDATE], [SPAM_PROCESSOR])
     assert attempts == 2
     assert len(outcome.results) == 1

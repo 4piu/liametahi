@@ -1,8 +1,8 @@
 """Classifier protocol and payload/response models.
 
 This is the fixed cross-unit interface between the evaluate phase (this
-unit) and the provider adapters (`openai_compatible.py`, `anthropic.py`,
-`jev.py`, also this unit). It was originally reproduced verbatim inside
+unit) and the provider adapters (`openai.py`, `anthropic.py`,
+`systemone.py`, also this unit). It was originally reproduced verbatim inside
 `tests/fakes/fake_classifier.py` because this module did not yet exist
 when Unit 1 landed; per the explicit instruction that fake now imports
 these definitions from here instead of declaring local copies.
@@ -23,10 +23,11 @@ yes/no/unsure vocabulary (`OfferedRule`/`Classification.matches`/
 may be asked about several independently-named processors in one batch,
 and each processor answers with a resolved `value` (a probability in
 `[0, 1]` for `noul`, a choice string for `choice`, a level string for
-`score`) plus an optional `confidence` (jev always populates it for
-`choice`/`score`, never for `noul`; a chat processor only if its own
-declared schema asked for it -- which it never does for `noul`, since a
-`noul` processor's `.confidence` is always `None` regardless of backend).
+`score`) plus an optional `confidence` (a systemone model always
+populates it for `choice`/`score`, never for `noul`; a chat processor
+only if its own declared schema asked for it -- which it never does for
+`noul`, since a `noul` processor's `.confidence` is always `None`
+regardless of backend).
 """
 
 from collections.abc import Mapping, Sequence
@@ -50,9 +51,9 @@ class OfferedProcessor:
     """One processor offered to the model for a batch: its name and
     enough of its declared shape (`type`, its required `instructions`,
     plus its optional/required `criteria`) for an adapter to compile a
-    request/schema from (`jev.py` maps these straight onto its
-    `noul`/`choice`/`score` request shape -- jev's own schema, not a
-    project invention; `prompt.py` compiles the same fields into a chat
+    request/schema from (`systemone.py` maps these straight onto its
+    `noul`/`choice`/`score` request shape -- the protocol's own schema,
+    not a project invention; `prompt.py` compiles the same fields into a chat
     prompt + JSON schema for the other two providers). `criteria`'s shape
     depends on `type`: a `{"true": ..., "false": ...}` mapping (optional)
     for `noul`, an `{option: description}` mapping (required) for

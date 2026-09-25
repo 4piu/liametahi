@@ -41,7 +41,7 @@ shape (stated explicitly at the top of the contracts file).
   rule-matching ("winner takes all" by plain list order — rules have no id
   or priority field; the first matching rule wins) semantics.
 - `imap_adapter.py` — IMAP protocol wrapper (fetch, claim, mutate).
-- `classifier/` — `anthropic.py`, `openai_compatible.py`, and `jev.py`
+- `classifier/` — `anthropic.py`, `openai.py`, and `systemone.py`
   adapters behind a shared interface in `__init__.py`. A model only ever
   answers a named **processor**'s declared question (`noul`/`choice`/
   `score`) against its own closed vocabulary of options/levels — never

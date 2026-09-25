@@ -56,7 +56,7 @@ A processor's own `fields:` config names exactly which candidate metadata
 its requests carry, drawn from a fixed catalog (see
 [docs/configuration.md](configuration.md#reading-the-message-body) for the
 full field-by-field list and types) — no rule or processor can add a field
-outside that catalog. Regardless of provider, jev's `state` and the
+outside that catalog. Regardless of provider, `systemone`'s `state` and the
 chat-compiled request carry the identical payload for a given field
 selection: `from.address` is capped at 200 characters, `from.display_name`
 at 100, `subject`/`list_id` at 200, up to 5 deduplicated recipient

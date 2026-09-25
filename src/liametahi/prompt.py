@@ -26,9 +26,9 @@ processor's answer also requires `value_probability`/
 `.confidence` — never a bare self-reported `confidence` number, on any
 backend (see that function's docstring for why). `noul`'s `value` is
 already the resolved probability, so it never gets these extra fields or
-a `.confidence` at all, on any backend — `provider: jev` behaves exactly
-the same way (see `classifier/jev.py`).
-`classifier/openai_compatible.py` and `classifier/anthropic.py` both
+a `.confidence` at all, on any backend — `provider: systemone` behaves
+exactly the same way (see `classifier/systemone.py`).
+`classifier/openai.py` and `classifier/anthropic.py` both
 delegate to the functions here and carry no processor-type-specific logic
 of their own.
 

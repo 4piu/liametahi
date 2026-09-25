@@ -645,7 +645,7 @@ class BodyExcerptConfig(BaseModel):
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["openai_compatible", "anthropic", "jev"]
+    provider: Literal["openai", "anthropic", "systemone"]
     base_url: str | None = None
     model: str = Field(min_length=1)
     api_key: str | None = None
@@ -655,8 +655,8 @@ class ModelConfig(BaseModel):
     # unlike the `max_*` keys this keeps a default. No upper bound is
     # enforced -- large batches measurably degrade small local models, but
     # that is guidance for the README, not something to reject outright.
-    # A `jev` model must set this to exactly 1 --
-    # jev is "one HTTP call per candidate", not a batched chat request.
+    # A `systemone` model must set this to exactly 1 -- it answers one
+    # HTTP call per candidate, not a batched chat request.
     mails_per_request: int = Field(default=10, ge=1)
     # How many of those requests may be in flight at once. Defaults to 1
     # -- fully serial, the behaviour every existing config already has --
@@ -672,25 +672,27 @@ class ModelConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_provider_requirements(self) -> Self:
-        if self.provider == "openai_compatible" and not self.base_url:
-            raise ConfigError(
-                "models: 'base_url' is required for provider 'openai_compatible'"
-            )
+        if self.provider == "openai" and not self.base_url:
+            raise ConfigError("models: 'base_url' is required for provider 'openai'")
         if self.provider == "anthropic" and not self.api_key:
             raise ConfigError("models: 'api_key' is required for provider 'anthropic'")
-        if self.provider == "jev":
+        if self.provider == "systemone":
             # A real HTTP endpoint and a
             # bearer credential, exactly like a hosted chat provider.
             if not self.base_url:
-                raise ConfigError("models: 'base_url' is required for provider 'jev'")
+                raise ConfigError(
+                    "models: 'base_url' is required for provider 'systemone'"
+                )
             if not self.api_key:
-                raise ConfigError("models: 'api_key' is required for provider 'jev'")
+                raise ConfigError(
+                    "models: 'api_key' is required for provider 'systemone'"
+                )
             if self.mails_per_request != 1:
                 raise ConfigError(
-                    "models: 'mails_per_request' must be 1 for provider 'jev': "
-                    "jev answers one candidate per HTTP call, never a batch. "
-                    "Use 'max_concurrent_requests' to raise real throughput "
-                    "instead."
+                    "models: 'mails_per_request' must be 1 for provider 'systemone': "
+                    "a systemone model answers one candidate per HTTP call, "
+                    "never a batch. Use 'max_concurrent_requests' to raise "
+                    "real throughput instead."
                 )
         return self
 
@@ -704,7 +706,7 @@ class ProcessorConfig(BaseModel):
     up to 255 entries) for `choice`, or an ordered list of level names
     (required, 2-10 entries) for `score`. `model:` alone determines how
     the question is compiled/sent (`prompt.py` for a chat provider,
-    straight through for `jev`) -- there is no separate `backend:`/
+    straight through for `systemone`) -- there is no separate `backend:`/
     `kind:` field, since `models.<name>.provider` already says this.
     """
 

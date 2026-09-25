@@ -51,8 +51,8 @@ from typing import Literal
 from liametahi import backup, evaluate, execute, policy, prompt, report, rules, state
 from liametahi.classifier import Classifier
 from liametahi.classifier.anthropic import AnthropicClassifier
-from liametahi.classifier.jev import JevClassifier
-from liametahi.classifier.openai_compatible import OpenAICompatibleClassifier
+from liametahi.classifier.openai import OpenAIClassifier
+from liametahi.classifier.systemone import SystemOneClassifier
 from liametahi.config import (
     AccountConfig,
     Config,
@@ -106,12 +106,12 @@ def default_mailbox_factory(account: AccountConfig) -> MailboxAdapter:
 def default_classifier_factory(model: ModelConfig) -> Classifier:
     """Selects the real adapter for a model's configured provider. Tests
     inject `FakeClassifier` via `classifier_factory` instead."""
-    if model.provider == "openai_compatible":
-        return OpenAICompatibleClassifier(model)
+    if model.provider == "openai":
+        return OpenAIClassifier(model)
     if model.provider == "anthropic":
         return AnthropicClassifier(model)
-    if model.provider == "jev":
-        return JevClassifier(model)
+    if model.provider == "systemone":
+        return SystemOneClassifier(model)
     raise ValueError(f"unknown model provider: {model.provider!r}")  # pragma: no cover
 
 

@@ -11,9 +11,9 @@ Chat-Completions-shaped:
 - structured output is `output_config.format` with a JSON Schema;
 - and — the trap for any shared request builder — `temperature` is
   **rejected with a 400** on current models, so this adapter must never
-  send it, unlike `openai_compatible` which may.
+  send it, unlike `openai` which may.
 
-Like `openai_compatible.py`, this adapter performs exactly one model
+Like `openai.py`, this adapter performs exactly one model
 call per `classify()` invocation and does no semantic validation of the
 response; that happens once, in `liametahi.evaluate` (see the
 `liametahi.classifier` and `liametahi.prompt` module docstrings).
@@ -84,7 +84,7 @@ class AnthropicClassifier:
         # `json_schema` is an explicit user request for validated output;
         # silently downgrading it on rejection would defeat the point of
         # pinning it, so a fixed level that gets rejected is a hard
-        # failure, exactly like `openai_compatible`'s `_levels_to_try()`
+        # failure, exactly like `openai`'s `_levels_to_try()`
         # for a non-auto configuration.
         allow_fallback = configured == "auto"
 

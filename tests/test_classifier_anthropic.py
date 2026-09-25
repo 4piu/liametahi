@@ -72,7 +72,7 @@ def _rejected_response() -> httpx.Response:
 
 def test_wrong_provider_rejected() -> None:
     cfg = ModelConfig.model_validate(
-        {"provider": "openai_compatible", "base_url": "http://x", "model": "m"}
+        {"provider": "openai", "base_url": "http://x", "model": "m"}
     )
     with pytest.raises(ValueError, match="anthropic"):
         AnthropicClassifier(cfg)
@@ -115,7 +115,7 @@ def test_max_tokens_always_sent() -> None:
 def test_temperature_is_never_sent() -> None:
     """Temperature is rejected with a 400 on current
     Anthropic models, so this adapter must never send it, unlike
-    `openai_compatible` which may."""
+    `openai` which may."""
     bodies: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -182,7 +182,7 @@ def test_fixed_json_schema_does_not_fall_back_on_rejection() -> None:
     be silently downgraded on rejection -- that would defeat the point
     of pinning it (the ladder is what `auto` means).
     A rejection here is a hard failure, mirroring
-    `openai_compatible`'s fixed-level behaviour."""
+    `openai`'s fixed-level behaviour."""
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -245,7 +245,7 @@ def test_usage_extracted_from_message() -> None:
 
 
 def test_response_content_passed_through_to_structural_parser_unvalidated() -> None:
-    """As with the openai_compatible adapter, semantic validation must
+    """As with the openai adapter, semantic validation must
     not happen here -- an unoffered processor name must survive intact
     into the returned `ClassifyOutcome` for `evaluate.py` to reject."""
 

@@ -44,7 +44,7 @@ _PROCESSOR_NAME = "newsletter-check"
 
 def _config(**model_overrides: object) -> Config:
     model: dict[str, object] = {
-        "provider": "openai_compatible",
+        "provider": "openai",
         "base_url": "http://local",
         "model": "m",
         # One mail per request, so candidate count == batch count and the
@@ -187,7 +187,7 @@ def _run(
         task="t",
         account_id=account_id,
         model_name="m",
-        provider="openai_compatible",
+        provider="openai",
         model_id="mi",
         dry_run=False,
         reevaluate=False,

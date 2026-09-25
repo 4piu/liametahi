@@ -47,19 +47,18 @@ class TransportError(Exception):
     level was rejected) after exhausting `max_retries`."""
 
 
-class OpenAICompatibleClassifier:
+class OpenAIClassifier:
     """`Classifier` implementation for Chat-Completions-shaped APIs."""
 
     def __init__(
         self, config: ModelConfig, *, client: httpx.Client | None = None
     ) -> None:
-        if config.provider != "openai_compatible":
+        if config.provider != "openai":
             raise ValueError(
-                "OpenAICompatibleClassifier requires provider='openai_compatible', "
-                f"got {config.provider!r}"
+                f"OpenAIClassifier requires provider='openai', got {config.provider!r}"
             )
         if not config.base_url:
-            raise ValueError("openai_compatible requires 'base_url'")
+            raise ValueError("openai requires 'base_url'")
         self._config = config
         self._endpoint_url = config.base_url
         headers = dict(config.extra_headers)
@@ -150,8 +149,7 @@ class OpenAICompatibleClassifier:
             )
 
         raise TransportError(
-            f"openai_compatible classify() failed at every structured-output "
-            f"level: {last_error}"
+            f"openai classify() failed at every structured-output level: {last_error}"
         ) from last_error
 
     def _levels_to_try(self) -> tuple[str, ...]:

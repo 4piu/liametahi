@@ -1,4 +1,4 @@
-"""Tests for `liametahi.classifier.openai_compatible`.
+"""Tests for `liametahi.classifier.openai`.
 
 All tests use `httpx.MockTransport`: no network, no Docker. These tests
 deliberately do *not* exercise semantic validation (unoffered rule id,
@@ -14,8 +14,8 @@ import httpx
 import pytest
 
 from liametahi.classifier import CandidatePayload, OfferedProcessor
-from liametahi.classifier.openai_compatible import (
-    OpenAICompatibleClassifier,
+from liametahi.classifier.openai import (
+    OpenAIClassifier,
     TransportError,
 )
 from liametahi.config import ModelConfig
@@ -30,7 +30,7 @@ PROCESSORS = [
 
 def _config(**overrides: object) -> ModelConfig:
     base: dict[str, object] = {
-        "provider": "openai_compatible",
+        "provider": "openai",
         "base_url": "http://local",
         "model": "m",
     }
@@ -56,8 +56,8 @@ def test_wrong_provider_rejected() -> None:
     cfg = ModelConfig.model_validate(
         {"provider": "anthropic", "model": "m", "api_key": "x"}
     )
-    with pytest.raises(ValueError, match="openai_compatible"):
-        OpenAICompatibleClassifier(cfg)
+    with pytest.raises(ValueError, match="openai"):
+        OpenAIClassifier(cfg)
 
 
 # --- Request shape ------------------------------------------------------------
@@ -70,7 +70,7 @@ def test_sends_model_messages_max_tokens_and_temperature_zero() -> None:
         captured.append(json.loads(request.content))
         return httpx.Response(200, json=_ok_body([]))
 
-    clf = OpenAICompatibleClassifier(_config(), client=_client(handler))
+    clf = OpenAIClassifier(_config(), client=_client(handler))
     clf.classify([CANDIDATE], PROCESSORS)
 
     body = captured[0]
@@ -91,7 +91,7 @@ def test_extra_headers_and_authorization_applied_to_internally_built_client() ->
     must build one carrying the configured `Authorization` bearer token
     and any `extra_headers`."""
     cfg = _config(api_key="secret-key", extra_headers={"X-Title": "liametahi"})
-    clf = OpenAICompatibleClassifier(cfg)
+    clf = OpenAIClassifier(cfg)
     headers = clf._client.headers  # noqa: SLF001 - inspecting the built client only
     assert headers["authorization"] == "Bearer secret-key"
     assert headers["x-title"] == "liametahi"
@@ -99,7 +99,7 @@ def test_extra_headers_and_authorization_applied_to_internally_built_client() ->
 
 def test_no_authorization_header_when_no_api_key() -> None:
     cfg = _config(api_key=None)
-    clf = OpenAICompatibleClassifier(cfg)
+    clf = OpenAIClassifier(cfg)
     headers = clf._client.headers  # noqa: SLF001
     assert "authorization" not in headers
 
@@ -118,7 +118,7 @@ def test_no_authorization_header_when_no_api_key() -> None:
 )
 def test_base_url_used_verbatim_as_the_endpoint(base_url: str) -> None:
     cfg = _config(base_url=base_url)
-    clf = OpenAICompatibleClassifier(cfg)
+    clf = OpenAIClassifier(cfg)
     assert clf._endpoint_url == base_url  # noqa: SLF001
 
 
@@ -134,7 +134,7 @@ def test_auto_tries_json_schema_first_and_succeeds() -> None:
         formats.append(rf["type"] if rf else None)
         return httpx.Response(200, json=_ok_body([]))
 
-    clf = OpenAICompatibleClassifier(_config(), client=_client(handler))
+    clf = OpenAIClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], PROCESSORS)
     assert outcome.structured_output_level == "json_schema"
     assert formats == ["json_schema"]
@@ -151,7 +151,7 @@ def test_auto_degrades_to_json_object_when_schema_rejected() -> None:
             return httpx.Response(400, text="schema unsupported")
         return httpx.Response(200, json=_ok_body([]))
 
-    clf = OpenAICompatibleClassifier(_config(), client=_client(handler))
+    clf = OpenAIClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], PROCESSORS)
     assert outcome.structured_output_level == "json_object"
     assert formats == ["json_schema", "json_object"]
@@ -168,7 +168,7 @@ def test_auto_degrades_all_the_way_to_prompt_only() -> None:
             return httpx.Response(400, text="unsupported")
         return httpx.Response(200, json=_ok_body([]))
 
-    clf = OpenAICompatibleClassifier(_config(), client=_client(handler))
+    clf = OpenAIClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], PROCESSORS)
     assert outcome.structured_output_level == "none"
     assert formats == ["json_schema", "json_object", None]
@@ -186,7 +186,7 @@ def test_fixed_structured_output_level_never_falls_back() -> None:
         formats.append(rf["type"] if rf else None)
         return httpx.Response(200, json=_ok_body([]))
 
-    clf = OpenAICompatibleClassifier(
+    clf = OpenAIClassifier(
         _config(structured_output="json_object"), client=_client(handler)
     )
     clf.classify([CANDIDATE], PROCESSORS)
@@ -200,9 +200,7 @@ def test_structured_output_none_sends_no_response_format() -> None:
         bodies.append(json.loads(request.content))
         return httpx.Response(200, json=_ok_body([]))
 
-    clf = OpenAICompatibleClassifier(
-        _config(structured_output="none"), client=_client(handler)
-    )
+    clf = OpenAIClassifier(_config(structured_output="none"), client=_client(handler))
     clf.classify([CANDIDATE], PROCESSORS)
     assert "response_format" not in bodies[0]
 
@@ -218,7 +216,7 @@ def test_transport_error_retried_up_to_max_retries_then_raises() -> None:
         attempts += 1
         raise httpx.ConnectError("boom", request=request)
 
-    clf = OpenAICompatibleClassifier(
+    clf = OpenAIClassifier(
         _config(max_retries=2, structured_output="json_object"),
         client=_client(handler),
     )
@@ -238,7 +236,7 @@ def test_transport_error_succeeds_after_one_retry() -> None:
             raise httpx.ConnectError("boom", request=request)
         return httpx.Response(200, json=_ok_body([]))
 
-    clf = OpenAICompatibleClassifier(
+    clf = OpenAIClassifier(
         _config(max_retries=2, structured_output="json_object"),
         client=_client(handler),
     )
@@ -261,7 +259,7 @@ def test_http_error_response_is_not_retried_at_transport_level() -> None:
         attempts_per_level[level] = attempts_per_level.get(level, 0) + 1
         return httpx.Response(400, text="rejected")
 
-    clf = OpenAICompatibleClassifier(_config(max_retries=2), client=_client(handler))
+    clf = OpenAIClassifier(_config(max_retries=2), client=_client(handler))
     with pytest.raises(TransportError):
         clf.classify([CANDIDATE], PROCESSORS)
     # Exactly one attempt per structured-output level, not (max_retries+1).
@@ -275,7 +273,7 @@ def test_usage_extracted_when_present() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_ok_body([]))
 
-    clf = OpenAICompatibleClassifier(_config(), client=_client(handler))
+    clf = OpenAIClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], PROCESSORS)
     assert outcome.input_tokens == 11
     assert outcome.output_tokens == 4
@@ -288,7 +286,7 @@ def test_usage_absent_yields_none_token_counts() -> None:
             json={"choices": [{"message": {"content": '{"results": []}'}}]},
         )
 
-    clf = OpenAICompatibleClassifier(_config(), client=_client(handler))
+    clf = OpenAIClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], PROCESSORS)
     assert outcome.input_tokens is None
     assert outcome.output_tokens is None
@@ -298,7 +296,7 @@ def test_malformed_choices_shape_yields_empty_content_not_a_crash() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": []})
 
-    clf = OpenAICompatibleClassifier(_config(), client=_client(handler))
+    clf = OpenAIClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], PROCESSORS)
     # Empty/malformed content parses as wholly invalid -- the caller
     # (evaluate.py) is responsible for the split-and-retry, not this
@@ -326,7 +324,7 @@ def test_response_content_is_passed_through_to_structural_parser_unvalidated() -
             ),
         )
 
-    clf = OpenAICompatibleClassifier(_config(), client=_client(handler))
+    clf = OpenAIClassifier(_config(), client=_client(handler))
     outcome = clf.classify([CANDIDATE], PROCESSORS)
     assert len(outcome.results) == 1
     answer = outcome.results[0].answers["never-offered-processor"]

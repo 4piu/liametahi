@@ -5,8 +5,8 @@ This validation must live exactly once, in
 the caller, never in an adapter, so it "cannot be skipped by adding a new
 adapter". These tests exercise that boundary directly against
 `FakeClassifier`, which stands in for *any* provider: the two adapter
-test files (`test_classifier_openai_compatible.py`,
-`test_classifier_anthropic.py`, `test_classifier_jev.py`) each
+test files (`test_classifier_openai.py`,
+`test_classifier_anthropic.py`, `test_classifier_systemone.py`) each
 independently show that a hostile or malformed value survives their
 transport layer untouched, and these tests show the one place that
 actually rejects it.
@@ -68,7 +68,7 @@ def _config(
     **model_overrides: object,
 ) -> Config:
     model: dict[str, object] = {
-        "provider": "openai_compatible",
+        "provider": "openai",
         "base_url": "http://local",
         "model": "m",
         "mails_per_request": 10,
@@ -105,7 +105,7 @@ def _new_run(conn: sqlite3.Connection, account_id: int) -> str:
         task="t",
         account_id=account_id,
         model_name="m",
-        provider="openai_compatible",
+        provider="openai",
         model_id="mi",
         dry_run=False,
         reevaluate=False,

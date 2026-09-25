@@ -14,7 +14,7 @@ accounts:
 
 models:
   jev-primary:
-    provider: jev
+    provider: systemone
     base_url: https://api.typesafe.ai/v1/systemone
     api_key: "${TYPESAFE_API_KEY}"
     model: jev-latest
@@ -22,7 +22,7 @@ models:
     max_concurrent_requests: 8
 
   local:
-    provider: openai_compatible
+    provider: openai
     base_url: http://127.0.0.1:8080/v1/chat/completions
     model: qwen2.5-7b-instruct
 

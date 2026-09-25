@@ -437,7 +437,7 @@ def test_run_create_finish_get_list(tmp_path: Path) -> None:
             task="inbox-cleanup",
             account_id=account_id,
             model_name="local",
-            provider="openai_compatible",
+            provider="openai",
             model_id="qwen",
             dry_run=True,
             reevaluate=False,

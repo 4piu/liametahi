@@ -47,20 +47,24 @@ object forbids unknown fields).
 
 | Key | Type | Description | Default |
 | --- | --- | --- | --- |
-| `provider` * | string: `openai_compatible` \| `anthropic` \| `jev` | Which adapter handles this model | — |
-| `base_url` * | string (URL) | Required for `openai_compatible`/`jev`; the complete endpoint URL, posted to as-is | — |
+| `provider` * | string: `openai` \| `anthropic` \| `systemone` | Which adapter handles this model | — |
+| `base_url` * | string (URL) | Required for `openai`/`systemone`; the complete endpoint URL, posted to as-is | — |
 | `model` * | non-empty string | The provider's model identifier | — |
-| `api_key` | string or unset | Required for `anthropic`/`jev`; optional for a local `openai_compatible` server | none |
+| `api_key` | string or unset | Required for `anthropic`/`systemone`; optional for a local `openai` server | none |
 | `extra_headers` | map of string to string | Extra HTTP headers merged into every request | `{}` |
-| `structured_output` | string: `auto` \| `json_schema` \| `json_object` \| `none` | Ignored for `jev`, which has no separate structured-output negotiation | `auto` |
-| `mails_per_request` | integer, ≥ 1 | Batch size per classification call. **Must be exactly `1` for `jev`** — enforced at load time | `10` |
+| `structured_output` | string: `auto` \| `json_schema` \| `json_object` \| `none` | Ignored for `systemone`, which has no separate structured-output negotiation | `auto` |
+| `mails_per_request` | integer, ≥ 1 | Batch size per classification call. **Must be exactly `1` for `systemone`** — enforced at load time | `10` |
 | `max_concurrent_requests` | integer, ≥ 1 | Classification requests in flight at once — the main speed lever | `1` |
 | `timeout_seconds` | integer, > 0 (seconds) | Per-request HTTP timeout | `45` |
-| `max_retries` | integer, ≥ 0 | Transport-error retries; `jev` also retries `429`/`529` | `2` |
+| `max_retries` | integer, ≥ 0 | Transport-error retries; `systemone` also retries `429`/`529` | `2` |
 | `body_excerpt.format` | string: `plain_text_excerpt` | The **only** value currently supported — reserved for future formats, not a live choice today | `plain_text_excerpt` |
 | `body_excerpt.max_chars` | integer, > 0, or unset | Truncate each body excerpt to this many characters. `0` is rejected; omit the key entirely for no limit | none (no limit) |
 
-OpenRouter is `provider: openai_compatible` with
+`provider: systemone` targets the `POST /v1/systemone` wire protocol —
+TypeSafe AI's Jev is the reference implementation, but any service
+speaking the same request/response shape at its own `base_url` works.
+
+OpenRouter is `provider: openai` with
 `base_url: https://openrouter.ai/api/v1/chat/completions` and `model` set to
 its namespaced id (`vendor/model`).
 
@@ -151,7 +155,7 @@ avoid patterns vulnerable to catastrophic backtracking, since these run
 against sender-controlled input.
 
 A `processor:` atom's `.confidence` resolves for a `choice`/`score`
-processor on any backend — `jev` populates it natively; a chat-backed
+processor on any backend — `systemone` populates it natively; a chat-backed
 processor is asked for the chosen answer's own probability and the
 runner-up's, and the gap between them becomes `.confidence`, rather than
 a bare self-reported number. It's never valid at all against a `noul`
@@ -236,8 +240,9 @@ the wider payload shape.
 ## Chaining tasks together
 
 A rule's `task:<id>` action hands a candidate to another task's pool
-without any mailbox mutation. This is how a cheap, unconditional first pass
-(often `jev`) can resolve the common case outright and route only the
-uncertain remainder to a slower, more expensive processor. A task may omit
+without any mailbox mutation. This is how a cheap, unconditional first
+pass (often `provider: systemone`) can resolve the common case outright
+and route only the uncertain remainder to a slower, more expensive
+processor. A task may omit
 `source_mailboxes` if its whole pool arrives this way — but it must be
 reachable from somewhere, or `config check` rejects it.

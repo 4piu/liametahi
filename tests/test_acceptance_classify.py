@@ -33,7 +33,7 @@ def _config(instructions: str) -> Config:
             "accounts": {"a": {"host": "h", "username": "u", "password": "p"}},
             "models": {
                 "m": {
-                    "provider": "openai_compatible",
+                    "provider": "openai",
                     "base_url": "http://local",
                     "model": "m",
                 }
@@ -75,7 +75,7 @@ def _run(conn: sqlite3.Connection, account_id: int) -> str:
         task="t",
         account_id=account_id,
         model_name="m",
-        provider="openai_compatible",
+        provider="openai",
         model_id="mi",
         dry_run=False,
         reevaluate=False,
